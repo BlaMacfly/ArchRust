@@ -32,19 +32,8 @@ use winit::keyboard::KeyCode;
 
 /// Distance de ramassage (le serveur accepte 2000 unités, depuis la destination de la marche).
 const PICKUP_RANGE: f32 = 1800.0;
-/// Durée d'affichage d'un chiffre de dégâts.
-const FLOATER_LIFE: f32 = 1.6;
 /// Délai avant de pouvoir redemander la résurrection ou le même ramassage.
 const RETRY: Duration = Duration::from_secs(4);
-
-/// Chiffre ou mot affiché au-dessus d'un personnage (dégâts, raté, niveau…).
-struct Floater {
-    cid: i32,
-    text: String,
-    color: Color32,
-    big: bool,
-    born: Instant,
-}
 
 /// Objet au sol et son modèle (`FIELD_DFF` de `ItemTemplateAll.ini`).
 struct Loot {
@@ -69,7 +58,6 @@ pub struct CombatGlue {
     /// PV et maximum lus dans la vue d'un personnage, appliqués à l'entité une fois créée.
     view_stats: HashMap<i32, (Option<i32>, Option<i32>)>,
     ground: HashMap<i32, Loot>,
-    floaters: Vec<Floater>,
     /// Objet vers lequel le joueur marche pour le ramasser.
     pickup: Option<i32>,
     /// Ramassages envoyés, en attente de la réponse.
@@ -83,7 +71,6 @@ pub struct CombatGlue {
 /// Ce que la fenêtre egui dessine : textes projetés à l'écran (points egui).
 #[derive(Default)]
 pub struct CombatView {
-    floaters: Vec<(Pos2, String, Color32, f32, f32)>,
     labels: Vec<(Pos2, String, Color32)>,
     dead: bool,
     can_resurrect: bool,
@@ -172,17 +159,6 @@ fn hit_line(by_me: bool, on_me: bool, actor: &str, target: &str, result: Option<
     Some(format!("[combat] {text}"))
 }
 
-/// Texte flottant d'un coup : chiffre des dégâts ou mot du résultat, et s'il est grossi (critique).
-fn floater_text(result: Option<i8>, damage: Option<i32>) -> Option<(String, bool)> {
-    Some(match result {
-        Some(outcome::SUCCESS) => (format!("-{}", damage?), false),
-        Some(outcome::CRITICAL) => (format!("-{} !", damage?), true),
-        Some(outcome::MISS) => ("Raté".into(), false),
-        Some(outcome::EVADE) => ("Esquive".into(), false),
-        Some(outcome::BLOCK) => ("Bloqué".into(), false),
-        _ => return None,
-    })
-}
 
 impl App {
     fn combat_me(&self) -> i32 {
@@ -210,12 +186,6 @@ impl App {
         let assets = &self.assets;
         let t = *self.combat.types.entry(tid).or_insert_with(|| character_type(assets, tid));
         t & ATTACKABLE_TYPE == ATTACKABLE_TYPE
-    }
-
-    fn combat_float(&mut self, cid: i32, text: String, color: Color32, big: bool) {
-        self.combat.floaters.push(Floater { cid, text, color, big, born: Instant::now() });
-        let excess = self.combat.floaters.len().saturating_sub(40);
-        self.combat.floaters.drain(..excess);
     }
 
     /// Relevé des événements avant leur traitement par `on_world_event` (statuts de mort, vues,
@@ -254,7 +224,6 @@ impl App {
                 self.combat.dead.remove(cid);
                 self.combat.corpses_in_view.remove(cid);
                 self.combat.view_stats.remove(cid);
-                self.combat.floaters.retain(|f| f.cid != *cid);
                 if self.combat.attacking == Some(*cid) {
                     self.combat.attacking = None;
                 }
@@ -331,7 +300,7 @@ impl App {
         }
     }
 
-    /// Coup reçu sur le canal 0x41 : PV, messages, chiffres flottants, animations, AddOns.
+    /// Coup reçu sur le canal 0x41 : PV, messages, chiffres et mentions (`app_boards.rs`), animations, AddOns.
     pub(super) fn on_combat_action(&mut self, ev: WorldEvent) {
         let WorldEvent::CharacterAction { cid, target_cid, result, factors, target_hp, damage, .. } = ev else {
             return;
@@ -384,16 +353,8 @@ impl App {
                 a.play_once(&assets, AnimType::Hit);
             }
         }
-        if let Some((text, big)) = floater_text(result, damage) {
-            let color = if on_me {
-                Color32::from_rgb(255, 80, 60)
-            } else if by_me {
-                Color32::from_rgb(255, 230, 120)
-            } else {
-                Color32::from_rgb(210, 210, 210)
-            };
-            self.combat_float(target_cid, text, color, big);
-        }
+        // Chiffres et mentions d'Archonia au-dessus de la cible (voir `app_boards.rs`).
+        self.boards_on_hit(cid, target_cid, result, factors.as_ref(), damage);
         let (actor, target) = (self.combat_name(cid), self.combat_name(target_cid));
         if let Some(line) = hit_line(by_me, on_me, &actor, &target, result, damage, hp) {
             self.ui.push_chat(line);
@@ -470,7 +431,6 @@ impl App {
                     let level = self.hud.stats.level.unwrap_or(0);
                     self.ui.push_chat(format!("[système] Vous passez au niveau {level} !"));
                     self.hud.push_system(&format!("Niveau {level} atteint !"));
-                    self.combat_float(me, format!("Niveau {level} !"), Color32::from_rgb(120, 220, 255), true);
                     self.addons.fire("PLAYER_LEVEL_UP", level);
                 } else {
                     let name = self.combat_name(cid);
@@ -721,7 +681,7 @@ impl App {
         }
     }
 
-    /// Chaque image, avant la simulation : PV des vues, morts, marche vers un objet, chiffres.
+    /// Chaque image, avant la simulation : PV des vues, morts, marche vers un objet.
     pub(super) fn combat_frame(&mut self) {
         // PV et maximum de la vue, une fois l'entité créée par `on_world_event`.
         let pending: Vec<i32> = self.combat.view_stats.keys().copied().collect();
@@ -771,7 +731,6 @@ impl App {
         }
         let now = Instant::now();
         self.combat.requested.retain(|_, t| now.duration_since(*t) < RETRY * 2);
-        self.combat.floaters.retain(|f| now.duration_since(f.born).as_secs_f32() < FLOATER_LIFE);
         if let Some(cid) = self.combat.attacking {
             if !self.entities.iter().any(|e| e.cid == cid) {
                 self.combat.attacking = None;
@@ -807,24 +766,6 @@ impl App {
             (c.w > 1e-3 && c.z / c.w <= 1.0).then(|| Pos2::new(((c.x / c.w) + 1.0) * 0.5 * w, (1.0 - c.y / c.w) * 0.5 * h))
         };
         let me = self.combat_me();
-        let mut stack: HashMap<i32, usize> = HashMap::new();
-        for f in self.combat.floaters.iter().rev() {
-            let pos = if f.cid == me {
-                self.player.as_ref().map(|p| p.position)
-            } else {
-                self.entities.iter().find(|e| e.cid == f.cid).map(|e| e.position)
-            };
-            let Some(pos) = pos else { continue };
-            let age = f.born.elapsed().as_secs_f32();
-            let n = stack.entry(f.cid).or_default();
-            let lift = 200.0 + age * 60.0;
-            if let Some(p) = to_screen(pos + Vec3::Y * lift) {
-                let alpha = (1.0 - (age / FLOATER_LIFE).powi(2)).clamp(0.0, 1.0);
-                let size = if f.big { 26.0 } else { 19.0 };
-                view.floaters.push((p - Vec2::new(0.0, *n as f32 * 18.0), f.text.clone(), f.color, size, alpha));
-            }
-            *n += 1;
-        }
         let player_pos = self.player.as_ref().map(|p| p.position);
         for l in self.combat.ground.values() {
             let pos = Vec3::new(l.item.position.x, l.ground_y.unwrap_or(l.item.position.y) + 45.0, l.item.position.z);
@@ -854,7 +795,7 @@ fn send_resurrect(net: &NetLink, glue: &mut CombatGlue, ui: &mut UiState) {
     ui.push_chat("[combat] Résurrection au village demandée.");
 }
 
-/// Dessin egui : chiffres de dégâts, noms des objets au sol, fenêtre de résurrection. Fonction libre :
+/// Dessin egui : noms des objets au sol, fenêtre de résurrection. Fonction libre :
 /// appelée dans la fermeture egui, qui n'emprunte que certains champs de l'application.
 pub fn panel(
     ctx: &egui::Context,
@@ -870,12 +811,6 @@ pub fn panel(
         let font = FontId::proportional(12.0);
         painter.text(*pos + Vec2::splat(1.0), Align2::CENTER_BOTTOM, text, font.clone(), Color32::from_black_alpha(200));
         painter.text(*pos, Align2::CENTER_BOTTOM, text, font, *color);
-    }
-    for (pos, text, color, size, alpha) in &view.floaters {
-        let font = FontId::proportional(*size);
-        let a = (alpha * 255.0) as u8;
-        painter.text(*pos + Vec2::splat(2.0), Align2::CENTER_BOTTOM, text, font.clone(), Color32::from_black_alpha((alpha * 220.0) as u8));
-        painter.text(*pos, Align2::CENTER_BOTTOM, text, font, Color32::from_rgba_unmultiplied(color.r(), color.g(), color.b(), a));
     }
     if view.dead && crate::hud::draw_resurrection(ctx, hud, assets, view.can_resurrect) {
         match net {
@@ -899,11 +834,4 @@ mod tests {
         assert_eq!(hit_line(false, false, "A", "B", Some(outcome::SUCCESS), Some(3), Some(1)), None);
     }
 
-    #[test]
-    fn textes_flottants() {
-        assert_eq!(floater_text(Some(outcome::SUCCESS), Some(7)), Some(("-7".into(), false)));
-        assert_eq!(floater_text(Some(outcome::CRITICAL), Some(20)), Some(("-20 !".into(), true)));
-        assert_eq!(floater_text(Some(outcome::MISS), None), Some(("Raté".into(), false)));
-        assert_eq!(floater_text(Some(outcome::SUCCESS), None), None);
-    }
 }

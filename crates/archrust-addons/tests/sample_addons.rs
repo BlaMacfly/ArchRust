@@ -135,7 +135,8 @@ fn archace_and_helloarch_run() {
     mgr.shutdown();
     let saved = std::fs::read_to_string(tmp.path().join("sv/ArchAce.lua")).unwrap();
     assert!(saved.contains("ArchAceDB = {"), "{saved}");
-    assert!(saved.contains("plates = false"), "{saved}");
+    // Plaques désactivées : c'est la valeur par défaut (le moteur dessine les noms), donc non enregistrée.
+    assert!(!saved.contains("plates"), "{saved}");
     assert!(saved.contains("theme = \"ambre\""), "{saved}");
     assert!(!saved.contains("fov = 55"), "valeur par défaut retirée : {saved}");
     let hello = std::fs::read_to_string(tmp.path().join("sv/HelloArch.lua")).unwrap();

@@ -57,6 +57,9 @@ mod portal_glue;
 #[path = "app_guild.rs"]
 mod guild_glue;
 
+#[path = "app_boards.rs"]
+mod boards_glue;
+
 /// Configuration du client.
 #[derive(Debug, Clone)]
 pub struct Config {
@@ -196,6 +199,8 @@ pub struct App {
     portal: portal_glue::PortalGlue,
     /// Guilde : fenêtres d'Archonia, invitations, discussion de guilde, voir `app_guild.rs`.
     guild: guild_glue::GuildGlue,
+    /// Panneaux au-dessus des personnages : noms, guildes, dégâts, voir `app_boards.rs`.
+    boards: boards_glue::BoardsGlue,
 }
 
 impl App {
@@ -298,6 +303,7 @@ impl App {
             skills: Default::default(),
             portal: Default::default(),
             guild: Default::default(),
+            boards: Default::default(),
         })
     }
 
@@ -1740,6 +1746,8 @@ impl App {
             _ if self.party_slash(cmd, arg) => {}
             // Discussion /G, /P, /N et guilde : /guilde, /ginviter, /gquitter… (voir `app_guild.rs`).
             _ if self.guild_slash(cmd, arg) => {}
+            // Panneaux au-dessus des personnages : /panneau (coup simulé, voir `app_boards.rs`).
+            _ if self.boards_slash(cmd, arg) => {}
             // Comme Archonia : une commande inconnue du client part au serveur dans la discussion,
             // qui traite les commandes MJ (`/create`, `/money`, `/move`… d'ArchCore) ou répond.
             _ if self.net.is_some() => {
@@ -2082,8 +2090,10 @@ impl App {
         self.save_options_if_needed(false);
         // Fenêtre du groupe (`app_party.rs`) : membres, PV, cible.
         let party_view = self.party_view();
-        // Combat : chiffres de dégâts, objets au sol, fenêtre de résurrection.
+        // Combat : objets au sol, fenêtre de résurrection.
         let combat_view = self.combat_view();
+        // Noms, guildes, chiffres de dégâts et mentions au-dessus des personnages (`app_boards.rs`).
+        let boards_view = self.boards_view();
         let loot_items = self.combat_draw_items();
         // Objets portés (fenêtre du personnage, voir `app_items.rs`).
         let equipped = self.items_equipped();
@@ -2210,6 +2220,8 @@ impl App {
                         Vec3::new(f.x, 0.0, f.z).normalize_or_zero()
                     },
                 };
+                // Panneaux d'Archonia au-dessus des personnages, sous le HUD.
+                boards_glue::panel(ctx, &mut self.boards, &boards_view, &mut self.hud, &self.assets);
                 crate::hud::draw(ctx, &mut self.hud, &self.assets, &hud_scene);
                 // Les panneaux natifs sont des frames pilotables par les AddOns
                 // (`ChatFrame1:Hide()`, `ArchRustInfoFrame:Hide()`…).

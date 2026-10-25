@@ -14,7 +14,9 @@ _G.ArchAce = ArchAce
 
 local defaults = {
   profile = {
-    plates = true,
+    -- Plaques Lua (Nameplates.lua) désactivées par défaut : le moteur dessine les noms d'Archonia
+    -- (AgcmIDBoard) ; `/aace plates on` les remet.
+    plates = false,
     unitFrames = true,
     theme = "defaut",
     fov = 55,

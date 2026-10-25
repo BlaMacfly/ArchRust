@@ -421,6 +421,126 @@ d'abord). Restent en egui :
   (touche `) ;
 - les fenêtres de secours, quand les données d'interface manquent.
 
+## Panneaux au-dessus des personnages
+
+Établi sur Archonia.exe (sha256 e9c7609b…) ; implémenté dans `engine/src/boards.rs` (calculs,
+tests) et `engine/src/app_boards.rs` (état du jeu, dessin egui sous le HUD). Le gestionnaire
+`AgcmTextBoardMng` (objet `0x140f9bd88`, initialisé par `FUN_140561ec0`) lit `ini/TextBoard.ini`
+(`FUN_140562e10`) dans `texture/ui` :
+
+| Section | Rangement | Contenu |
+| --- | --- | --- |
+| `Textures1`, `Textures2` | `+0x1cd0`, `+0x1d18` | cadres et queues des bulles de discussion (`TB_*.tif`) |
+| `Textures3` | `+0x1de0` | `DM_NUMBER.png` (256 × 32, « 1234567890 ») |
+| `Textures4` | `+0x1d30 + 8·n` | `IM_miss`, `IM_critical`, `IM_block`, `IM_levup`, `IM_evade`, `IM_dodge`, `IM_reflex`, `IM_attack`, `IM_charismaup1-3` |
+| `Textures5` | `+0x1dc0` | `HP_Blank`, `HP_Bar`, `MP_Bar` |
+| `Texture6` | `+0x1d88` | marques `TAG_*` à droite du nom (PC bang, PK, attaque, hors-la-loi 1-3, expédition) |
+| `Texture7`, `Texture8` | `+0x1ca8`, `+0x1dd8` | emblèmes de guilde, `GoMark.png` |
+| `Texture9`, `Texture10` | vecteur `+0x1df0`, `+0x1de8` | titres de charisme et rangs, `WantedCriminalAlarm.png` |
+
+![Noms](captures/panneaux-noms.png)
+
+### Panneau d'identité (`AgcmIDBoard`)
+
+Création `FUN_140563f90`, dessin `FUN_1408270a0` → `FUN_140825a20` (nom) et `FUN_140824b20`
+(guilde).
+
+- **Ancre** : position du personnage avancée de `DEPTH` et relevée de `HEIGHT` × échelle (plus le
+  `RIDER_HEIGHT` de la monture), colonnes de `charactertemplateclient.ini` (`+0x90`, `+0x94`,
+  `+0x9c` du gabarit, écrivain `FUN_14050db50`) ; projection `FUN_140561300`.
+- **Police** : police n° 0 d'AgcmFont (`FUN_1404ed830`), « Georgia » 11 pour l'anglais, l'allemand,
+  le français et l'espagnol (`FUN_1401417b0`), « 굴림 » 13 en coréen. Ombre d'un pixel, alpha au
+  plus 0xB8 (`FUN_1404f0f80`). Les couleurs de police sont en `0xAABBGGRR`.
+- **Nom** : centré (`x = ancre − largeur/2`), haut à `ancre − hauteur de police`.
+- **Couleur du nom** (`board+0xEC`) : joueur blanc ; PNJ `0xFF0099FF` (#FF9900) ; monstre la
+  colonne `name_color` du gabarit public (`CharacterTemplatePublic.ini`, absente de ce client,
+  donc `0xFFFFFF`, rouge et bleu échangés). Puis `FUN_140827ca0` : `IDColor_MurdererLevel1/2/3`
+  (niveau de hors-la-loi 40, 60, 100) et `IDColor_FirstAttacker` de `color.ini`, et les couleurs
+  de relation (guerre de races, champs de bataille `BG_*_NAME`, sanctuaires `SH_*_NAME`, combats
+  vert `0xFF00FF00` / rouge `0xFF0000FF`).
+- **Guilde** (`board+0x474`, `FUN_140560140`) : texte `[%s]`, ligne au-dessus du nom (haut à
+  `ancre − 2·h − 6`), centrée. Couleur (`board+0x4F0`) : celle du nom, sauf si elle est blanche ;
+  alors `FUN_140560c60` : vert clair `0xFF81FAB2` (#B2FA81), gris `0xFFA0A0A0` pour un membre en
+  demande d'adhésion ou de départ de la guilde du joueur (rangs 2 et 3), vert `0xFF009900` pour
+  une guilde alliée. Les emblèmes suivent (`FUN_14055ffb0`).
+- `board+0x501` n'est pas la guilde mais le **titre** (`FUN_1405f51f0`, couleur `FontColor` du
+  module de titres).
+
+![Guilde](captures/panneaux-guilde.png)
+
+### Chiffres de dégâts (`AgcmDmgBoard`)
+
+Création `FUN_140563930`, rendu `FUN_140822660`, mise à jour `FUN_140822b00`. Un panneau naît
+seulement si le joueur porte ou reçoit le coup (`FUN_1408202a0`), au-dessus de la cible.
+
+```text
+Table des chiffres (+0x1c00, 12 octets par chiffre d) : u gauche, u droite, largeur ; v de 0 à 1.
+  0 : 0,789 062 / 0,886 719 / 30,0     5 : 0,347 656 / 0,437 5 / 27,6
+  1 : 0 / 0,082 031 / 25,2             6 : 0,437 5 / 0,527 344 / 27,6
+  2 : 0,082 031 / 0,167 969 / 26,4     7 : 0,527 344 / 0,609 375 / 25,2
+  3 : 0,167 969 / 0,253 906 / 26,4     8 : 0,609 375 / 0,699 219 / 27,6
+  4 : 0,253 906 / 0,347 656 / 28,8     9 : 0,699 219 / 0,789 062 / 27,6
+Largeurs sur le joueur (+0x1c78) : 22,8 16,8 20,4 21,6 21,6 20,4 21,6 18,0 22,8 20,4.
+Hauteur 38,4 (31,2 sur le joueur). Chiffres de poids faible d'abord (8 au plus), dessinés de
+droite à gauche : chaque chiffre se place à x − largeur du précédent.
+Type 3, coup (résultats 5, 0xd) : 800 ms ; x = −29 + Σ ⌊l/2⌋ (−17 + Σ ⌊l'/2⌋ sur le joueur),
+  y = −55 ; ancre à hauteur + 15 + 40·t/vie ; alpha 255 puis 255 − (r − 0,5)·510.
+Type 4, critique (résultat 6) : 700 ms, blanc, y = −105 × 0,5, sans montée ;
+  r < 0,15 : alpha r·853,3 + 0,5, zoom 1,3 − 2r ; r > 0,85 : alpha 255 − (r − 0,85)·1000,
+  zoom 1 + 1,5·(r − 0,85)².
+Couleur (FUN_14055fbd0, ARGB) : blanc ; 0xFFBBB5F3 sur le joueur ; facteur 9 (physique) > 0 :
+  blanc ; l'élément le plus fort l'emporte (10 magie 9057B2, 11 eau 3286CD, 12 feu DA4D0A,
+  13 terre A06636, 14 air A2D089, 15 poison 2DD23C, 16 foudre E2BA00, 17 glace 89D0CD,
+  19 héroïque blanc). Valeur = somme des facteurs négatifs.
+```
+
+![Dégâts](captures/panneaux-degats.png)
+
+### Mentions (`AgcmImoticonBoard`)
+
+Création `FUN_140564850`, rendu `FUN_140829a10`, mise à jour `FUN_14082a670`. Type `0x212 + n`,
+image `n` de `Textures4` : raté (résultat 1), critique (6), parade (9, 0x10, 900 ms), esquives
+`evade` (7) et `dodge` (8), renvoi (0xf), attaque (0xc) ; 800 ms sinon. `0x215` (`IM_levup`)
+n'est **jamais dessiné** : le passage de niveau n'a pas de mention.
+
+- Image 64 × 64, non mise à l'échelle ; ancre à hauteur + 35, coin à (−32, −32 − 35) (−52 au
+  lieu de −32 pour critique et attaque). Fondu après la moitié de la vie :
+  `alpha = 255 − u·255`, `u = (t − vie/2) / (vie/2)`.
+- Raté, esquives, renvoi : montée de 14 px sur la vie ; au fondu, un écho rétrécit (décalage
+  19,2·u) et l'image grandit de 16·u × 8·u.
+- Critique, attaque : au fondu, l'image se brise en biais (coupe à 32 ± r en haut et 32 ∓ r en
+  bas, `r = rand() % 16`, côté `rand() & 1`) ; morceau gauche −4u / −3u, droit +8u / +6u
+  (éventail RenderWare, type 5).
+- Parade : au début du fondu, rebond horizontal d'une image à l'autre (position, vitesse 0,5,
+  borne 2 ; au dépassement borne × −1,4 et vitesse × −1,5, ± 0,3) ; puis bandes de 4 px
+  (v = y/64 à y/64 + 0,0625) décalées alternativement de ±d, d oscillant entre −5 et 5.
+
+![Mentions](captures/panneaux-mentions.png)
+
+### Dans ArchRust
+
+- Noms : tous les personnages visibles, le joueur compris ; classe joueur / PNJ (`npc.ini`) /
+  monstre. Guilde : `GuildState.links` (op 8 d'ArchCore) et rangs de la guilde du joueur.
+- Chiffres et mentions : actions 0x41 (`app_combat.rs` → `boards_on_hit`) ; facteurs 9 à 19 du
+  coup. Commande de test `/panneau <résultat> [dégâts] [facteur] [moi]`.
+- L'AddOn ArchAce garde ses plaques Lua (`Nameplates.lua`), masquées par défaut
+  (`/aace plates on`).
+
+Écarts :
+- échelle des panneaux fixée à 1 (Archonia prend le maximum de 1 et d'un facteur du moteur,
+  `+0x82c` de `0x140f8a1c0`, non identifié) ;
+- « Georgia » est lue dans `%WINDIR%\Fonts\georgia.ttf` et rendue par egui ; sa taille 11 est
+  prise comme taille egui (Archonia la passe à GDI) ; sans ce fichier, police par défaut d'egui ;
+- non gérés, faute de données d'ArchCore : couleurs de hors-la-loi et de premier attaquant,
+  relations (guerre de races, champs de bataille, combats de guildes), guildes alliées,
+  titres, marques `TAG_*`, emblèmes, charisme, monture ;
+- options d'affichage des noms d'Archonia (`+0x1e1c` soi, `+0x1e20` monstres, `+0x1e24`
+  guildes, `+0x1e30` autres) non relevées : tout est affiché ;
+- Archonia ne dessine un nom que pour un personnage rendu à l'image ; ArchRust dessine tout
+  personnage dont l'ancre est devant la caméra ;
+- les chiffres et mentions prennent l'ancre `HEIGHT` ; Archonia prend un nœud du squelette
+  quand le modèle en a un (`FUN_140822b00`, `FUN_14082a670`).
+
 ## Animations des personnages
 
 Établi sur Archonia.exe (sha256 e9c7609b…) et sur les données réelles du client ; implémenté dans
@@ -669,3 +789,4 @@ lumières, animations de `effect/clump/` et `effect/animation/`) restent à déc
 * texture `R` du secteur (128 × 128, non référencée par les matériaux) et jeu d'UV 5 ; mode de mélange exact des couches dans le pipeline D3D d'Archonia (le mélange par l'alpha du masque est déduit des données) ; secteurs à plus de deux couches ;
 * `world/octree`, `grass`, `water` ; `images/*.bm1` (BMP) ; fichiers `.syj`, `.grp`.
 * objets du monde : sens de chaque bit des drapeaux AgcmObject (seul `0x10000` = repère est établi, et seulement par les données), niveaux de détail `DFF` au-delà de 0, animations `ANIMATION`/`ANIM_SPEED` ;
+* panneaux au-dessus des personnages : facteur d'échelle `+0x82c` de `0x140f8a1c0`, valeurs par défaut des options d'affichage des noms (`+0x1e1c` à `+0x1e30` du gestionnaire), sens GDI exact de la taille 11 de « Georgia », ordre des octets des couleurs `IDColor_*` (lues sans l'échange rouge/bleu appliqué aux `BG_*_NAME`), nœud du squelette servant d'ancre aux chiffres et mentions ;

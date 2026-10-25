@@ -387,7 +387,7 @@ impl HudState {
         })
     }
 
-    fn image(
+    pub(crate) fn image(
         &mut self,
         ctx: &egui::Context,
         assets: &Assets,

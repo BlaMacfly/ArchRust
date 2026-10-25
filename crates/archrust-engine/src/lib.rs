@@ -19,6 +19,7 @@ pub mod animation;
 pub mod app;
 pub mod assets;
 pub mod audio;
+pub mod boards;
 pub mod camera;
 pub mod gltf_model;
 pub mod hud;

@@ -1,5 +1,6 @@
 -- Plaques de nom : un texte au-dessus de chaque unité en vue, placé chaque image avec
 -- ArchRust.WorldToScreen (projection du monde 3D vers l'écran). Couleur selon les PV, cible en jaune.
+-- Exemple d'AddOn, masqué par défaut : le moteur dessine nativement les noms d'Archonia.
 local ArchAce = LibStub("AceAddon-3.0"):GetAddon("ArchAce")
 
 local HEAD = 190 -- hauteur au-dessus des pieds (unités du monde)
