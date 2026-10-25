@@ -499,6 +499,9 @@ impl App {
         let (header, color, mask) = match channel {
             3 => (d.msg("Chat_Guild_Header"), 0xFFA500, MASK_GUILD),
             4 => (d.msg("Chat_Party_Header"), 0x7CFC00, MASK_PARTY),
+            // Chuchotement reçu / envoyé : WHISPER_RECV / WHISPER_SEND de color.ini (00EE90).
+            5 => (d.msg("Chat_Whisper_Header"), 0x00EE90, MASK_WHISPER),
+            6 => (d.msg("Chat_WhisperSelf_header"), 0x00EE90, MASK_WHISPER),
             _ => return None,
         };
         Some((colored(&format!("{header}[{from}] {message}"), color), mask))
@@ -523,6 +526,26 @@ impl App {
                 };
                 if let Some(net) = &self.net {
                     net.send(Command::Chat { kind, message: arg.to_string() });
+                }
+            }
+            // Chuchotement d'Archonia (sysstr 542-547) : « /w nom message », « /r message » répond au
+            // dernier qui a chuchoté ; sans message, la barre Chat_Input_Private s'ouvre sur ce nom.
+            "/w" | "/ㅈ" | "/r" => {
+                let reply = lower == "/r";
+                let (to, message) = if reply {
+                    (self.ui.last_whisper.clone().unwrap_or_default(), arg.to_string())
+                } else {
+                    let (n, m) = arg.split_once(char::is_whitespace).unwrap_or((arg, ""));
+                    (n.to_string(), m.trim().to_string())
+                };
+                if to.is_empty() {
+                    return true;
+                }
+                if message.is_empty() {
+                    self.ui.whisper_target = Some(to);
+                    self.ui.chat_focus = true;
+                } else if let Some(net) = &self.net {
+                    net.send(Command::Whisper { to, message });
                 }
             }
             "/guilde" | "/guild" => self.guild_toggle(),

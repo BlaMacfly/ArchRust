@@ -365,6 +365,8 @@ impl App {
         let channel = match event {
             "CHAT_MSG_GUILD" => 3,
             "CHAT_MSG_PARTY" => 4,
+            "CHAT_MSG_WHISPER" => 5,
+            "CHAT_MSG_WHISPER_INFORM" => 6,
             _ => 0,
         };
         let (line, mask) = match self.guild_chat_line(channel, &who, &msg) {

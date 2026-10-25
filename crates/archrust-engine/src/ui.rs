@@ -32,10 +32,16 @@ pub struct UiState {
     pub chat_tabs: Vec<(String, u16)>,
     pub chat_tab: usize,
     pub chat_input: String,
+    /// Message d'Archonia à afficher dans sa boîte « OK » (refus de création…).
+    pub alert: Option<String>,
     /// Lignes remontées à la molette dans la discussion (0 : les plus récentes).
     pub chat_scroll: usize,
     /// Donner le focus à la saisie de discussion à la prochaine image (touche Entrée).
     pub chat_focus: bool,
+    /// Destinataire de la barre de chuchotement (`Chat_Input_Private`) ; `None` : barre normale.
+    pub whisper_target: Option<String>,
+    /// Dernier joueur qui nous a chuchoté (`/r`).
+    pub last_whisper: Option<String>,
     pub console_open: bool,
     pub console_input: String,
     pub show_addons: bool,
@@ -103,8 +109,11 @@ impl Default for UiState {
             chat_tabs: Vec::new(),
             chat_tab: 0,
             chat_input: String::new(),
+            alert: None,
             chat_scroll: 0,
             chat_focus: false,
+            whisper_target: None,
+            last_whisper: None,
             console_open: false,
             console_input: String::new(),
             show_addons: false,
@@ -882,6 +891,30 @@ fn archonia_chat(
             Color32::from_rgb(255, 210, 120),
         );
     }
+    // Barre de chuchotement : champ du destinataire (`Input_ID`). Vidé puis validé, il referme la
+    // barre (`Chat_CheckNCloseInput`).
+    if let (Some(id_rect), Some(target)) = (bar.id, st.whisper_target.as_mut()) {
+        let mut close = false;
+        egui::Area::new(egui::Id::new("archonia-chat-whisper-id"))
+            .fixed_pos(id_rect.min)
+            .order(egui::Order::Middle)
+            .show(ctx, |ui| {
+                let resp = ui.add_sized(
+                    id_rect.size(),
+                    egui::TextEdit::singleline(target)
+                        .id(egui::Id::new("archonia-chat-whisper-name"))
+                        .frame(false)
+                        .font(font.clone())
+                        .text_color(Color32::from_rgb(0x00, 0xee, 0x90)),
+                );
+                if resp.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter) || i.key_pressed(egui::Key::Escape)) && target.trim().is_empty() {
+                    close = true;
+                }
+            });
+        if close {
+            st.whisper_target = None;
+        }
+    }
     egui::Area::new(egui::Id::new("archonia-chat-input"))
         .fixed_pos(bar.input.min)
         .order(egui::Order::Middle)
@@ -892,17 +925,24 @@ fn archonia_chat(
                     .id(edit_id)
                     .frame(false)
                     .font(font.clone())
-                    .text_color(Color32::WHITE)
-                    .hint_text(if typing { "" } else { "Entrée pour écrire" }),
+                    .text_color(Color32::WHITE),
             );
             if std::mem::take(&mut st.chat_focus) {
                 resp.request_focus();
             }
             if resp.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter)) {
-                if !st.chat_input.trim().is_empty() {
-                    actions.chat = Some(std::mem::take(&mut st.chat_input));
+                let text = std::mem::take(&mut st.chat_input);
+                if !text.trim().is_empty() {
+                    // En barre privée, un texte sans « / » part au destinataire.
+                    actions.chat = Some(match st.whisper_target.as_deref().map(str::trim).filter(|t| !t.is_empty()) {
+                        Some(to) if !text.starts_with('/') => format!("/w {to} {text}"),
+                        _ => text,
+                    });
                 }
                 st.chat_scroll = 0;
+            }
+            if resp.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Escape)) {
+                st.whisper_target = None;
             }
         });
 }

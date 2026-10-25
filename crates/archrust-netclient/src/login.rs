@@ -329,9 +329,7 @@ impl LoginClient {
         let ans = self.conn.expect(packet_type::LOGIN, None).await?;
         if ans.op() == Some(login_op::LOGIN_RESULT as i64) {
             let code = ans.get(10).and_then(Value::as_i64).unwrap_or(-1);
-            return Err(NetError::Server(format!(
-                "création refusée (résultat {code})"
-            )));
+            return Err(NetError::LoginResult(code));
         }
         let created = self.conn.expect(packet_type::CHARACTER, None).await?;
         let mut summary = character_summary(&created).unwrap_or(CharacterSummary {

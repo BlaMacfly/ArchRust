@@ -1079,6 +1079,16 @@ impl App {
                 NetEvent::Refused(msg) => {
                     self.ui.status = format!("refusé : {msg}");
                 }
+                NetEvent::CreateRefused { name, code } => {
+                    log::info!("création de {name} refusée (résultat {code})");
+                    self.ui.status.clear();
+                    // Messages de l'[EventMap] d'Archonia : LG_CHAR_CREATE_FAILD_SAME_NAME pour le
+                    // résultat 7, sinon LG_CHAR_CREATE_FAILD_INVALID_NAME.
+                    self.ui.alert = Some(match code {
+                        7 => "There is already a character with that name.".to_string(),
+                        _ => "This character name is not allowed. Please choose another name".to_string(),
+                    });
+                }
                 NetEvent::World(ev) => self.on_world_event(ev),
             }
         }
@@ -1412,6 +1422,22 @@ impl App {
             WorldEvent::Guild(ev) => self.on_guild_event(ev),
             // Messages système réduits à un code (banque agrandie…, voir `app_npc.rs`).
             WorldEvent::SystemCode(code) => self.npc_system_code(code),
+            WorldEvent::Chat {
+                from,
+                to,
+                message,
+                channel,
+                ..
+            } if channel == 5 || channel == 6 => {
+                // Chuchotement : le serveur renvoie aussi à l'émetteur son propre message.
+                let me = self.player.as_ref().map(|p| p.name.clone()).unwrap_or_default();
+                if !me.is_empty() && from == me && !to.is_empty() {
+                    self.addon_chat_received("CHAT_MSG_WHISPER_INFORM", &message, &to);
+                } else {
+                    self.ui.last_whisper = Some(from.clone());
+                    self.addon_chat_received("CHAT_MSG_WHISPER", &message, &from);
+                }
+            }
             WorldEvent::Chat {
                 from,
                 message,
@@ -2122,6 +2148,12 @@ impl App {
                         ui::login_background(ctx, tex);
                     }
                 }
+                // Boîte « OK » d'Archonia (refus de création…), au-dessus des écrans de connexion.
+                if let Some(text) = self.ui.alert.clone() {
+                    if crate::hud::info_box(ctx, &mut self.hud, &self.assets, &text) {
+                        self.ui.alert = None;
+                    }
+                }
                 if phase == Phase::CharacterCreate {
                     // Écran de création d'Archonia (`UI_LG_CHARCREATE`, voir `hud_login.rs`).
                     let status = self.ui.status.clone();
@@ -2182,7 +2214,7 @@ impl App {
                 // Les panneaux natifs sont des frames pilotables par les AddOns
                 // (`ChatFrame1:Hide()`, `ArchRustInfoFrame:Hide()`…).
                 if self.addons.builtin_frame("ChatFrame1").0 {
-                    let bar = crate::hud::chat_bar(ctx, &mut self.hud, &self.assets);
+                    let bar = crate::hud::chat_bar(ctx, &mut self.hud, &self.assets, self.ui.whisper_target.is_some());
                     ui::chat_panel(ctx, &mut self.ui, &mut actions, bar);
                 }
                 // Tableau de bord de développement (egui, pas une fenêtre d'Archonia) : seulement avec

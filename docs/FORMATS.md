@@ -368,8 +368,18 @@ d'interface) ; 10 s puis 1 s de fondu, huit au plus.
 ChattingEdit, 334 × 16 en 53, 5). Les lignes ne sont pas une fenêtre du fichier d'interface :
 ArchRust les dessine au-dessus de la barre (neuf lignes, 520 px de large, ombre portée, voile
 sombre au survol ou pendant la saisie, molette pour remonter). Entrée ouvre la saisie, Entrée
-envoie, Échap la quitte. `Chat_Input_Private` (chuchotement) et `UI_ChatTab_Option` (onglets) ne
-sont pas encore repris.
+envoie, Échap la quitte. `UI_ChatTab_Option` (réglage des onglets) n'est pas encore repris.
+
+**Chuchotement** — commandes d'Archonia (`sysstr` 542-547) : `/w nom message` (aussi `/W`, `/ㅈ`) et
+`/r message`, qui répond au dernier joueur ayant chuchoté. AGPMCHATTING type 5, destinataire au
+champ 5 ; le serveur renvoie le message à l'émetteur, avec le destinataire au champ 5.
+- **Affichage** : en-tête `Chat_Whisper_Header` « [Chuchotement] » à la réception,
+  `Chat_WhisperSelf_header` « [Envoyer] » à l'envoi, couleur `WHISPER_RECV`/`WHISPER_SEND` de
+  `color.ini` (00EE90), onglet Chuchotement.
+- **Barre privée** : `/w nom` sans message ouvre `Chat_Input_Private` (`Chat_Input_Prv.png`,
+  382 × 24, à l'endroit de la barre normale), avec le destinataire dans `Input_ID`. Un texte sans
+  « / » y part au destinataire ; un `Input_ID` vidé puis validé, ou Échap, revient à la barre
+  normale.
 
 **Fenêtres d'Archonia à la place d'egui (2026-10-25)** — ArchRust n'affiche que des images du
 client. Les fenêtres egui suivantes sont remplacées par leurs équivalents d'`UI_1024X768.ini` :

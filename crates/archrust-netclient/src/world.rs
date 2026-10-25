@@ -197,6 +197,8 @@ pub enum WorldEvent {
         from_cid: i32,
         channel: i8,
         from: String,
+        /// Destinataire (champ 5) : nom du joueur chuchoté, vide sur les autres canaux.
+        to: String,
         message: String,
     },
     SystemMessage(String),
@@ -295,6 +297,8 @@ pub enum Command {
     Guild(crate::guild::GuildCommand),
     /// Message sur un canal de discussion (AGPMCHATTING champ 2 : 3 guilde, 4 groupe…).
     Chat { kind: i8, message: String },
+    /// Chuchotement (AGPMCHATTING type 5) : destinataire au champ 5.
+    Whisper { to: String, message: String },
     Quit,
 }
 
@@ -666,6 +670,7 @@ pub fn translate(p: &Incoming) -> WorldEvent {
             from_cid: p.get(1).and_then(Value::as_i64).unwrap_or(0) as i32,
             channel: p.get(2).and_then(Value::as_i64).unwrap_or(0) as i8,
             from: text(p.get(4)),
+            to: text(p.get(5)),
             message: p.get(6).and_then(Value::as_bytes).map(|b| {
                 let end = b.iter().position(|&c| c == 0).unwrap_or(b.len());
                 encoding_rs::WINDOWS_1252.decode(&b[..end]).0.into_owned()
@@ -1019,6 +1024,21 @@ impl WorldClient {
         self.conn.send(main::CHATTING, &values).await
     }
 
+    /// Chuchotement à `to` : type 5, nom du destinataire au champ 5 (`Char` 49), texte en CP1252.
+    pub async fn send_whisper(&mut self, to: &str, message: &str) -> Result<(), NetError> {
+        let values = sparse(
+            main::CHATTING,
+            &[
+                (0, Value::I8(0)),
+                (1, Value::I32(self.cid)),
+                (2, Value::I8(5)),
+                (5, Value::str(to)),
+                (6, Value::Block(crate::guild::to_cp1252(message))),
+            ],
+        );
+        self.conn.send(main::CHATTING, &values).await
+    }
+
     /// Envoie un message d'AddOn (`ADDON_SEND`) si le serveur a accordé `addon-msg` ; sinon le
     /// message est abandonné (le serveur l'ignorerait de toute façon).
     pub async fn send_addon(
@@ -1120,6 +1140,7 @@ impl WorldClient {
                         Some(Command::Stop { position }) => self.send_stop(position).await,
                         Some(Command::Say(m)) => self.send_say(&m).await,
                         Some(Command::Chat { kind, message }) => self.send_chat(kind, &message).await,
+                        Some(Command::Whisper { to, message }) => self.send_whisper(&to, &message).await,
                         Some(Command::Guild(c)) => {
                             let (schema, values) = crate::guild::command_packet(&c, self.cid);
                             self.conn.send(schema, &values).await

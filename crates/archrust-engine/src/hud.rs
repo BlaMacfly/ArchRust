@@ -64,7 +64,7 @@ pub use options_ui::{draw_options, OptionsEdit, OptionsOut};
 pub use login_ui::{draw_char_create, draw_char_select, CharSlotView, CreateUi, SelectUi};
 pub use menu_ui::{draw_main_menu, MenuUi};
 pub use party_ui::{draw_party, party_face, PartyFrame, PartyFrames, PartyUi, PartyUiState};
-pub use dialogs_ui::{confirm_box, draw_bank_money, draw_buy_count, draw_split, ui_message};
+pub use dialogs_ui::{info_box, confirm_box, draw_bank_money, draw_buy_count, draw_split, ui_message};
 pub use guild_ui::{draw_guild_window, draw_message_box, GuildEdit, GuildRow, GuildUi, GuildView, PageColors};
 pub use portal_ui::{draw_buy_bank, draw_loading, draw_teleport, BuyBankView, PortalUi, TeleportRow, TeleportView};
 pub use skills_ui::{draw_quickbar, draw_skill_book, draw_trainer, BookEntry, BookView, Shortcut, SkillUi, SlotView, TrainerEntry, TrainerView};
@@ -363,7 +363,7 @@ impl HudState {
                 log::warn!("HUD : ini/UI_1024X768.ini illisible");
                 return Vec::new();
             };
-            let mut list: Vec<UiWindow> = ["UI_CharInfo", "MiniMap", "UI_Inventory", "UI_TargetInfo", "Chat_Input_Normal", "UI_Resurrection", "Character_Status", "UI_NPCDialog", "UI_NPCTrade", "UI_Bank", "QuestAccept_UI", "QuestMain_UI", "UI_Skill", "UI_SkillBuy", "UI_Teleport", "UI_BuyBank", "UI_LG_Loading", "UI_SplitItem", "UI_NPCTrade_BuyStackCount", "UI_BankConfirm", "UI_Party", "UI_SelfCharacterMenu", "UI_TargetCharacterMenu", "UI_PartyOption", "UI_LG_CHARSELECT", "UI_ConfirmDeleteChar", "UI_LG_CHARCREATE"]
+            let mut list: Vec<UiWindow> = ["UI_CharInfo", "MiniMap", "UI_Inventory", "UI_TargetInfo", "Chat_Input_Normal", "UI_Resurrection", "Character_Status", "UI_NPCDialog", "UI_NPCTrade", "UI_Bank", "QuestAccept_UI", "QuestMain_UI", "UI_Skill", "UI_SkillBuy", "UI_Teleport", "UI_BuyBank", "UI_LG_Loading", "UI_SplitItem", "UI_NPCTrade_BuyStackCount", "UI_BankConfirm", "UI_Party", "UI_SelfCharacterMenu", "UI_TargetCharacterMenu", "UI_PartyOption", "UI_LG_CHARSELECT", "UI_ConfirmDeleteChar", "UI_LG_CHARCREATE", "Chat_Input_Private"]
                 .iter()
                 .chain(GUILD_WINDOWS.iter())
                 .chain(menu_ui::MENU_WINDOWS.iter())
@@ -821,6 +821,8 @@ pub struct ChatBar {
     pub window: Rect,
     /// Contrôle `Input_Message` (type 16, ChattingEdit), où se pose la zone de saisie.
     pub input: Rect,
+    /// Champ du destinataire (`Input_ID`) de la barre de chuchotement.
+    pub id: Option<Rect>,
     pub scale: f32,
     /// Onglets de la discussion d'Archonia (`MainChat_Tab_a/b/c.png`, FUN_1407a30a0) : texture et
     /// taille d'origine, repos / survol / choisi.
@@ -830,14 +832,21 @@ pub struct ChatBar {
 /// Dessine `Chat_Input_Normal` (395 × 25, en bas à gauche en 1920 × 1080) et rend la place de sa
 /// zone de saisie. Les lignes de discussion d'Archonia ne sont pas une fenêtre du fichier
 /// d'interface : le client les dessine au-dessus de cette barre (voir `ui::chat_panel`).
-pub fn chat_bar(ctx: &egui::Context, hud: &mut HudState, assets: &Assets) -> Option<ChatBar> {
-    let w = hud
+pub fn chat_bar(ctx: &egui::Context, hud: &mut HudState, assets: &Assets, private: bool) -> Option<ChatBar> {
+    let normal = hud
         .windows(assets)
         .iter()
         .find(|w| w.name == "Chat_Input_Normal")
         .cloned()?;
+    // Barre de chuchotement `Chat_Input_Private` (382 × 24, `Chat_Input_Prv.png`) : même
+    // `UIPos` que la barre normale dans le fichier d'interface, posée au même endroit.
+    let w = if private {
+        hud.windows(assets).iter().find(|w| w.name == "Chat_Input_Private").cloned().unwrap_or_else(|| normal.clone())
+    } else {
+        normal.clone()
+    };
     let layout = Layout::new(ctx.screen_rect());
-    let origin = layout.window_origin(&w);
+    let origin = layout.window_origin(&normal);
     let window = layout.rect(origin, [0.0, 0.0], w.size);
     let painter = ctx.layer_painter(egui::LayerId::new(
         egui::Order::Background,
@@ -851,9 +860,11 @@ pub fn chat_bar(ctx: &egui::Context, hud: &mut HudState, assets: &Assets) -> Opt
         .map(|c| layout.rect(origin, c.pos, c.size))
         .unwrap_or(window);
     let tabs = ["MainChat_Tab_a.png", "MainChat_Tab_b.png", "MainChat_Tab_c.png"].map(|t| hud.image(ctx, assets, t));
+    let id = (w.name == "Chat_Input_Private").then(|| w.control("Input_ID").map(|c| layout.rect(origin, c.pos, c.size))).flatten();
     Some(ChatBar {
         window,
         input,
+        id,
         scale: layout.scale,
         tabs,
     })

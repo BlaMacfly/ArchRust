@@ -29,6 +29,9 @@ pub enum NetError {
     Timeout(String),
     #[error("serveur : {0}")]
     Server(String),
+    /// Refus du serveur de connexion (`LOGIN_RESULT`, champ 10) : 7 nom déjà pris…
+    #[error("refus du serveur de connexion (résultat {0})")]
+    LoginResult(i64),
 }
 
 /// Paquet reçu : décodé si son type est connu, sinon brut.

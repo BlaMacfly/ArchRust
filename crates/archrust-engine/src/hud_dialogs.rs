@@ -280,3 +280,40 @@ pub fn draw_bank_money(ctx: &egui::Context, hud: &mut HudState, assets: &Assets,
     }
     out.escape.then_some(false)
 }
+
+/// Boîte d'information d'Archonia (`Action=4:0` : `Common_Message_Base2.png`, un seul bouton
+/// « OK » centré) : rend `true` quand elle est fermée (clic, croix, Entrée ou Échap).
+pub fn info_box(ctx: &egui::Context, hud: &mut HudState, assets: &Assets, text: &str) -> bool {
+    const W: f32 = 412.0;
+    const H: f32 = 180.0;
+    let layout = Layout::new(ctx.screen_rect());
+    let s = layout.scale;
+    let size = Vec2::new(W, H) * s;
+    let ok = ui_message(hud, assets, "UI_Name_OK");
+    let mut closed = false;
+    egui::Area::new(egui::Id::new(("archonia-info", text)))
+        .fixed_pos(ctx.screen_rect().center() - size / 2.0)
+        .order(egui::Order::Foreground)
+        .show(ctx, |ui| {
+            let (rect, _) = ui.allocate_exact_size(size, egui::Sense::hover());
+            let painter = ui.painter().clone();
+            control_image(ctx, hud, assets, &painter, rect, [W, H], "Common_Message_Base2.png", 1.0);
+            let font = (12.0 * s).max(9.0);
+            let galley = painter.layout(text.replace("___", "\n"), FontId::proportional(font), Color32::WHITE, 311.0 * s);
+            let at = rect.min + Vec2::new(206.0, 84.0) * s - Vec2::new(galley.size().x / 2.0, galley.size().y / 2.0);
+            painter.galley(at, galley, Color32::WHITE);
+            let small = UiControl {
+                name: "info-ok".into(),
+                kind: 3,
+                size: [64.0, 17.0],
+                textures: ["A", "B", "C", "D"].iter().enumerate().map(|(i, x)| (i as u32 + 1, format!("Common_Button_Small_{x}.png"))).collect(),
+                ..Default::default()
+            };
+            let r = Rect::from_min_size(rect.min + Vec2::new(174.0, 140.0) * s, Vec2::new(64.0, 17.0) * s);
+            let label = if ok.is_empty() { "OK" } else { ok.as_str() };
+            if button(ctx, ui, hud, assets, &painter, r, &small, label, font * 0.95, true, ("archonia-info-ok", ui.id())).clicked() {
+                closed = true;
+            }
+        });
+    closed || ctx.input(|i| i.key_pressed(egui::Key::Enter) || i.key_pressed(egui::Key::Escape))
+}

@@ -59,6 +59,8 @@ pub enum NetEvent {
     CharacterDeleted(String),
     /// Refus du serveur sans fin de connexion (nom pris, création impossible…).
     Refused(String),
+    /// Création refusée par le serveur : nom demandé et code `LOGIN_RESULT`.
+    CreateRefused { name: String, code: i64 },
     World(WorldEvent),
 }
 
@@ -168,6 +170,9 @@ async fn session(
                 } => match login.create_character(&name, tid, hair, face).await {
                     Ok(created) => {
                         let _ = ev.send(NetEvent::CharacterCreated(created));
+                    }
+                    Err(NetError::LoginResult(code)) => {
+                        let _ = ev.send(NetEvent::CreateRefused { name, code });
                     }
                     Err(NetError::Server(msg)) => {
                         let _ = ev.send(NetEvent::Refused(format!("{name} : {msg}")));
