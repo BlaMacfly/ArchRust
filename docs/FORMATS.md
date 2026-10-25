@@ -380,6 +380,10 @@ champ 5 ; le serveur renvoie le message à l'émetteur, avec le destinataire au 
   382 × 24, à l'endroit de la barre normale), avec le destinataire dans `Input_ID`. Un texte sans
   « / » y part au destinataire ; un `Input_ID` vidé puis validé, ou Échap, revient à la barre
   normale.
+- **Fenêtre de guilde** : le bouton « Chuchotement » des membres (`CONTROL_24708`,
+  `Guild_Enable_Chat_Whisper`) n'est actif que pour un membre en ligne, soi compris
+  (`FUN_1408c10f0`). Le clic (`Guild_WhisperChat`, `FUN_1408c0b40` → `FUN_140787d30`) écrit
+  « `sysstr` 542 nom » suivi d'une espace dans la barre normale, qui prend la main.
 
 **Fenêtres d'Archonia à la place d'egui (2026-10-25)** — ArchRust n'affiche que des images du
 client. Les fenêtres egui suivantes sont remplacées par leurs équivalents d'`UI_1024X768.ini` :

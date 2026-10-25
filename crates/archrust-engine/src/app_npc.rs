@@ -142,7 +142,7 @@ fn bank_slot_prices(text: &str) -> Vec<i64> {
 }
 
 /// Texte d'une ligne `id=texte` de `sysstr.txt`.
-fn sysstr(assets: &Assets, id: u32) -> Option<String> {
+pub(super) fn sysstr(assets: &Assets, id: u32) -> Option<String> {
     let text = client_text(assets, "sysstr.txt");
     let key = format!("{id}=");
     text.lines().find_map(|l| l.strip_prefix(&key)).map(|t| t.trim().to_string())

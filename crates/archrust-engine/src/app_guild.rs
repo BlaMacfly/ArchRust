@@ -368,7 +368,7 @@ pub fn panel(ctx: &egui::Context, glue: &mut GuildGlue, hud: &mut HudState, asse
                 // Détail et boutons selon le membre choisi (FUN_1408c10f0, FUN_1408bfa80).
                 let mut detail = String::new();
                 let mut allow = d.msg("Guild_Join_Allow_Button_Text");
-                let (mut kick, mut invite, mut allow_on) = (false, false, false);
+                let (mut kick, mut invite, mut allow_on, mut whisper) = (false, false, false, false);
                 if let Some(s) = &selected {
                     let (race, class) = race_class(assets, &d, s.tid);
                     detail = match s.rank {
@@ -386,16 +386,16 @@ pub fn panel(ctx: &egui::Context, glue: &mut GuildGlue, hud: &mut HudState, asse
                         allow = d.msg("Guild_Leave_Allow_Button_Text");
                     }
                     invite = s.online && !s.name.eq_ignore_ascii_case(&me);
+                    // Guild_Enable_Chat_Whisper : membre en ligne, sans autre condition (FUN_1408c10f0).
+                    whisper = s.online;
                 }
                 v.texts.insert("CONTROL_5979", detail);
                 v.texts.insert("CONTROL_23938", allow);
-                for (on, c) in [(kick, "GD_Member_Button_Leave"), (invite, "CONTROL_14314"), (allow_on, "CONTROL_23938")] {
+                for (on, c) in [(kick, "GD_Member_Button_Leave"), (invite, "CONTROL_14314"), (allow_on, "CONTROL_23938"), (whisper, "CONTROL_24708")] {
                     if !on {
                         v.disabled.insert(c);
                     }
                 }
-                // Chuchotement : la discussion privée n'est pas encore dans ArchRust.
-                v.disabled.insert("CONTROL_24708");
                 v.edits.push(GuildEdit { control: "CONTROL_12329", text: &mut glue.search, password: false, max: 48, multiline: false });
             }
         }
@@ -777,6 +777,16 @@ impl App {
             ("Guild_Member", "CONTROL_14314") => {
                 if let (Some(s), Some(net)) = (self.guild_selected(), &self.net) {
                     net.send(Command::Party(PartyCommand::Invite { cid: None, name: Some(s.name) }));
+                }
+            }
+            // Guild_WhisperChat (FUN_1408c0b40, FUN_140787d30) : « sysstr 542 nom » dans la barre de
+            // discussion normale, qui prend la main.
+            ("Guild_Member", "CONTROL_24708") => {
+                if let Some(s) = self.guild_selected().filter(|s| s.online && !s.name.is_empty()) {
+                    let w = super::npc_glue::sysstr(&self.assets, 542).unwrap_or_else(|| "/w".into());
+                    self.ui.whisper_target = None;
+                    self.ui.chat_input = format!("{w} {} ", s.name);
+                    self.ui.chat_focus = true;
                 }
             }
             ("Guild_Member", "CONTROL_23938") => {
