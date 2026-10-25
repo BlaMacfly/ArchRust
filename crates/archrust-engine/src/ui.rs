@@ -3,7 +3,6 @@
 
 use archrust_addons::ui::{color_segments, Rect};
 use archrust_addons::AddonManager;
-use archrust_netclient::world::ItemRecord;
 use egui::{Align2, Color32, Pos2, Stroke};
 
 /// État des panneaux egui.
@@ -139,9 +138,21 @@ pub fn options_panel(
     language: &mut Option<String>,
     packs: &mut archrust_patch::PatchStack,
     pack_action: &mut PackAction,
+    hud: &mut crate::hud::HudState,
+    assets: &crate::assets::Assets,
 ) -> bool {
     if !st.show_options {
         return false;
+    }
+    // Fenêtres d'options d'Archonia (`Option_*`, voir `hud_options.rs`).
+    let edit = crate::hud::OptionsEdit { audio, language, languages: LANGUAGES, packs, packs_restart: st.packs_restart };
+    if let Some(out) = crate::hud::draw_options(ctx, hud, assets, edit) {
+        *pack_action = out.pack_action;
+        if out.close {
+            st.show_options = false;
+        }
+        let _ = status;
+        return out.changed;
     }
     let mut changed = false;
     let mut open = true;
@@ -304,26 +315,6 @@ fn packs_section(ui: &mut egui::Ui, restart: bool, packs: &mut archrust_patch::P
         ui.small("Ordre : packs de la communauté (patches/), puis pack officiel (free-assets/), puis données du jeu. Enregistré dans saved-variables/packs.toml.");
     });
     action
-}
-
-/// Bouton d'inventaire (nombre d'objets du sac) ; il ouvre la fenêtre d'Archonia dessinée par le HUD.
-pub fn inventory_panel(ctx: &egui::Context, st: &mut UiState, items: &[(ItemRecord, String)]) {
-    // À gauche de la minicarte du HUD, sous la ligne du bouton « Groupe ».
-    let (minimap_w, _) = crate::hud::reserved(ctx);
-    egui::Area::new(egui::Id::new("inventory-toggle"))
-        .anchor(Align2::RIGHT_TOP, [-10.0 - minimap_w, 40.0])
-        .show(ctx, |ui| {
-            if ui
-                .button(format!(
-                    "Inventaire ({})",
-                    items.iter().filter(|(i, _)| i.status == Some(2)).count()
-                ))
-                .clicked()
-            {
-                st.show_inventory = !st.show_inventory;
-            }
-        });
-    // La fenêtre elle-même est celle d'Archonia (`hud::draw_inventory`).
 }
 
 impl UiState {
@@ -693,122 +684,6 @@ fn login_panel_plain(ctx: &egui::Context, st: &mut UiState, busy: bool, actions:
         });
 }
 
-/// Cadre des fenêtres de la scène de connexion (sombre, bord orangé).
-fn scene_frame(ctx: &egui::Context) -> egui::Frame {
-    egui::Frame::window(&ctx.style())
-        .fill(Color32::from_rgba_unmultiplied(12, 8, 6, 220))
-        .stroke(Stroke::new(1.5_f32, Color32::from_rgb(200, 90, 30)))
-        .inner_margin(egui::Margin::same(12))
-}
-
-fn status_line(ui: &mut egui::Ui, status: &str) {
-    if !status.is_empty() {
-        ui.add_space(4.0);
-        ui.label(egui::RichText::new(status).color(
-            if status.starts_with("erreur") || status.contains("refus") {
-                Color32::LIGHT_RED
-            } else {
-                Color32::LIGHT_GRAY
-            },
-        ));
-    }
-}
-
-/// Écran de sélection d'Archonia : les personnages du compte sont dans la scène 3D (clic pour
-/// choisir) ; en bas, les boutons « Entrer », « Créer », « Supprimer » et « Retour »
-/// (`LG_LoginMainSelectButtonClick`, `…CreateButtonClick`, `…DeleteButtonClick`).
-pub fn character_select_panel(
-    ctx: &egui::Context,
-    st: &mut UiState,
-    busy: bool,
-    actions: &mut UiActions,
-) {
-    egui::Window::new("Sélection du personnage")
-        .anchor(Align2::CENTER_BOTTOM, [0.0, -24.0])
-        .collapsible(false)
-        .resizable(false)
-        .title_bar(false)
-        .frame(scene_frame(ctx))
-        .show(ctx, |ui| {
-            ui.horizontal(|ui| {
-                // Emplacements (trois au plus, comme `LG_Slot01…03`).
-                for (i, ch) in st.characters.iter().enumerate() {
-                    let selected = st.selected_character == Some(i);
-                    let text =
-                        egui::RichText::new(format!("{}\nniveau {}", ch.name, ch.level)).size(15.0);
-                    if ui
-                        .add_sized([150.0, 44.0], egui::SelectableLabel::new(selected, text))
-                        .clicked()
-                    {
-                        st.selected_character = Some(i);
-                    }
-                }
-                if st.characters.is_empty() {
-                    ui.label("Aucun personnage : créez-en un.");
-                }
-            });
-            ui.add_space(6.0);
-            ui.horizontal(|ui| {
-                let chosen = st
-                    .selected_character
-                    .and_then(|i| st.characters.get(i))
-                    .map(|c| c.name.clone());
-                if ui
-                    .add_enabled(
-                        !busy && chosen.is_some(),
-                        egui::Button::new("Entrer dans le monde"),
-                    )
-                    .clicked()
-                {
-                    actions.enter_character = chosen.clone();
-                }
-                if ui
-                    .add_enabled(
-                        !busy && st.characters.len() < 3,
-                        egui::Button::new("Créer un personnage"),
-                    )
-                    .clicked()
-                {
-                    actions.open_creation = true;
-                }
-                if ui
-                    .add_enabled(!busy && chosen.is_some(), egui::Button::new("Supprimer"))
-                    .clicked()
-                {
-                    st.delete_confirm = chosen.clone();
-                }
-                if ui.add_enabled(!busy, egui::Button::new("Retour")).clicked() {
-                    actions.back_to_login = true;
-                }
-                if busy {
-                    ui.spinner();
-                }
-            });
-            status_line(ui, &st.status);
-        });
-    // Confirmation de suppression (`LG_QUESTION_REMOVE_SELECTED_CHARACTER`).
-    if let Some(name) = st.delete_confirm.clone() {
-        egui::Window::new("Supprimer le personnage")
-            .anchor(Align2::CENTER_CENTER, [0.0, 0.0])
-            .collapsible(false)
-            .resizable(false)
-            .frame(scene_frame(ctx))
-            .show(ctx, |ui| {
-                ui.label(format!("Supprimer définitivement {name} ?"));
-                ui.add_space(6.0);
-                ui.horizontal(|ui| {
-                    if ui.button("Supprimer").clicked() {
-                        actions.delete_character = Some(name.clone());
-                        st.delete_confirm = None;
-                    }
-                    if ui.button("Annuler").clicked() {
-                        st.delete_confirm = None;
-                    }
-                });
-            });
-    }
-}
-
 /// Modèle de base proposé à la création (paquet CHARACTER reçu à l'entrée de l'écran).
 #[derive(Debug, Clone, PartialEq)]
 pub struct CreationTemplate {
@@ -848,138 +723,6 @@ impl CreationUi {
             self.face = 0;
             self.hair = 0;
         }
-    }
-}
-
-fn cycle(value: &mut i32, count: i32, step: i32) {
-    if count > 0 {
-        *value = (*value + step).rem_euclid(count);
-    }
-}
-
-/// Écran de création d'Archonia (`UI_LG_CHARCREATE`) : boutons de race et de classe, visage et
-/// coiffure précédents / suivants, rotation, zoom, nom, « Créer » et « Annuler »
-/// (`CreateCharacter_OnSelectRace…`, `…OnBtnSelectHeadPrev/Next`, `LG_RotateLeftStart`,
-/// `LG_ToggleZoom`, `LG_CharacterCreateOK`, `LG_CharacterCreateCancel`).
-pub fn character_create_panel(
-    ctx: &egui::Context,
-    st: &mut UiState,
-    busy: bool,
-    actions: &mut UiActions,
-) {
-    let Some(c) = st.creation.as_mut() else {
-        return;
-    };
-    egui::Window::new("Création du personnage")
-        .anchor(Align2::LEFT_CENTER, [24.0, 0.0])
-        .collapsible(false)
-        .resizable(false)
-        .frame(scene_frame(ctx))
-        .show(ctx, |ui| {
-            ui.set_width(280.0);
-            ui.label(egui::RichText::new("Race").strong());
-            ui.horizontal_wrapped(|ui| {
-                for race in crate::login_settings::RACES {
-                    let available = c.templates.iter().any(|t| t.race == race);
-                    let r = ui.add_enabled(
-                        available,
-                        egui::SelectableLabel::new(
-                            c.race == race,
-                            crate::login_settings::race_label(race),
-                        ),
-                    );
-                    if r.clicked() {
-                        c.select_race(race);
-                    }
-                }
-            });
-            ui.add_space(6.0);
-            ui.label(egui::RichText::new("Classe").strong());
-            ui.horizontal_wrapped(|ui| {
-                let race = c.race;
-                let mut chosen = None;
-                for (i, t) in c
-                    .templates
-                    .iter()
-                    .enumerate()
-                    .filter(|(_, t)| t.race == race)
-                {
-                    if ui
-                        .add(egui::SelectableLabel::new(c.template == i, &t.class_name))
-                        .clicked()
-                    {
-                        chosen = Some(i);
-                    }
-                }
-                if let Some(i) = chosen {
-                    c.template = i;
-                    c.face = 0;
-                    c.hair = 0;
-                }
-            });
-            ui.add_space(6.0);
-            let (faces, hairs) = c
-                .current()
-                .map(|t| (t.face_count, t.hair_count))
-                .unwrap_or((0, 0));
-            egui::Grid::new("customize").num_columns(4).show(ui, |ui| {
-                ui.label("Visage");
-                if ui.button("◀").clicked() {
-                    cycle(&mut c.face, faces, -1);
-                }
-                ui.label(format!("{} / {}", c.face + 1, faces.max(1)));
-                if ui.button("▶").clicked() {
-                    cycle(&mut c.face, faces, 1);
-                }
-                ui.end_row();
-                ui.label("Coiffure");
-                if ui.button("◀").clicked() {
-                    cycle(&mut c.hair, hairs, -1);
-                }
-                ui.label(format!("{} / {}", c.hair + 1, hairs.max(1)));
-                if ui.button("▶").clicked() {
-                    cycle(&mut c.hair, hairs, 1);
-                }
-                ui.end_row();
-                ui.label("Tourner");
-                if ui.button("⟲").clicked() {
-                    c.rotate -= 30.0;
-                }
-                if ui.button("⟳").clicked() {
-                    c.rotate += 30.0;
-                }
-                ui.checkbox(&mut c.zoom, "Zoom");
-                ui.end_row();
-            });
-            ui.add_space(6.0);
-            ui.horizontal(|ui| {
-                ui.label("Nom");
-                ui.add(egui::TextEdit::singleline(&mut c.name).desired_width(200.0));
-            });
-            ui.add_space(8.0);
-            ui.horizontal(|ui| {
-                let name = c.name.trim().to_string();
-                let ok = !busy && !name.is_empty() && c.current().is_some();
-                if ui.add_enabled(ok, egui::Button::new("Créer")).clicked() {
-                    if let Some(t) = c.current() {
-                        actions.create_submit = Some((t.tid, name, c.face, c.hair));
-                    }
-                }
-                if ui
-                    .add_enabled(!busy, egui::Button::new("Annuler"))
-                    .clicked()
-                {
-                    actions.cancel_creation = true;
-                }
-                if busy {
-                    ui.spinner();
-                }
-            });
-        });
-    if !st.status.is_empty() {
-        egui::Area::new(egui::Id::new("creation-status"))
-            .anchor(Align2::CENTER_BOTTOM, [0.0, -30.0])
-            .show(ctx, |ui| status_line(ui, &st.status));
     }
 }
 

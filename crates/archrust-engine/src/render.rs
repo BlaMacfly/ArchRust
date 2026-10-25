@@ -126,6 +126,11 @@ pub struct Renderer {
     pub surface: wgpu::Surface<'static>,
     pub config: wgpu::SurfaceConfiguration,
     pipeline: wgpu::RenderPipeline,
+    /// Même pipeline avec les faces arrière cachées, pour les maillages skinnés (personnages et
+    /// créatures) : mode par défaut de RenderWare (`rwCULLMODECULLBACK`). Dessinées recto-verso,
+    /// les faces intérieures des vêtements se disputaient la profondeur avec les faces avant
+    /// pendant l'animation (taches noires qui clignotent).
+    pipeline_culled: wgpu::RenderPipeline,
     terrain_pipeline: wgpu::RenderPipeline,
     terrain_layout: wgpu::BindGroupLayout,
     /// Masque neutre (alpha 0) des étages de sol absents.
@@ -251,8 +256,8 @@ impl Renderer {
             bind_group_layouts: &[&globals_layout, &texture_layout, &instance_layout],
             push_constant_ranges: &[],
         });
-        let pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
-            label: Some("lit"),
+        let lit = |cull_mode: Option<wgpu::Face>| device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label: Some(if cull_mode.is_some() { "lit-culled" } else { "lit" }),
             layout: Some(&pipeline_layout),
             vertex: wgpu::VertexState {
                 module: &shader,
@@ -272,7 +277,9 @@ impl Renderer {
             }),
             primitive: wgpu::PrimitiveState {
                 topology: wgpu::PrimitiveTopology::TriangleList,
-                cull_mode: None,
+                // Sommets des clumps en ordre trigonométrique (vérifié en jeu : rien ne disparaît).
+                front_face: wgpu::FrontFace::Ccw,
+                cull_mode,
                 ..Default::default()
             },
             depth_stencil: Some(wgpu::DepthStencilState {
@@ -286,6 +293,8 @@ impl Renderer {
             multiview: None,
             cache: None,
         });
+        let pipeline = lit(None);
+        let pipeline_culled = lit(Some(wgpu::Face::Back));
         let terrain_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("terrain"),
             source: wgpu::ShaderSource::Wgsl(include_str!("terrain.wgsl").into()),
@@ -405,6 +414,7 @@ impl Renderer {
             surface,
             config,
             pipeline,
+            pipeline_culled,
             terrain_pipeline,
             terrain_layout,
             clear,
@@ -731,8 +741,15 @@ impl Renderer {
                     }
                 }
             }
+            let mut culled = false;
             pass.set_pipeline(&self.pipeline);
             for (i, item) in items.iter().enumerate() {
+                // Maillages skinnés : faces arrière cachées ; le reste reste recto-verso.
+                let want = item.mesh.skin.is_some();
+                if want != culled {
+                    culled = want;
+                    pass.set_pipeline(if culled { &self.pipeline_culled } else { &self.pipeline });
+                }
                 let (_, bg) = &self.instance_pool[i];
                 pass.set_bind_group(2, bg, &[]);
                 pass.set_vertex_buffer(0, item.mesh.vertices.slice(..));

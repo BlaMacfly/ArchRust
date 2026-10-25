@@ -380,6 +380,49 @@ pub struct Entity {
     pub meshes: Vec<(Arc<Mesh>, Mat4)>,
     pub equipment: Vec<EquipmentView>,
     pub is_player: bool,
+    /// Vitesses et allure du déplacement en cours.
+    pub speeds: Speeds,
+}
+
+/// Vitesses d'un personnage, comme Archonia : facteurs de statut 8 (marche) et 9 (course), en dixièmes
+/// d'unité par seconde. Le trajet dure `10000 / vitesse × distance` ms (`FUN_140168070`) ; une vitesse
+/// inconnue vaut 4000 en marche (`FUN_14017a750`) et 12000 en course (`FUN_14017a850`, plafond 60000).
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Speeds {
+    pub walk: i32,
+    pub run: i32,
+    /// Déplacement en cours à la course (drapeau 0x10).
+    pub fast: bool,
+}
+
+impl Default for Speeds {
+    fn default() -> Self {
+        Self { walk: 0, run: 0, fast: true }
+    }
+}
+
+impl Speeds {
+    /// Retient les vitesses connues des facteurs.
+    pub fn learn(&mut self, walk: Option<i32>, run: Option<i32>) {
+        if let Some(w) = walk {
+            self.walk = w;
+        }
+        if let Some(r) = run {
+            self.run = r;
+        }
+    }
+
+    /// Vitesse du déplacement en cours, en unités du monde par seconde.
+    pub fn units_per_second(&self) -> f32 {
+        let v = if self.fast {
+            if self.run > 0 { self.run.min(60_000) } else { 12_000 }
+        } else if self.walk > 0 {
+            self.walk
+        } else {
+            4_000
+        };
+        v as f32 / 10.0
+    }
 }
 
 /// Nom du clump de modèle associé à un TID d'objet (colonne `BASE_DFF` de ItemTemplateAll.ini).
@@ -624,6 +667,20 @@ pub fn entity_meshes(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn vitesses_comme_archonia() {
+        let mut s = Speeds::default();
+        assert_eq!(s.units_per_second(), 1200.0, "course inconnue : 12000");
+        s.fast = false;
+        assert_eq!(s.units_per_second(), 400.0, "marche inconnue : 4000");
+        s.learn(Some(2000), Some(5000));
+        assert_eq!(s.units_per_second(), 200.0, "Movement=2000");
+        s.fast = true;
+        assert_eq!(s.units_per_second(), 500.0, "MovementFast=5000");
+        s.learn(None, Some(90_000));
+        assert_eq!(s.units_per_second(), 6000.0, "plafond 60000");
+    }
 
     #[test]
     fn turn_follows_archonia_convention() {

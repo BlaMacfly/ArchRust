@@ -99,6 +99,9 @@ pub struct CharacterStats {
     pub bank_pages: Option<i8>,
     /// Points de compétence (facteurs, sous-paquet « dirt » indice 5).
     pub skill_points: Option<i32>,
+    /// Vitesses de marche et de course (facteurs de statut 8 et 9), en dixièmes d'unité par seconde.
+    pub walk_speed: Option<i32>,
+    pub run_speed: Option<i32>,
 }
 
 /// Effet actif d'une compétence sur un personnage (AGPMSKILL op 4).
@@ -157,6 +160,8 @@ pub enum WorldEvent {
         cid: i32,
         position: Vec3,
         destination: Vec3,
+        /// Drapeau 0x10 du déplacement : course (vitesse 9), sinon marche (vitesse 8).
+        fast: bool,
     },
     /// Action reçue sur le canal optimisé 0x41 (attaque, résultat et données de cible).
     CharacterAction {
@@ -360,9 +365,14 @@ pub fn decode_character_stats(bytes: &[u8]) -> Option<CharacterStats> {
         max_mp: int(&max, 1).map(|v| v as i32),
         exp,
         skill_points: crate::skills::factors_dirt(bytes, crate::skills::DIRT_SKILL_POINT),
+        walk_speed: int(&status, 8).map(|v| v as i32),
+        run_speed: int(&status, 9).map(|v| v as i32),
         ..Default::default()
     })
 }
+
+/// Drapeau de déplacement « course » (OPT_CHAR_MOVE champ 5).
+pub const MOVE_FAST: i8 = 0x10;
 
 /// Caractéristiques d'un paquet CHARACTER : facteurs (champ 7) et argent (champ 8).
 fn character_stats(p: &Incoming) -> Option<CharacterStats> {
@@ -627,6 +637,7 @@ pub fn translate(p: &Incoming) -> WorldEvent {
             cid: p.get(0).and_then(Value::as_i64).unwrap_or(0) as i32,
             position: vec3(p.get(1)).unwrap_or(Vec3::ZERO),
             destination: vec3(p.get(2)).unwrap_or(Vec3::ZERO),
+            fast: p.get(5).and_then(Value::as_i64).is_some_and(|f| f & MOVE_FAST as i64 != 0),
         },
         packet_type::OPT_CHAR_ACTION => {
             let factor_packet = match p.get(3) {
@@ -846,6 +857,7 @@ impl WorldClient {
                 cid,
                 position,
                 destination,
+                ..
             } => {
                 if let Some(character) = seen.iter_mut().find(|c| c.cid == *cid) {
                     character.position = *position;
@@ -957,12 +969,13 @@ impl WorldClient {
         Ok(events)
     }
 
-    /// Envoie un déplacement (type 0x40, format du client).
+    /// Envoie un déplacement en course (type 0x40, format du client, drapeau 0x10) : comme le déplacement
+    /// commandé d'Archonia (`FUN_1400ef010` passe la course à `FUN_140168070`).
     pub async fn send_move(&mut self, position: Vec3, destination: Vec3) -> Result<(), NetError> {
-        self.send_move_flags(position, destination, 0).await
+        self.send_move_flags(position, destination, MOVE_FAST).await
     }
 
-    /// Envoie un déplacement avec des drapeaux explicites (`0x04` arrêt, `0x08` synchronisation).
+    /// Envoie un déplacement avec des drapeaux explicites (`0x04` arrêt, `0x08` synchronisation, `0x10` course).
     pub async fn send_move_flags(
         &mut self,
         position: Vec3,

@@ -491,9 +491,15 @@ pub fn deform(binding: &SkinBinding, pose: &[HAnimSample]) -> Option<Vec<Vertex>
             nn += (*r * n) * w;
             total += w;
         }
+        // Poids renormalisés : 0,27 % des sommets du pack character ont une somme différente de 1
+        // (jusqu'à 1,5), ce qui étirait la pièce vers l'origine ou au-delà. Une normale
+        // dégénérée garde celle de la pose de bind (une normale nulle donnerait du noir).
         if total > 0.0 {
-            v.position = pp.to_array();
-            v.normal = nn.normalize_or_zero().to_array();
+            v.position = (pp / total).to_array();
+            let nn = nn.normalize_or_zero();
+            if nn != Vec3::ZERO {
+                v.normal = nn.to_array();
+            }
         }
     }
     Some(out)

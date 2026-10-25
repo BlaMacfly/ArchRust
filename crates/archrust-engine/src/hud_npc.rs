@@ -127,6 +127,9 @@ pub(super) fn button(ctx: &egui::Context, ui: &mut egui::Ui, hud: &mut HudState,
         }
     }
     if !label.is_empty() {
+        // Libellé réduit s'il dépasse le bouton (ex. « Réinitialiser les positions de l'interface »).
+        let width = painter.layout_no_wrap(label.to_string(), FontId::proportional(font), Color32::WHITE).size().x;
+        let font = if width > r.width() - 4.0 && width > 0.0 { (font * (r.width() - 4.0) / width).max(6.0) } else { font };
         shadow_text(painter, r.center(), Align2::CENTER_CENTER, label, font, if enabled { Color32::WHITE } else { Color32::GRAY });
     }
     resp

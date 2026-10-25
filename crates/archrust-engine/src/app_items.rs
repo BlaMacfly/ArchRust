@@ -181,22 +181,9 @@ pub fn panel(
 
     if let Some(iid) = glue.destroy {
         let name = items.get(&iid).map(|i| item_label(assets, i));
-        let mut answer = None;
-        egui::Window::new("Détruire un objet")
-            .collapsible(false)
-            .resizable(false)
-            .anchor(egui::Align2::CENTER_CENTER, egui::Vec2::ZERO)
-            .show(ctx, |w| {
-                w.label(format!("Détruire « {} » ? C'est définitif.", name.as_deref().unwrap_or("?")));
-                w.horizontal(|w| {
-                    if w.button("Détruire").clicked() {
-                        answer = Some(true);
-                    }
-                    if w.button("Annuler").clicked() {
-                        answer = Some(false);
-                    }
-                });
-            });
+        // Message de l'[EventMap] d'Archonia (`Action=4:1:-1:`), suivi du nom de l'objet.
+        let text = format!("Do you really want to destroy this item?___[{}]", name.as_deref().unwrap_or("?"));
+        let answer = crate::hud::confirm_box(ctx, hud, assets, ("destroy", iid), &text);
         match (answer, name) {
             (Some(true), Some(_)) => {
                 send(net, ItemCommand::Destroy(iid));
@@ -209,26 +196,9 @@ pub fn panel(
 
     if let Some((iid, mut count)) = glue.split {
         let total = items.get(&iid).and_then(|i| i.count).unwrap_or(1);
-        let mut answer = None;
-        egui::Window::new("Séparer la pile")
-            .collapsible(false)
-            .resizable(false)
-            .anchor(egui::Align2::CENTER_CENTER, egui::Vec2::ZERO)
-            .show(ctx, |w| {
-                w.horizontal(|w| {
-                    w.label("Quantité :");
-                    w.add(egui::DragValue::new(&mut count).range(1..=(total - 1).max(1)));
-                    w.label(format!("sur {total}"));
-                });
-                w.horizontal(|w| {
-                    if w.button("Séparer").clicked() {
-                        answer = Some(true);
-                    }
-                    if w.button("Annuler").clicked() {
-                        answer = Some(false);
-                    }
-                });
-            });
+        let mut n = count as i64;
+        let answer = crate::hud::draw_split(ctx, hud, assets, &mut n, (total - 1).max(1) as i64);
+        count = n.clamp(0, i32::MAX as i64) as _;
         glue.split = Some((iid, count));
         match answer {
             Some(true) if total > 1 => {
@@ -244,16 +214,8 @@ pub fn panel(
         }
     }
 
-    if glue.return_enabled {
-        let top = crate::hud::reserved(ctx).0;
-        egui::Area::new(egui::Id::new("archrust-return-scroll"))
-            .anchor(egui::Align2::CENTER_TOP, egui::Vec2::new(-top / 2.0, 8.0))
-            .show(ctx, |w| {
-                if w.button("↩ Revenir au point de départ (parchemin)").clicked() {
-                    send(net, ItemCommand::Return);
-                }
-            });
-    }
+    // Pas de bouton de retour : Archonia enregistre `Item_OpenReturnScrollUI` mais aucune fenêtre
+    // de son fichier d'interface ne l'appelle. Le retour passe par `/retour`.
 }
 
 impl App {
@@ -283,7 +245,7 @@ impl App {
             WorldEvent::ReturnPoint { enabled } => {
                 self.item_ui.return_enabled = enabled;
                 if enabled {
-                    self.ui.push_chat("[objet] Point de départ mémorisé : /retour (ou le bouton en haut) pour y revenir.");
+                    self.ui.push_chat("[objet] Point de départ mémorisé : /retour pour y revenir.");
                 }
             }
             _ => {}

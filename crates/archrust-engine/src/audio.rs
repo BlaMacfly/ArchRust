@@ -44,6 +44,11 @@ pub struct AudioSettings {
     pub effects: f32,
     /// Coupe tout sans toucher aux volumes.
     pub muted: bool,
+    /// Interrupteurs « (activé/désactivé) » de l'onglet Son d'Archonia (`OP_BGM_Enable`,
+    /// `OP_EffectSoundEnable`, `OP_EnvSoundEnable`) : coupent une piste sans toucher à son volume.
+    pub music_on: bool,
+    pub ambience_on: bool,
+    pub effects_on: bool,
 }
 
 impl Default for AudioSettings {
@@ -53,6 +58,9 @@ impl Default for AudioSettings {
             ambience: 0.5,
             effects: 0.8,
             muted: false,
+            music_on: true,
+            ambience_on: true,
+            effects_on: true,
         }
     }
 }
@@ -64,6 +72,9 @@ impl AudioSettings {
             ambience: self.ambience.clamp(0.0, 1.0),
             effects: self.effects.clamp(0.0, 1.0),
             muted: self.muted,
+            music_on: self.music_on,
+            ambience_on: self.ambience_on,
+            effects_on: self.effects_on,
         }
     }
 
@@ -451,9 +462,9 @@ impl Audio {
     pub fn set_settings(&mut self, settings: &AudioSettings) {
         self.settings = settings.clamped();
         self.music
-            .apply_volume(AudioSettings::gain(self.settings.music, self.settings.muted));
+            .apply_volume(AudioSettings::gain(self.settings.music, self.settings.muted || !self.settings.music_on));
         self.ambience
-            .apply_volume(AudioSettings::gain(self.settings.ambience, self.settings.muted));
+            .apply_volume(AudioSettings::gain(self.settings.ambience, self.settings.muted || !self.settings.ambience_on));
     }
 
     /// Musique en cours (chemin), s'il y en a une.
@@ -545,7 +556,7 @@ impl Audio {
         let Some(device) = &self.device else {
             return false;
         };
-        let gain = AudioSettings::gain(self.settings.effects, self.settings.muted);
+        let gain = AudioSettings::gain(self.settings.effects, self.settings.muted || !self.settings.effects_on);
         if gain <= 0.0 {
             return false;
         }
@@ -582,9 +593,9 @@ impl Audio {
         let dt = dt.clamp(0.0, 0.5);
         let m = &self.settings;
         self.music
-            .update(dt, AudioSettings::gain(m.music, m.muted));
+            .update(dt, AudioSettings::gain(m.music, m.muted || !m.music_on));
         self.ambience
-            .update(dt, AudioSettings::gain(m.ambience, m.muted));
+            .update(dt, AudioSettings::gain(m.ambience, m.muted || !m.ambience_on));
     }
 }
 
@@ -612,6 +623,7 @@ mod tests {
             ambience: -1.0,
             effects: 0.3,
             muted: false,
+            ..Default::default()
         }
         .clamped();
         assert_eq!((s.music, s.ambience, s.effects), (1.0, 0.0, 0.3));

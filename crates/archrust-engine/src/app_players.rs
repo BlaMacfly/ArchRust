@@ -113,6 +113,7 @@ impl App {
             meshes: Vec::new(),
             equipment: Vec::new(),
             is_player: true,
+            speeds: Default::default(),
         });
         let index = self.entities.len() - 1;
         self.reload_entity_meshes(index);

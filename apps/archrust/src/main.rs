@@ -64,7 +64,8 @@ enum Cmd {
         /// Délai avant la capture, en secondes.
         #[arg(long, default_value_t = 6.0)]
         screenshot_after: f32,
-        /// Commande exécutée à l'entrée en jeu (ex. "/goto -478000 0 -68000").
+        /// Commandes exécutées à l'entrée en jeu, séparées par `;` (ex. "/goto -478000 0 -68000") ;
+        /// `/attendre <s>` met la suite en pause, `/capture <fichier>` enregistre une capture sans quitter.
         #[arg(long)]
         exec: Option<String>,
         /// Commandes des écrans de sélection et de création, pour les tests (ex.

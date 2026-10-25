@@ -45,6 +45,26 @@ mod portal_ui;
 
 #[path = "hud_guild.rs"]
 mod guild_ui;
+
+#[path = "hud_dialogs.rs"]
+mod dialogs_ui;
+
+#[path = "hud_party.rs"]
+mod party_ui;
+
+#[path = "hud_menu.rs"]
+mod menu_ui;
+
+#[path = "hud_login.rs"]
+mod login_ui;
+
+#[path = "hud_options.rs"]
+mod options_ui;
+pub use options_ui::{draw_options, OptionsEdit, OptionsOut};
+pub use login_ui::{draw_char_create, draw_char_select, CharSlotView, CreateUi, SelectUi};
+pub use menu_ui::{draw_main_menu, MenuUi};
+pub use party_ui::{draw_party, party_face, PartyFrame, PartyFrames, PartyUi, PartyUiState};
+pub use dialogs_ui::{confirm_box, draw_bank_money, draw_buy_count, draw_split, ui_message};
 pub use guild_ui::{draw_guild_window, draw_message_box, GuildEdit, GuildRow, GuildUi, GuildView, PageColors};
 pub use portal_ui::{draw_buy_bank, draw_loading, draw_teleport, BuyBankView, PortalUi, TeleportRow, TeleportView};
 pub use skills_ui::{draw_quickbar, draw_skill_book, draw_trainer, BookEntry, BookView, Shortcut, SkillUi, SlotView, TrainerEntry, TrainerView};
@@ -234,6 +254,16 @@ pub struct HudState {
     system_messages: Vec<(String, Instant)>,
     /// Plus haut PV vu par CID : le serveur n'envoie pas le maximum des monstres.
     max_hp_seen: HashMap<i32, i32>,
+    /// Phrases de `uimessage.txt` (voir `hud_dialogs.rs`), chargées au premier besoin.
+    ui_messages: Option<HashMap<String, String>>,
+    /// Liste ouverte des menus principaux (`UI_MainMenu*`, voir `hud_menu.rs`).
+    main_menu: Option<String>,
+    /// Choix des menus principaux, traités par le moteur à l'image suivante.
+    pub menu_requests: Vec<MenuUi>,
+    /// Onglet des options (0 GFX, 1 Son, 2 Affichage, 3 Fonction, 4 Avancé) et défilement de la
+    /// liste « Avancé » (voir `hud_options.rs`).
+    pub options_tab: u8,
+    options_scroll: u16,
 }
 
 /// Cible du joueur affichée dans `UI_TargetInfo`.
@@ -333,15 +363,17 @@ impl HudState {
                 log::warn!("HUD : ini/UI_1024X768.ini illisible");
                 return Vec::new();
             };
-            let mut list: Vec<UiWindow> = ["UI_CharInfo", "MiniMap", "UI_Inventory", "UI_TargetInfo", "Chat_Input_Normal", "UI_Resurrection", "Character_Status", "UI_NPCDialog", "UI_NPCTrade", "UI_Bank", "QuestAccept_UI", "QuestMain_UI", "UI_Skill", "UI_SkillBuy", "UI_Teleport", "UI_BuyBank", "UI_LG_Loading"]
+            let mut list: Vec<UiWindow> = ["UI_CharInfo", "MiniMap", "UI_Inventory", "UI_TargetInfo", "Chat_Input_Normal", "UI_Resurrection", "Character_Status", "UI_NPCDialog", "UI_NPCTrade", "UI_Bank", "QuestAccept_UI", "QuestMain_UI", "UI_Skill", "UI_SkillBuy", "UI_Teleport", "UI_BuyBank", "UI_LG_Loading", "UI_SplitItem", "UI_NPCTrade_BuyStackCount", "UI_BankConfirm", "UI_Party", "UI_SelfCharacterMenu", "UI_TargetCharacterMenu", "UI_PartyOption", "UI_LG_CHARSELECT", "UI_ConfirmDeleteChar", "UI_LG_CHARCREATE"]
                 .iter()
                 .chain(GUILD_WINDOWS.iter())
+                .chain(menu_ui::MENU_WINDOWS.iter())
+                .chain(options_ui::OPTION_WINDOWS.iter())
                 .filter_map(|n| UiWindow::parse(&ui, pos.as_deref(), n))
                 .collect();
             // Textes fixes du client français (`ini_fr/UI_1024X768.ini`, mêmes contrôles) pour les
             // fenêtres qui les affichent tels quels.
             if let Ok(fr) = assets.table("ini_fr", "UI_1024X768.ini") {
-                for w in list.iter_mut().filter(|w| ["UI_Teleport", "UI_BuyBank", "UI_Bank"].contains(&w.name.as_str()) || GUILD_WINDOWS.contains(&w.name.as_str())) {
+                for w in list.iter_mut().filter(|w| ["UI_Teleport", "UI_BuyBank", "UI_Bank", "UI_SplitItem", "UI_NPCTrade_BuyStackCount", "UI_BankConfirm", "UI_Party", "UI_SelfCharacterMenu", "UI_TargetCharacterMenu", "UI_PartyOption", "UI_LG_CHARSELECT", "UI_ConfirmDeleteChar", "UI_LG_CHARCREATE"].contains(&w.name.as_str()) || GUILD_WINDOWS.contains(&w.name.as_str()) || menu_ui::MENU_WINDOWS.contains(&w.name.as_str()) || options_ui::OPTION_WINDOWS.contains(&w.name.as_str())) {
                     let Some(fw) = UiWindow::parse(&fr, None, &w.name) else { continue };
                     for c in &mut w.controls {
                         if let Some(d) = fw.control(&c.name).and_then(|x| x.display.clone()) {

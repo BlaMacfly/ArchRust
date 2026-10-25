@@ -33,12 +33,22 @@ struct VertexOut {
     @location(3) world_pos: vec3<f32>,
 };
 
+// normalize() d'un vecteur nul rend NaN, et un NaN propagé noircit toute la couleur (lumière
+// ambiante comprise) : vecteur nul ou NaN → normale verticale. `!(x > seuil)` couvre aussi NaN.
+fn safe_normal(n: vec3<f32>) -> vec3<f32> {
+    let len2 = dot(n, n);
+    if (!(len2 > 1e-12)) {
+        return vec3<f32>(0.0, 1.0, 0.0);
+    }
+    return n * inverseSqrt(len2);
+}
+
 @vertex
 fn vs_main(v: VertexIn) -> VertexOut {
     var out: VertexOut;
     let world = inst.model * vec4<f32>(v.position, 1.0);
     out.clip = globals.view_proj * world;
-    out.normal = normalize((inst.model * vec4<f32>(v.normal, 0.0)).xyz);
+    out.normal = safe_normal((inst.model * vec4<f32>(v.normal, 0.0)).xyz);
     out.uv = v.uv;
     out.color = v.color * inst.color;
     out.world_pos = world.xyz;
@@ -51,7 +61,7 @@ fn fs_main(in: VertexOut) -> @location(0) vec4<f32> {
     if (tex.a * in.color.a < 0.3) {
         discard;
     }
-    let n = normalize(in.normal);
+    let n = safe_normal(in.normal);
     let l = normalize(globals.light_dir.xyz);
     let diffuse = max(dot(n, l), 0.0);
     let light = globals.ambient.rgb + vec3<f32>(diffuse) * (1.0 - globals.ambient.rgb);

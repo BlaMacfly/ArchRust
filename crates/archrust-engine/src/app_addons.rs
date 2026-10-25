@@ -212,7 +212,17 @@ impl App {
         let player = self
             .player
             .as_ref()
-            .map(|p| unit_of(p, self.walking || Self::is_moving(p)));
+            .map(|p| unit_of(p, self.walking || Self::is_moving(p)))
+            .map(|mut u| {
+                // Caractéristiques du joueur : facteurs du serveur (PV et PM maximum, niveau).
+                let s = &self.hud.stats;
+                u.level = s.level.map_or(1, i64::from);
+                u.hp = s.hp.map(i64::from).or(u.hp);
+                u.hp_max = s.max_hp.map(i64::from);
+                u.mp = s.mp.map(i64::from);
+                u.mp_max = s.max_mp.map(i64::from);
+                u
+            });
         let units: Vec<UnitInfo> = self
             .entities
             .iter()

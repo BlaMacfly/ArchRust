@@ -10,11 +10,10 @@ use super::App;
 use crate::net::NetLink;
 use crate::ui::UiState;
 use archrust_netclient::party::{
-    self, PartyCommand, PartyNotice, PartyState, EXP_BY_DAMAGE, EXP_BY_LEVEL, ITEM_DAMAGE,
+    PartyCommand, PartyNotice, PartyState, EXP_BY_DAMAGE, EXP_BY_LEVEL, ITEM_DAMAGE,
     ITEM_FREE, ITEM_SEQUENCE,
 };
 use archrust_netclient::{Command, WorldEvent};
-use egui::{Align2, Color32};
 use std::collections::HashMap;
 
 /// PV et niveau connus d'un personnage (fiches et mises à jour CHARACTER, actions 0x41).
@@ -28,11 +27,12 @@ pub struct MemberStats {
 #[derive(Default)]
 pub struct PartyGlue {
     pub state: PartyState,
+    /// Menus et options des fenêtres de groupe d'Archonia.
+    pub frames_ui: crate::hud::PartyUiState,
+    /// Cadre cliqué à cibler (lu par le moteur après `panel`).
+    pub pending_select: Option<i32>,
     /// Caractéristiques connues par CID (membres ou non : un joueur peut le devenir).
     pub stats: HashMap<i32, MemberStats>,
-    pub show_window: bool,
-    /// Champ « nom » de la fenêtre du groupe.
-    pub invite_input: String,
 }
 
 /// Envoie une demande de groupe et l'annonce dans la discussion. Fonction libre : appelée depuis la
@@ -136,9 +136,6 @@ impl App {
         };
         log::info!("[groupe] {line}");
         self.ui.push_chat(format!("[groupe] {line}"));
-        if notice == PartyNotice::Joined {
-            self.party.show_window = true;
-        }
         self.party_addons_sync();
         match &notice {
             PartyNotice::Joined => self.addons.fire_event("GROUP_JOINED", &[]),
@@ -246,7 +243,8 @@ impl App {
                 }
             }
             "/groupe" | "/party" => {
-                self.party.show_window = !self.party.show_window;
+                // Options du groupe d'Archonia (`UI_PartyOption`).
+                self.party.frames_ui.options = !self.party.frames_ui.options;
                 None
             }
             _ => return false,
@@ -289,10 +287,25 @@ impl App {
                 (cid, self.party.state.name_of(cid), s)
             })
             .collect();
+        // Visage de chaque membre visible : race et classe de son modèle (charactertemplate.ini).
+        let templates = self.assets.table("ini", "charactertemplate.ini").ok();
+        let faces = self
+            .party
+            .state
+            .members
+            .iter()
+            .filter_map(|&cid| {
+                let tid = if cid == me { self.player.as_ref().map(|p| p.tid) } else { self.entities.iter().find(|e| e.cid == cid).map(|e| e.tid) }?;
+                let sec = templates.as_ref()?.section(&tid.to_string())?;
+                let num = |k: &str| sec.get(k).and_then(|v| v.trim().parse::<i32>().ok());
+                crate::hud::party_face(num("Race")?, num("Class")?).map(|f| (cid, f))
+            })
+            .collect();
         PartyView {
             me,
             members,
-            target: self.party_target().filter(|(c, _)| *c != me),
+            faces,
+            selected: self.addons.target_cid(),
         }
     }
 }
@@ -301,7 +314,8 @@ impl App {
 pub struct PartyView {
     pub me: i32,
     pub members: Vec<(i32, String, MemberStats)>,
-    pub target: Option<(i32, String)>,
+    pub faces: HashMap<i32, String>,
+    pub selected: Option<i32>,
 }
 
 /// Bouton « Groupe », fenêtre du groupe et fenêtre d'invitation.
@@ -311,155 +325,53 @@ pub fn panel(
     view: &PartyView,
     net: Option<&NetLink>,
     ui_state: &mut UiState,
+    hud: &mut crate::hud::HudState,
+    assets: &crate::assets::Assets,
 ) {
     let mut commands = Vec::new();
-    // À gauche de la mini-carte du HUD, à toute taille de fenêtre (« Inventaire » est en dessous).
-    let (minimap_w, _) = crate::hud::reserved(ctx);
-    egui::Area::new(egui::Id::new("party-toggle"))
-        .anchor(Align2::RIGHT_TOP, [-10.0 - minimap_w, 10.0])
-        .show(ctx, |ui| {
-            let label = if glue.state.in_party() {
-                format!("Groupe ({})", glue.state.members.len())
-            } else {
-                "Groupe".to_string()
-            };
-            ui.style_mut().wrap_mode = Some(egui::TextWrapMode::Extend);
-            if ui.button(label).clicked() {
-                glue.show_window = !glue.show_window;
-            }
-        });
-
-    // Invitations reçues : une fenêtre par inviteur, la plus récente devant.
+    // Boîte d'Archonia : message de l'[EventMap] `{{PartyInviterName.PartyInviter}} invites you
+    // to join their party.` (`Action=4:1:-1:`).
     for inv in glue.state.invitations.clone() {
-        egui::Window::new(format!("Invitation de {}", inv.name))
-            .id(egui::Id::new(("party-invitation", inv.cid)))
-            .anchor(Align2::CENTER_TOP, [0.0, 120.0])
-            .collapsible(false)
-            .resizable(false)
-            .show(ctx, |ui| {
-                ui.label(format!("{} vous invite dans son groupe.", inv.name));
-                ui.horizontal(|ui| {
-                    if ui.button("Accepter").clicked() {
-                        commands.push(PartyCommand::Accept(inv.cid));
-                    }
-                    if ui.button("Refuser").clicked() {
-                        commands.push(PartyCommand::Reject(inv.cid));
-                    }
-                });
-            });
+        let text = format!("{} invites you to join their party.", inv.name);
+        match crate::hud::confirm_box(ctx, hud, assets, ("party-invitation", inv.cid), &text) {
+            Some(true) => commands.push(PartyCommand::Accept(inv.cid)),
+            Some(false) => commands.push(PartyCommand::Reject(inv.cid)),
+            None => {}
+        }
     }
 
-    if glue.show_window {
-        let mut open = true;
-        let leader = glue.state.leader();
-        let i_lead = leader == Some(view.me);
-        let screen = ctx.screen_rect();
-        egui::Window::new("Groupe")
-            .open(&mut open)
-            .default_pos([screen.right() - 290.0, 150.0])
-            .default_width(260.0)
-            .resizable(false)
-            .show(ctx, |ui| {
-                if glue.state.in_party() {
-                    for (cid, name, stats) in &view.members {
-                        ui.horizontal(|ui| {
-                            let mut title = name.clone();
-                            if Some(*cid) == leader {
-                                title = format!("★ {title}");
-                            }
-                            if let Some(level) = stats.level {
-                                title = format!("{title} ({level})");
-                            }
-                            let text = egui::RichText::new(title);
-                            ui.label(if *cid == view.me { text.strong() } else { text });
-                            if i_lead && *cid != view.me {
-                                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                                    if ui.small_button("Exclure").clicked() {
-                                        commands.push(PartyCommand::Banish(*cid));
-                                    }
-                                    if ui.small_button("Chef").on_hover_text("Passer la main").clicked() {
-                                        commands.push(PartyCommand::Delegate(*cid));
-                                    }
-                                });
-                            }
-                        });
-                        match (stats.hp, stats.max_hp) {
-                            (Some(hp), Some(max)) if max > 0 => {
-                                ui.add(
-                                    egui::ProgressBar::new((hp.max(0) as f32 / max as f32).min(1.0))
-                                        .text(format!("{hp} / {max} PV"))
-                                        .fill(Color32::from_rgb(150, 30, 30)),
-                                );
-                            }
-                            (Some(hp), _) => {
-                                ui.small(format!("{hp} PV"));
-                            }
-                            _ => {
-                                ui.small("PV inconnus");
-                            }
-                        }
-                    }
-                    ui.separator();
-                    ui.small(format!(
-                        "Expérience : {} ; objets : {}",
-                        party::exp_type_label(glue.state.exp_type),
-                        party::item_division_label(glue.state.item_division)
-                    ));
-                    if i_lead {
-                        ui.horizontal(|ui| {
-                            for (t, label) in [(EXP_BY_DAMAGE, "Exp. dégâts"), (EXP_BY_LEVEL, "Exp. niveau")] {
-                                if ui.selectable_label(glue.state.exp_type == t, label).clicked()
-                                    && glue.state.exp_type != t
-                                {
-                                    commands.push(PartyCommand::SetExpType(t));
-                                }
-                            }
-                        });
-                        ui.horizontal(|ui| {
-                            for (t, label) in [
-                                (ITEM_SEQUENCE, "Tour de rôle"),
-                                (ITEM_FREE, "Libre"),
-                                (ITEM_DAMAGE, "Dégâts"),
-                            ] {
-                                if ui.selectable_label(glue.state.item_division == t, label).clicked()
-                                    && glue.state.item_division != t
-                                {
-                                    commands.push(PartyCommand::SetItemDivision(t));
-                                }
-                            }
-                        });
-                    }
-                    if ui.button("Quitter le groupe").clicked() {
-                        commands.push(PartyCommand::Leave);
-                    }
-                    ui.separator();
-                } else {
-                    ui.label("Vous n'êtes pas dans un groupe.");
-                }
-                if !glue.state.in_party() || i_lead {
-                    ui.horizontal(|ui| {
-                        let edit = ui.add(
-                            egui::TextEdit::singleline(&mut glue.invite_input)
-                                .hint_text("nom du joueur")
-                                .desired_width(140.0),
-                        );
-                        let enter = edit.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
-                        let name = glue.invite_input.trim().to_string();
-                        if (ui.button("Inviter").clicked() || enter) && !name.is_empty() {
-                            commands.push(PartyCommand::Invite { cid: None, name: Some(name) });
-                            glue.invite_input.clear();
-                        }
-                    });
-                    if let Some((cid, name)) = &view.target {
-                        if !glue.state.contains(*cid) && ui.button(format!("Inviter la cible ({name})")).clicked() {
-                            glue.state.learn_name(*cid, name);
-                            commands.push(PartyCommand::Invite { cid: Some(*cid), name: None });
-                        }
-                    }
-                }
-            });
-        if !open {
-            glue.show_window = false;
+    // Cadres, menus et options du groupe d'Archonia (voir `hud_party.rs`).
+    let leader = glue.state.leader();
+    let frame = |(cid, name, stats): &(i32, String, MemberStats)| crate::hud::PartyFrame {
+        cid: *cid,
+        name: name.clone(),
+        level: stats.level,
+        hp: stats.hp,
+        max_hp: stats.max_hp,
+        leader: leader == Some(*cid),
+        face: view.faces.get(cid).cloned(),
+    };
+    let frames = crate::hud::PartyFrames {
+        me: glue.state.in_party().then(|| view.members.iter().find(|m| m.0 == view.me).map(frame)).flatten(),
+        others: view.members.iter().filter(|m| m.0 != view.me).map(frame).collect(),
+        selected: view.selected,
+        i_lead: leader == Some(view.me),
+        item_division: glue.state.item_division as i32,
+        exp_type: glue.state.exp_type as i32,
+        item_choices: vec![(ITEM_SEQUENCE as i32, "Party_Item_Division_Sequence"), (ITEM_FREE as i32, "Party_Item_Division_Free"), (ITEM_DAMAGE as i32, "Party_Item_Division_Damage")],
+        exp_choices: vec![(EXP_BY_DAMAGE as i32, "Party_Exp_Division_Damage"), (EXP_BY_LEVEL as i32, "Party_Exp_Division_Level")],
+    };
+    let mut requests = Vec::new();
+    crate::hud::draw_party(ctx, hud, assets, &frames, &mut glue.frames_ui, &mut requests);
+    for r in requests {
+        match r {
+            crate::hud::PartyUi::Select(cid) => glue.pending_select = Some(cid),
+            crate::hud::PartyUi::Leave => commands.push(PartyCommand::Leave),
+            crate::hud::PartyUi::Banish(cid) => commands.push(PartyCommand::Banish(cid)),
+            crate::hud::PartyUi::Delegate(cid) => commands.push(PartyCommand::Delegate(cid)),
+            crate::hud::PartyUi::Invite(name) => commands.push(PartyCommand::Invite { cid: None, name: Some(name) }),
+            crate::hud::PartyUi::SetItemDivision(t) => commands.push(PartyCommand::SetItemDivision(t as i8)),
+            crate::hud::PartyUi::SetExpType(t) => commands.push(PartyCommand::SetExpType(t as i8)),
         }
     }
     for c in commands {

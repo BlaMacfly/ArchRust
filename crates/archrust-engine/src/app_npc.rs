@@ -523,24 +523,10 @@ pub fn panel(
     // Quantité à acheter.
     if let Some((iid, mut count)) = glue.buy {
         let entry = glue.shop.as_ref().and_then(|s| s.items.iter().find(|e| e.iid == iid)).map(|e| (e.name.clone(), e.price));
-        let mut answer = None;
-        egui::Window::new("Acheter").collapsible(false).resizable(false).anchor(egui::Align2::CENTER_CENTER, egui::Vec2::ZERO).show(ctx, |w| {
-            let (name, price) = entry.clone().unwrap_or_default();
-            w.label(name);
-            w.horizontal(|w| {
-                w.label("Quantité :");
-                w.add(egui::DragValue::new(&mut count).range(1..=99));
-                w.label(format!("= {} pièce(s)", price * count as i64));
-            });
-            w.horizontal(|w| {
-                if w.button("Acheter").clicked() {
-                    answer = Some(true);
-                }
-                if w.button("Annuler").clicked() {
-                    answer = Some(false);
-                }
-            });
-        });
+        let _ = &entry;
+        let mut n = count as i64;
+        let answer = crate::hud::draw_buy_count(ctx, hud, assets, &mut n, 99);
+        count = n.clamp(1, 99) as _;
         glue.buy = Some((iid, count));
         match (answer, &glue.shop) {
             (Some(true), Some(s)) => {
@@ -555,18 +541,9 @@ pub fn panel(
     // Vente, après accord.
     if let Some(iid) = glue.sell {
         let name = items.get(&iid).and_then(|i| i.template_id).and_then(|t| item_name_for_tid(assets, t));
-        let mut answer = None;
-        egui::Window::new("Vendre").collapsible(false).resizable(false).anchor(egui::Align2::CENTER_CENTER, egui::Vec2::ZERO).show(ctx, |w| {
-            w.label(format!("Vendre « {} » au marchand ?", name.as_deref().unwrap_or("?")));
-            w.horizontal(|w| {
-                if w.button("Vendre").clicked() {
-                    answer = Some(true);
-                }
-                if w.button("Annuler").clicked() {
-                    answer = Some(false);
-                }
-            });
-        });
+        // Message de l'[EventMap] d'Archonia (`Action=4:1:-1:`), suivi du nom de l'objet.
+        let text = format!("Do you wish to sell this item?___[{}]", name.as_deref().unwrap_or("?"));
+        let answer = crate::hud::confirm_box(ctx, hud, assets, ("sell", iid), &text);
         match (answer, &glue.shop) {
             (Some(true), Some(s)) => {
                 send(net, NpcCommand::Sell { npc: s.npc, iid });
@@ -580,26 +557,9 @@ pub fn panel(
     // Argent de la banque.
     if let Some((deposit, mut amount)) = glue.money {
         let max = if deposit { hud.stats.money } else { hud.stats.bank_money }.unwrap_or(0).max(0);
-        let mut answer = None;
-        egui::Window::new(if deposit { "Déposer de l'or" } else { "Retirer de l'or" })
-            .collapsible(false)
-            .resizable(false)
-            .anchor(egui::Align2::CENTER_CENTER, egui::Vec2::ZERO)
-            .show(ctx, |w| {
-                w.horizontal(|w| {
-                    w.label("Montant :");
-                    w.add(egui::DragValue::new(&mut amount).range(0..=max));
-                    w.label(format!("sur {max}"));
-                });
-                w.horizontal(|w| {
-                    if w.button("Valider").clicked() {
-                        answer = Some(true);
-                    }
-                    if w.button("Annuler").clicked() {
-                        answer = Some(false);
-                    }
-                });
-            });
+        let mut n = amount as i64;
+        let answer = crate::hud::draw_bank_money(ctx, hud, assets, deposit, &mut n, max as i64);
+        amount = n.clamp(0, max as i64) as _;
         glue.money = Some((deposit, amount));
         match answer {
             Some(true) if amount > 0 => {

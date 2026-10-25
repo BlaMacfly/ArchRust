@@ -371,6 +371,46 @@ sombre au survol ou pendant la saisie, molette pour remonter). Entrée ouvre la 
 envoie, Échap la quitte. `Chat_Input_Private` (chuchotement) et `UI_ChatTab_Option` (onglets) ne
 sont pas encore repris.
 
+**Fenêtres d'Archonia à la place d'egui (2026-10-25)** — ArchRust n'affiche que des images du
+client. Les fenêtres egui suivantes sont remplacées par leurs équivalents d'`UI_1024X768.ini` :
+- **Boîtes de dialogue** (`hud_dialogs.rs`) :
+  - confirmation sur `Common_Message_Base2.png` pour la destruction, la vente et l'invitation de
+    groupe ; le texte vient de l'`[EventMap]` (`Action=4:1:-1:`) ;
+  - séparation de pile `UI_SplitItem` : pavé numérique, + / −, « CR », « ◀ » ;
+  - quantité à acheter `UI_NPCTrade_BuyStackCount` ;
+  - or de la banque `UI_BankConfirm`, avec les phrases `Bank_InputMoneyConfirm` /
+    `Bank_OutputMoneyConfirm`.
+- **Groupe** (`hud_party.rs`) : cadres `UI_Party` (joueur, puis lignes de 36 px), menus
+  `UI_SelfCharacterMenu` / `UI_TargetCharacterMenu`, options `UI_PartyOption`. Le visage est
+  `Party_Face_<race><classe>.png` : race H, O, M, D ; classe K mêlée, A archer, W magie, S scion.
+- **Menus principaux** (`hud_menu.rs`) : boutons `MainBtn*` de `UI_CharInfo` et listes
+  `UI_MainMenu*`. Ils remplacent les boutons « Inventaire » et « Groupe ».
+- **Sélection des personnages** (`hud_login.rs`) : `UI_LG_CHARSELECT` (écran 1024 × 768 agrandi
+  sans déformation, voile `LG_Base_1024.png`) et `UI_ConfirmDeleteChar`.
+- **Parchemin aller-retour** : Archonia enregistre `Item_OpenReturnScrollUI`, mais aucune fenêtre
+  ne l'appelle. Le bouton egui est donc retiré et le retour passe par `/retour`.
+
+- **Création de personnage** (`hud_login.rs`) : `UI_LG_CHARCREATE`. Panneau
+  `CreateCharacter_BG.png`, boutons de race et de classe `CreateCharacter_Btn*`
+  (`_Normal` / `_Over` / `_Push`), coiffure et visage, rotation tant que la flèche est
+  enfoncée, zoom, descriptions `RaceDesc<Race>` et `CharDesc<Race><Classe>` (nom de classe
+  pour les orcs, type générique sinon).
+- **Options** (`hud_options.rs`) : onglets `Option_Video` (GFX), `Option_Sound` (Son),
+  `Option_System` (Affichage), `Option_Option` (Fonction) et `Option_Advanced` (Avancé).
+  - **Son** : réglages réels (cases `OP_Check` et curseurs `OP_Sound_Volume`). Les
+    interrupteurs « activé/désactivé » sont enregistrés dans `music_on`, `effects_on` et
+    `ambience_on` d'`options.toml`.
+  - **Avancé** : sa liste générique porte la langue des textes du serveur et l'activation des
+    packs de ressources.
+  - **Autres onglets** : leurs contrôles sont dessinés inactifs, ArchRust n'ayant pas ces
+    réglages.
+
+Les libellés viennent d'`ini_fr/UI_1024X768.ini`, et les phrases d'`uimessage.txt` (`ini_fr`
+d'abord). Restent en egui :
+- la console Lua et le tableau de bord de développement, visibles seulement avec la console
+  (touche `) ;
+- les fenêtres de secours, quand les données d'interface manquent.
+
 ## Animations des personnages
 
 Établi sur Archonia.exe (sha256 e9c7609b…) et sur les données réelles du client ; implémenté dans
@@ -407,6 +447,32 @@ comme RpSkin ; les sommets restent dans l'espace de la frame de l'atomic. En pos
 est de 4e-6 sur les huit géométries (sans le retrait de la frame de l'atomic, il restait la
 translation de 0,45 de ses ancêtres). L'ancienne formule transposée ne revenait au bind que parce
 qu'elle perdait les translations, d'où les 180 unités observées une fois animée.
+
+**Taches noires pendant l'animation (2026-10-25)** — en course, des taches noires en escalier
+clignotaient à la ceinture, là où l'ourlet de la chemise recouvre le pantalon (3 images sur 8).
+Les vérifications :
+- **Audit des données** (`archrust-data/examples/skin_audit.rs`, 5 216 modèles du pack
+  `character`) : aucun os hors palette, aucune normale nulle, aucune matrice de bind dégénérée,
+  tous les atomics avec le drapeau de rendu. En revanche, 0,27 % des sommets ont une somme de
+  poids différente de 1 (jusqu'à 1,5).
+- **Rejeu des animations** (`archrust-engine/examples/anim_audit.rs`) : aucune normale NaN.
+- **Bandes de triangles** (`clump_parts.rs`) : leur déroulage donne exactement la liste de
+  triangles du fichier.
+- **Cause** : ArchRust dessinait toutes les faces recto-verso, alors que RenderWare cache par
+  défaut les faces arrière (`rwCULLMODECULLBACK`). L'intérieur des vêtements, dont les UV tombent
+  sur des zones noires de la texture, se disputait la profondeur avec les faces avant.
+
+Corrections :
+- **Culling** : pipeline `lit-culled` (faces arrière cachées, ordre trigonométrique) pour les
+  maillages skinnés. Les objets du monde restent recto-verso, leur mode d'Archonia n'étant pas
+  relevé.
+- **Poids** renormalisés dans `animation::deform`.
+- **Normale dégénérée** : `deform` garde la normale de bind, et le shader remplace une normale
+  nulle ou NaN (`safe_normal`), qui noircissait toute la couleur.
+
+Après correction, il n'y a plus de taches en escalier. Il reste parfois une encoche sombre au
+milieu de la ceinture quand l'ourlet se soulève (1 image sur 8). Elle n'a pas pu être comparée
+avec Archonia, qui demande les droits administrateur (aucune saisie simulée possible).
 
 **Rendu** — les géométries skinnées gardent leur liaison au squelette ; le moteur rejoue
 l'attente (variantes tirées selon les taux à chaque fin de cycle) ou la course quand l'entité se

@@ -155,6 +155,9 @@ pub struct App {
     /// Instant où lancer `--exec` : un peu après l'entrée en jeu, pour que les paquets CHARACTER
     /// déjà reçus (qui remettent la destination du joueur sur sa position) soient traités avant.
     exec_at: Option<Instant>,
+    /// Commandes `--exec` restantes : `/attendre <s>` met la suite en pause, `/capture <fichier>` enregistre
+    /// une capture sans quitter (séances de test pilotées).
+    exec_queue: Vec<String>,
     /// File des commandes `--login-exec` restantes et instant de la prochaine.
     login_exec: Vec<String>,
     login_exec_at: Option<Instant>,
@@ -275,6 +278,7 @@ impl App {
             keys: [false; 4],
             exit: false,
             exec_at: None,
+            exec_queue: Vec::new(),
             login_exec: Vec::new(),
             login_exec_at: None,
             addon_glue: Default::default(),
@@ -464,6 +468,7 @@ impl App {
                 meshes,
                 equipment: Vec::new(),
                 is_player: true,
+                speeds: Default::default(),
             });
             // Cadrage : près du personnage, décalé pour qu'il ne soit pas sous le panneau de connexion.
             self.camera.target = Vec3::new(0.0, 100.0, 0.0);
@@ -885,6 +890,7 @@ impl App {
                 meshes,
                 equipment: Vec::new(),
                 is_player: false,
+                speeds: Default::default(),
             });
         }
     }
@@ -1169,6 +1175,7 @@ impl App {
                     .unwrap_or(Vec3::ZERO);
                 let hp = self.player.as_ref().and_then(|p| p.hp);
                 let turn_y = self.player.as_ref().map_or(0.0, |p| p.turn_y);
+                let speeds = self.player.as_ref().map(|p| p.speeds).unwrap_or_default();
                 log::info!(
                     "joueur {name} (cid {cid}, tid {tid}) : {} maillage(s)",
                     meshes.len()
@@ -1185,6 +1192,7 @@ impl App {
                     meshes,
                     equipment: Vec::new(),
                     is_player: true,
+                    speeds,
                 });
                 self.sync_addons_world();
             }
@@ -1201,7 +1209,9 @@ impl App {
                     self.hud.merge_stats(stats);
                 }
                 let hp = factors.and_then(|f| f.hp).or(stats.as_ref().and_then(|s| s.hp));
+                let (walk, run) = stats.as_ref().map_or((None, None), |s| (s.walk_speed, s.run_speed));
                 if let Some(player) = self.player.as_mut().filter(|p| p.cid == cid) {
+                    player.speeds.learn(walk, run);
                     if let Some(position) = position {
                         player.position = position;
                     }
@@ -1212,6 +1222,7 @@ impl App {
                         player.hp = hp;
                     }
                 } else if let Some(entity) = self.entities.iter_mut().find(|e| e.cid == cid) {
+                    entity.speeds.learn(walk, run);
                     if let Some(position) = position {
                         entity.position = position;
                     }
@@ -1313,6 +1324,8 @@ impl App {
                     }
                     return;
                 }
+                let mut speeds = crate::scene::Speeds::default();
+                speeds.learn(c.stats.as_ref().and_then(|s| s.walk_speed), c.stats.as_ref().and_then(|s| s.run_speed));
                 let fallback = self.gpu.as_ref().map(|g| g.marker.clone());
                 // Chaque entité en vue reçoit son modèle (plus de limite : au-delà de 64, les
                 // créatures étaient remplacées par la boîte de repère). La boîte ne reste qu'en
@@ -1359,18 +1372,23 @@ impl App {
                     meshes,
                     equipment: c.equipment,
                     is_player: false,
+                    speeds,
                 });
             }
             WorldEvent::CharacterMoved {
                 cid,
                 position,
                 destination,
+                fast,
             } => {
                 if let Some(e) = self.entities.iter_mut().find(|e| e.cid == cid) {
                     e.position = position;
                     e.destination = destination;
+                    e.speeds.fast = fast;
                 } else if self.player.as_ref().map(|p| p.cid == cid).unwrap_or(false) {
                     if let Some(p) = &mut self.player {
+                        // Le joueur se déplace toujours à la course (`send_move`) : un déplacement imposé
+                        // par le serveur (téléportation, arrêt) ne change pas son allure.
                         p.position = position;
                         p.destination = destination;
                     }
@@ -1422,7 +1440,8 @@ impl App {
                 self.enter_world_addons();
                 self.ui
                     .push_chat(format!("[système] {} entités en vue", self.entities.len()));
-                if self.config.exec_on_enter.is_some() {
+                if let Some(cmds) = &self.config.exec_on_enter {
+                    self.exec_queue = cmds.split(';').map(str::trim).filter(|c| !c.is_empty()).map(String::from).collect();
                     self.exec_at = Some(Instant::now() + std::time::Duration::from_millis(1500));
                 }
             }
@@ -1711,10 +1730,6 @@ impl App {
     /// TID du personnage local affiché en mode sans client (humain par défaut, `a0000060.ecl`).
     const LOCAL_PREVIEW_TID: i32 = 96;
 
-    /// Vitesse de marche (unités du monde par seconde). `Movement=2000` dans charactertemplate.ini
-    /// est exprimé pour un pas de 100 ms chez le client ; on prend 1 200 u/s en attendant mieux.
-    const WALK_SPEED: f32 = 1200.0;
-
     /// Distance de tracé des objets du monde (unités ArchLord), en deçà du brouillard.
     const OBJECT_DRAW_DISTANCE: f32 = 25_000.0;
 
@@ -1732,7 +1747,7 @@ impl App {
             if let Some(turn) = turn_towards(e.position, e.destination) {
                 e.turn_y = turn;
             }
-            let step = (Self::WALK_SPEED * dt).min(dist);
+            let step = (e.speeds.units_per_second() * dt).min(dist);
             e.position += to / dist * step;
         }
         // Les personnages de la scène de connexion (CID négatifs) gardent la hauteur de
@@ -1771,15 +1786,36 @@ impl App {
                 log::debug!("arrivé en {:?}", p.position);
             }
         }
-        // `--exec` : plusieurs commandes possibles, séparées par `;` (ex. `/cam 300 90 10; /goto x y z`).
+        // `--exec` : plusieurs commandes possibles, séparées par `;` (ex. `/cam 300 90 10; /goto x y z`) ;
+        // `/attendre 5` attend 5 s avant la suite, `/capture x.png` enregistre une capture et continue.
         if self.exec_at.is_some_and(|t| Instant::now() >= t) {
             self.exec_at = None;
-            if let Some(cmds) = self.config.exec_on_enter.clone() {
-                for cmd in cmds.split(';').map(str::trim).filter(|c| !c.is_empty()) {
-                    self.handle_actions(UiActions {
-                        chat: Some(cmd.to_string()),
-                        ..Default::default()
-                    });
+            while !self.exec_queue.is_empty() {
+                let cmd = self.exec_queue.remove(0);
+                let (head, arg) = cmd.split_once(' ').map(|(h, a)| (h, a.trim())).unwrap_or((cmd.as_str(), ""));
+                match head {
+                    "/attendre" | "/wait" => {
+                        let secs = arg.replace(',', ".").parse::<f32>().unwrap_or(1.0).max(0.0);
+                        self.exec_at = Some(Instant::now() + std::time::Duration::from_secs_f32(secs));
+                        break;
+                    }
+                    "/capture" if !arg.is_empty() => {
+                        log::info!("--exec : capture {arg}");
+                        self.addon_glue.ui.screenshot = Some(PathBuf::from(arg));
+                        if let Some(g) = &mut self.gpu {
+                            g.renderer.capture_next = true;
+                        }
+                        // La capture part à la prochaine image : la suite attend un peu.
+                        self.exec_at = Some(Instant::now() + std::time::Duration::from_millis(300));
+                        break;
+                    }
+                    _ => {
+                        log::info!("--exec : {cmd}");
+                        self.handle_actions(UiActions {
+                            chat: Some(cmd.clone()),
+                            ..Default::default()
+                        });
+                    }
                 }
             }
         }
@@ -1834,6 +1870,23 @@ impl App {
     /// Clic gauche au sol : rayon caméra → terrain, destination du joueur et paquet 0x40.
     /// Personnage sous le curseur (le plus proche de la caméra), d'après sa silhouette projetée :
     /// des pieds à environ 1,8 m au-dessus, sur une largeur de la moitié de cette hauteur.
+    /// Choix des menus principaux d'Archonia (`hud_menu.rs`) : mêmes effets que les raccourcis.
+    fn main_menu_frame(&mut self) {
+        for m in std::mem::take(&mut self.hud.menu_requests) {
+            match m {
+                crate::hud::MenuUi::Quests => {
+                    self.npc_slash("/quetes", "");
+                }
+                crate::hud::MenuUi::Inventory => self.ui.show_inventory = !self.ui.show_inventory,
+                crate::hud::MenuUi::Character => self.item_ui.show_character = !self.item_ui.show_character,
+                crate::hud::MenuUi::Skills => self.skills.show_book = !self.skills.show_book,
+                crate::hud::MenuUi::Guild => self.guild_toggle(),
+                crate::hud::MenuUi::Party => self.party.frames_ui.options = !self.party.frames_ui.options,
+                crate::hud::MenuUi::Options | crate::hud::MenuUi::Exit => self.ui.show_options = !self.ui.show_options,
+            }
+        }
+    }
+
     /// Tab / Maj+Tab : monstre suivant ou précédent (voir [`crate::targeting`]). Sont exclus
     /// les joueurs, les PNJ de `npc.ini`, les morts (PV connus à 0) et ce qui est au-delà de
     /// [`crate::targeting::TAB_RANGE`].
@@ -1961,6 +2014,7 @@ impl App {
             self.fps
         };
         self.poll_net();
+        self.main_menu_frame();
         // Combat : PV des vues, morts, marche vers un objet à ramasser.
         self.combat_frame();
         // Équipement porté affiché sur le modèle du joueur (voir `app_items.rs`).
@@ -2069,9 +2123,41 @@ impl App {
                     }
                 }
                 if phase == Phase::CharacterCreate {
-                    ui::character_create_panel(ctx, &mut self.ui, busy, &mut actions);
+                    // Écran de création d'Archonia (`UI_LG_CHARCREATE`, voir `hud_login.rs`).
+                    let status = self.ui.status.clone();
+                    if let Some(c) = self.ui.creation.as_mut() {
+                        let mut requests = Vec::new();
+                        crate::hud::draw_char_create(ctx, &mut self.hud, &self.assets, c, busy, &status, &mut requests);
+                        for r in requests {
+                            match r {
+                                crate::hud::CreateUi::Submit(tid, name, face, hair) => actions.create_submit = Some((tid, name, face, hair)),
+                                crate::hud::CreateUi::Cancel => actions.cancel_creation = true,
+                            }
+                        }
+                    }
                 } else if in_scene {
-                    ui::character_select_panel(ctx, &mut self.ui, busy, &mut actions);
+                    // Écran de sélection d'Archonia (`UI_LG_CHARSELECT`, voir `hud_login.rs`).
+                    let slots: Vec<crate::hud::CharSlotView> = self.ui.characters.iter().map(|c| crate::hud::CharSlotView { name: c.name.clone(), level: c.level }).collect();
+                    let mut requests = Vec::new();
+                    let status = self.ui.status.clone();
+                    crate::hud::draw_char_select(ctx, &mut self.hud, &self.assets, &slots, self.ui.selected_character, busy, &status, self.ui.delete_confirm.is_some(), &mut requests);
+                    let chosen = self.ui.selected_character.and_then(|i| self.ui.characters.get(i)).map(|c| c.name.clone());
+                    for r in requests {
+                        match r {
+                            crate::hud::SelectUi::Select(i) => self.ui.selected_character = Some(i),
+                            crate::hud::SelectUi::Enter => actions.enter_character = chosen.clone(),
+                            crate::hud::SelectUi::Create => actions.open_creation = true,
+                            crate::hud::SelectUi::Delete => self.ui.delete_confirm = chosen.clone(),
+                            crate::hud::SelectUi::Back => actions.back_to_login = true,
+                            crate::hud::SelectUi::Quit => self.exit = true,
+                            crate::hud::SelectUi::ConfirmDelete(yes) => {
+                                if yes {
+                                    actions.delete_character = self.ui.delete_confirm.clone();
+                                }
+                                self.ui.delete_confirm = None;
+                            }
+                        }
+                    }
                 } else {
                     ui::login_panel(ctx, &mut self.ui, busy, &mut actions);
                 }
@@ -2099,7 +2185,9 @@ impl App {
                     let bar = crate::hud::chat_bar(ctx, &mut self.hud, &self.assets);
                     ui::chat_panel(ctx, &mut self.ui, &mut actions, bar);
                 }
-                if self.addons.builtin_frame("ArchRustInfoFrame").0 {
+                // Tableau de bord de développement (egui, pas une fenêtre d'Archonia) : seulement avec
+                // la console Lua ouverte (touche `).
+                if self.ui.console_open && self.addons.builtin_frame("ArchRustInfoFrame").0 {
                     ui::info_panel(
                         ctx,
                         &mut self.ui,
@@ -2110,8 +2198,9 @@ impl App {
                         self.terrain.loaded_count(),
                     );
                 }
+                // Boutons et menus principaux d'Archonia (à la place du bouton egui « Inventaire »).
                 if self.addons.builtin_frame("ArchRustInventoryButton").0 {
-                    ui::inventory_panel(ctx, &mut self.ui, &inventory);
+                    crate::hud::draw_main_menu(ctx, &mut self.hud, &self.assets);
                 }
                 // Fenêtre d'inventaire d'Archonia (UI_Inventory).
                 crate::hud::draw_inventory(ctx, &mut self.hud, &self.assets, &mut self.ui.show_inventory, &inventory, &mut item_requests);
@@ -2122,7 +2211,10 @@ impl App {
                 npc_glue::panel(ctx, &mut self.npc, &npc_views, &mut item_requests, &self.items, &mut self.hud, &self.assets, self.net.as_ref(), &mut self.ui);
                 items_glue::panel(ctx, &mut self.item_ui, std::mem::take(&mut item_requests), &self.items, &mut self.hud, &self.assets, self.net.as_ref(), &mut self.ui);
                 // Groupe : bouton, fenêtre des membres, invitations reçues.
-                party_glue::panel(ctx, &mut self.party, &party_view, self.net.as_ref(), &mut self.ui);
+                party_glue::panel(ctx, &mut self.party, &party_view, self.net.as_ref(), &mut self.ui, &mut self.hud, &self.assets);
+                if let Some(cid) = self.party.pending_select.take() {
+                    self.addons.set_target(Some(cid));
+                }
                 combat_glue::panel(ctx, &mut self.combat, &combat_view, &mut self.hud, &self.assets, self.net.as_ref(), &mut self.ui);
                 // Liste des destinations d'un portail, écran de chargement du trajet.
                 portal_glue::panel(ctx, &mut self.portal, &mut self.hud, &self.assets, self.net.as_ref(), &mut self.ui);
@@ -2155,6 +2247,8 @@ impl App {
                 &mut self.options.language,
                 &mut self.packs,
                 &mut pack_action,
+                &mut self.hud,
+                &self.assets,
             ) {
                 self.audio.set_settings(&self.options.audio);
                 self.options_dirty = true;
