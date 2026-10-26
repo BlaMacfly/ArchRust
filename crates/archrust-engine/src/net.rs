@@ -190,6 +190,9 @@ async fn session(
     let ticket = login.enter_world(&character, &world).await?;
     login.close().await;
     let mut wc = WorldClient::connect(ticket).await?;
+    // Identifiants renvoyés par une reconnexion automatique (AgcmReconnect).
+    wc.account = creds.user.clone();
+    wc.password = creds.password.clone();
     for e in wc.enter().await? {
         let _ = ev.send(NetEvent::World(e));
     }

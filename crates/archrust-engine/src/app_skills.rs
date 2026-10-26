@@ -16,7 +16,7 @@ use crate::hud::{BookEntry, BookView, HudState, Shortcut, SkillUi, SlotView, Tra
 use crate::net::NetLink;
 use archrust_netclient::items::ItemCommand;
 use archrust_netclient::npc::function;
-use archrust_netclient::skills::{learn_result, SkillCommand, SkillEvent};
+use archrust_netclient::skills::{learn_result, upgrade_result, SkillCommand, SkillEvent};
 use archrust_netclient::Command;
 use glam::Vec3;
 use std::collections::HashMap;
@@ -296,6 +296,9 @@ impl App {
                     None => self.ui.push_chat("[compétence] Cet instructeur n'enseigne rien que le client connaisse."),
                 }
             }
+            // Points héroïques ou charisme manquants : la fenêtre d'Archonia n'affiche rien, le serveur le dit
+            // par un message système.
+            SkillEvent::Learned { result: learn_result::NOT_ENOUGH_HEROIC_POINTS | learn_result::NOT_ENOUGH_CHARISMA, .. } => {}
             SkillEvent::Learned { tid, result } => {
                 let name = self.skills.name(&assets, tid);
                 self.ui.push_chat(format!(
@@ -310,7 +313,19 @@ impl App {
                     }
                 ));
             }
-            SkillEvent::Upgraded { .. } => {}
+            // Messages de l'[EventMap] d'Archonia (FUN_1405dd9c0 : Skill_UpgradeSuccess, Skill_ErrorNotEnoughMoney,
+            // …SkillPoint, …HeroicPoint, …CharismaPoint).
+            SkillEvent::Upgraded { result, .. } => {
+                let text = match result {
+                    upgrade_result::SUCCESS => "Skill Upgraded",
+                    upgrade_result::NOT_ENOUGH_MONEY => "You do not have enough Gold",
+                    upgrade_result::NOT_ENOUGH_POINTS => "You do not have enough skill points",
+                    upgrade_result::NOT_ENOUGH_HEROIC_POINTS => "You don't have enough Heroic Points.",
+                    upgrade_result::NOT_ENOUGH_CHARISMA => "You do not have enough charisma.",
+                    _ => return,
+                };
+                self.ui.push_chat(format!("[compétence] {text}"));
+            }
         }
     }
 

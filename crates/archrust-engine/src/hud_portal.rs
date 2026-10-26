@@ -12,6 +12,9 @@
 //!   l'édition `CONTROL_6373` au format « %s : <C16711680>%I64d<C16773320> %s » (`Item_SetBankPrice`,
 //!   FUN_1406f71e0 : rouge 0xFF0000 si l'or porté ne suffit pas, 0x99FF00 sinon, reste 0xFFF0C8),
 //!   boutons « Acheter » (`Item_BuyBankSlot`) et « Annuler ».
+//! * `UI_ReconnectHold` (AgcmReconnect, `ReconnectingServerShow/Hide`) : « Reconnexion au serveur » pendant
+//!   une reconnexion automatique (fond `arena_match_ready.png`, titre `UIReconnectTitle`, croix
+//!   `UIReconnect_Close` qui ferme la fenêtre sans arrêter les tentatives).
 
 use super::npc_ui::{button, frame, window};
 use super::*;
@@ -162,6 +165,12 @@ pub fn draw_loading(ctx: &egui::Context, hud: &mut HudState, assets: &Assets) {
         painter.rect_filled(rect, 0.0, Color32::BLACK);
         control_image(ctx, hud, assets, &painter, rect, w.size, &tex, 1.0);
     });
+}
+
+/// Fenêtre `UI_ReconnectHold`. Rend `true` si la croix a été cliquée.
+pub fn draw_reconnect_hold(ctx: &egui::Context, hud: &mut HudState, assets: &Assets) -> bool {
+    let out = super::dialogs_ui::draw_dialog(ctx, hud, assets, "UI_ReconnectHold", |_, _, _, _, _, _| false);
+    out.is_some_and(|o| o.clicked.as_deref() == Some("UIReconnect_Close"))
 }
 
 /// Achat d'une page de banque.

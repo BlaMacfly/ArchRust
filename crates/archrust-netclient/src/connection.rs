@@ -317,6 +317,11 @@ impl Connection {
         self.extensions.is_some() || self.ext_deadline.is_none_or(|d| Instant::now() > d)
     }
 
+    /// Coupe la connexion sans la rendre (essai de la reconnexion) : la lecture suivante échoue.
+    pub async fn cut(&mut self) {
+        let _ = self.stream.shutdown().await;
+    }
+
     pub async fn close(mut self) {
         let _ = self.stream.shutdown().await;
     }

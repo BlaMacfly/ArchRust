@@ -180,7 +180,7 @@ pub fn confirm_box(ctx: &egui::Context, hud: &mut HudState, assets: &Assets, id:
 
 /// Saisie d'un nombre dans un contrôle d'édition d'Archonia (texte centré, sans cadre egui) ;
 /// garde seulement les chiffres et borne la valeur à `max`.
-fn number_edit(ui: &mut egui::Ui, r: Rect, id: impl std::hash::Hash, value: &mut i64, max: i64, font: f32) {
+pub(super) fn number_edit(ui: &mut egui::Ui, r: Rect, id: impl std::hash::Hash, value: &mut i64, max: i64, font: f32) {
     let mut text = value.to_string();
     let edit = egui::TextEdit::singleline(&mut text)
         .id(egui::Id::new(("archonia-number", id)))

@@ -73,13 +73,32 @@ pub use login_ui::{draw_char_create, draw_char_select, CharSlotView, CreateUi, S
 pub use menu_ui::{draw_main_menu, MenuUi};
 pub use party_ui::{draw_party, party_face, PartyFrame, PartyFrames, PartyUi, PartyUiState};
 pub use dialogs_ui::{info_box, confirm_box, draw_bank_money, draw_buy_count, draw_split, ui_message};
-pub use guild_ui::{draw_guild_window, draw_message_box, GuildEdit, GuildRow, GuildUi, GuildView, PageColors};
-pub use portal_ui::{draw_buy_bank, draw_loading, draw_teleport, BuyBankView, PortalUi, TeleportRow, TeleportView};
+pub use guild_ui::{draw_battle_texts, draw_guild_warehouse, draw_guild_window, draw_gware_money, draw_message_box, GridCell, GuildEdit, GuildRow, GuildUi, GuildView, GwareItem, GwareView, ListSpec, PageColors};
+pub use portal_ui::{draw_buy_bank, draw_loading, draw_reconnect_hold, draw_teleport, BuyBankView, PortalUi, TeleportRow, TeleportView};
 pub use skills_ui::{draw_quickbar, draw_skill_book, draw_trainer, BookEntry, BookView, Shortcut, SkillUi, SlotView, TrainerEntry, TrainerView};
 pub use npc_ui::{draw_bank, draw_npc_dialog, draw_quests, draw_shop, BankView, DialogView, NpcUi, QuestEntry, QuestState, QuestView, ShopEntry, ShopView};
 
 /// Fenêtres de guilde d'Archonia (voir `hud_guild.rs`).
-const GUILD_WINDOWS: [&str; 9] = ["Guild_Main", "Guild_Create", "Guild_Destroy", "Guild_Create_Request", "Guild_Create_Complete", "Guild_Destroy_Confirm", "Guild_Destroy_Complete", "Guild_Notice", "Guild_Member"];
+const GUILD_WINDOWS: [&str; 18] = [
+    "Guild_Main",
+    "Guild_Create",
+    "Guild_Destroy",
+    "Guild_Create_Request",
+    "Guild_Create_Complete",
+    "Guild_Destroy_Confirm",
+    "Guild_Destroy_Complete",
+    "Guild_Notice",
+    "Guild_Member",
+    "Guild_List",
+    "Guild_MemberSize",
+    "Guild_Mark",
+    "Guild_MarkConfirm",
+    "Guild_GBattle",
+    "UI_GuildWarehouse",
+    "UI_GWareConfirm",
+    "UI_GuildBattleResult",
+    "UI_GuildBattleMember",
+];
 
 /// Amélioration active sur le joueur.
 #[derive(Debug, Clone)]
@@ -104,6 +123,8 @@ pub struct UiControl {
     pub grid: Option<[f32; 4]>,
     /// Nom de la grille, dernier élément de `Grid=` (ex. `EquipSlotGridHead`).
     pub grid_name: Option<String>,
+    /// Décalage de la première case, deux premiers éléments de `Grid=`.
+    pub grid_origin: Option<[f32; 2]>,
     /// `CtrlFont=0:couleur:échelle:…:alignement:…` : couleur ARGB du texte (-1 blanc) et alignement
     /// (relevés : 16 à gauche, 17 centré, 18 à droite).
     pub font: Option<(u32, i32)>,
@@ -195,6 +216,7 @@ impl UiWindow {
                                 v.split(':').filter_map(|x| x.trim().parse().ok()).collect();
                             if p.len() >= 6 {
                                 c.grid = Some([p[2], p[3], p[4], p[5]]);
+                                c.grid_origin = Some([p[0], p[1]]);
                                 c.grid_name = v.rsplit(':').next().map(str::trim).filter(|n| !n.is_empty() && n.parse::<f32>().is_err()).map(str::to_string);
                             }
                         }
@@ -378,7 +400,7 @@ impl HudState {
                 log::warn!("HUD : ini/UI_1024X768.ini illisible");
                 return Vec::new();
             };
-            let mut list: Vec<UiWindow> = ["UI_CharInfo", "MiniMap", "UI_Inventory", "UI_TargetInfo", "Chat_Input_Normal", "UI_Resurrection", "Character_Status", "UI_NPCDialog", "UI_NPCTrade", "UI_Bank", "QuestAccept_UI", "QuestMain_UI", "UI_Skill", "UI_SkillBuy", "UI_Teleport", "UI_BuyBank", "UI_LG_Loading", "UI_SplitItem", "UI_NPCTrade_BuyStackCount", "UI_BankConfirm", "UI_Party", "UI_SelfCharacterMenu", "UI_TargetCharacterMenu", "UI_PartyOption", "UI_LG_CHARSELECT", "UI_ConfirmDeleteChar", "UI_LG_CHARCREATE", "Chat_Input_Private"]
+            let mut list: Vec<UiWindow> = ["UI_CharInfo", "MiniMap", "UI_Inventory", "UI_TargetInfo", "Chat_Input_Normal", "UI_Resurrection", "Character_Status", "UI_NPCDialog", "UI_NPCTrade", "UI_Bank", "QuestAccept_UI", "QuestMain_UI", "UI_Skill", "UI_SkillBuy", "UI_Teleport", "UI_BuyBank", "UI_LG_Loading", "UI_SplitItem", "UI_NPCTrade_BuyStackCount", "UI_BankConfirm", "UI_Party", "UI_SelfCharacterMenu", "UI_TargetCharacterMenu", "UI_PartyOption", "UI_LG_CHARSELECT", "UI_ConfirmDeleteChar", "UI_LG_CHARCREATE", "Chat_Input_Private", "UI_ReconnectHold"]
                 .iter()
                 .chain(GUILD_WINDOWS.iter())
                 .chain(menu_ui::MENU_WINDOWS.iter())
@@ -391,7 +413,7 @@ impl HudState {
             // fenêtres qui les affichent tels quels ; rien à remplacer en anglais (`ini`).
             let lang = crate::assets::text_dir();
             if let Some(fr) = (lang != "ini").then(|| assets.table(lang, "UI_1024X768.ini").ok()).flatten() {
-                for w in list.iter_mut().filter(|w| ["UI_Teleport", "UI_BuyBank", "UI_Bank", "UI_SplitItem", "UI_NPCTrade_BuyStackCount", "UI_BankConfirm", "UI_Party", "UI_SelfCharacterMenu", "UI_TargetCharacterMenu", "UI_PartyOption", "UI_LG_CHARSELECT", "UI_ConfirmDeleteChar", "UI_LG_CHARCREATE"].contains(&w.name.as_str()) || GUILD_WINDOWS.contains(&w.name.as_str()) || menu_ui::MENU_WINDOWS.contains(&w.name.as_str()) || options_ui::OPTION_WINDOWS.contains(&w.name.as_str()) || convert_ui::CONVERT_WINDOWS.contains(&w.name.as_str()) || refinery_ui::REFINERY_WINDOWS.contains(&w.name.as_str())) {
+                for w in list.iter_mut().filter(|w| ["UI_Teleport", "UI_BuyBank", "UI_Bank", "UI_SplitItem", "UI_NPCTrade_BuyStackCount", "UI_BankConfirm", "UI_Party", "UI_SelfCharacterMenu", "UI_TargetCharacterMenu", "UI_PartyOption", "UI_LG_CHARSELECT", "UI_ConfirmDeleteChar", "UI_LG_CHARCREATE", "UI_ReconnectHold"].contains(&w.name.as_str()) || GUILD_WINDOWS.contains(&w.name.as_str()) || menu_ui::MENU_WINDOWS.contains(&w.name.as_str()) || options_ui::OPTION_WINDOWS.contains(&w.name.as_str()) || convert_ui::CONVERT_WINDOWS.contains(&w.name.as_str()) || refinery_ui::REFINERY_WINDOWS.contains(&w.name.as_str())) {
                     let Some(fw) = UiWindow::parse(&fr, None, &w.name) else { continue };
                     for c in &mut w.controls {
                         if let Some(d) = fw.control(&c.name).and_then(|x| x.display.clone()) {

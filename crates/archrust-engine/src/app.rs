@@ -53,6 +53,8 @@ mod skills_glue;
 
 #[path = "app_portal.rs"]
 mod portal_glue;
+#[path = "app_reconnect.rs"]
+mod reconnect_glue;
 
 #[path = "app_guild.rs"]
 mod guild_glue;
@@ -206,6 +208,8 @@ pub struct App {
     skills: skills_glue::SkillsGlue,
     /// Portails : liste des destinations, écran de chargement, voir `app_portal.rs`.
     portal: portal_glue::PortalGlue,
+    /// Reconnexion automatique en cours (AgcmReconnect).
+    reconnect: reconnect_glue::ReconnectGlue,
     /// Guilde : fenêtres d'Archonia, invitations, discussion de guilde, voir `app_guild.rs`.
     guild: guild_glue::GuildGlue,
     /// Panneaux au-dessus des personnages : noms, guildes, dégâts, voir `app_boards.rs`.
@@ -316,6 +320,7 @@ impl App {
             npc: Default::default(),
             skills: Default::default(),
             portal: Default::default(),
+            reconnect: Default::default(),
             guild: Default::default(),
             boards: Default::default(),
             convert: Default::default(),
@@ -1121,6 +1126,7 @@ impl App {
         self.party_observe(&ev);
         // Morts, vues des monstres, objets retirés du sol (voir `app_combat.rs`).
         self.combat_observe(&ev);
+        self.portal_observe(&ev);
         // Fonctions des PNJ en vue (voir `app_npc.rs`).
         self.npc_observe(&ev);
         match ev {
@@ -1284,7 +1290,8 @@ impl App {
                 if item.operation == 1
                     || item
                         .status
-                        .is_some_and(|status| !matches!(status, 2 | 3 | 100))
+                        // 53 : entrepôt de guilde (voir `app_guild.rs`).
+                        .is_some_and(|status| !matches!(status, 2 | 3 | 53 | 100))
                 {
                     self.items.remove(&item.id);
                 } else {
@@ -1440,6 +1447,11 @@ impl App {
             WorldEvent::Skill(ev) => self.on_skill_event(ev),
             // Portails : accord, départ, chargement fini (voir `app_portal.rs`).
             WorldEvent::Teleport(ev) => self.on_teleport_event(ev),
+            // Métamorphose : relevée par `portal_observe` (refus des portails).
+            WorldEvent::Transformed { .. } => {}
+            // Reconnexion automatique (0x63), voir `app_reconnect.rs`.
+            WorldEvent::Reconnecting => self.reconnect_event(true),
+            WorldEvent::Reconnected => self.reconnect_event(false),
             // Guildes (0x15 / 0x39), voir `app_guild.rs`.
             WorldEvent::Guild(ev) => self.on_guild_event(ev),
             WorldEvent::UiStatus(st) => self.on_ui_status(st),
@@ -1521,6 +1533,8 @@ impl App {
             // Groupes (0x08 / 0x09), voir `app_party.rs`.
             ev @ (WorldEvent::Party(_) | WorldEvent::PartyManagement(_)) => self.on_party_event(ev),
             WorldEvent::Disconnected(why) => {
+                // Reconnexion échouée : message d'Archonia (`DisconnectedByServer`).
+                let why = self.reconnect_failed().unwrap_or(why);
                 self.party_reset();
                 self.guild_reset();
                 self.ui.push_chat(format!("[système] déconnecté : {why}"));
@@ -1771,6 +1785,8 @@ impl App {
             _ if self.npc_slash(cmd, arg) => {}
             // Portails : /portail, /portail n (voir `app_portal.rs`).
             _ if self.portal_slash(cmd, arg) => {}
+            // Essai de la reconnexion : /coupure (voir `app_reconnect.rs`).
+            _ if self.reconnect_slash(cmd) => {}
             // Sphère d'alchimie : /sphere, /grille, /raffiner, /repeter, /recette (voir `app_refinery.rs`).
             _ if self.refinery_slash(cmd, arg) => {}
             // Compétences : /competences, /lancer (voir `app_skills.rs`).
@@ -2291,6 +2307,8 @@ impl App {
                 crate::hud::draw_character(ctx, &mut self.hud, &self.assets, &mut self.item_ui.show_character, &player_name, &equipped, &mut item_requests);
                 // Barre de raccourcis avant les fenêtres d'objets : un objet lâché dessus y reste.
                 skills_glue::panel(ctx, &mut self.skills, &skill_views, &mut self.hud, &self.assets);
+                // Entrepôt de guilde avant la banque : un objet de l'entrepôt lâché dans le sac y est repris.
+                guild_glue::item_requests(&self.guild, &mut item_requests, self.net.as_ref());
                 npc_glue::panel(ctx, &mut self.npc, &npc_views, &mut item_requests, &self.items, &mut self.hud, &self.assets, self.net.as_ref(), &mut self.ui);
                 // Forgeron et pierre d'esprit lâchée sur un objet du sac.
                 convert_glue::panel(ctx, &mut self.convert, &mut item_requests, &self.items, &mut self.hud, &self.assets, self.net.as_ref(), &mut self.ui);
@@ -2305,6 +2323,7 @@ impl App {
                 combat_glue::panel(ctx, &mut self.combat, &combat_view, &mut self.hud, &self.assets, self.net.as_ref(), &mut self.ui);
                 // Liste des destinations d'un portail, écran de chargement du trajet.
                 portal_glue::panel(ctx, &mut self.portal, &mut self.hud, &self.assets, self.net.as_ref(), &mut self.ui);
+                reconnect_glue::panel(ctx, &mut self.reconnect, &mut self.hud, &self.assets);
                 // Fenêtres de guilde et boîte OK / Annuler.
                 guild_glue::panel(ctx, &mut self.guild, &mut self.hud, &self.assets, &player_name);
                 // Comme dans WoW, l'interface des AddOns n'apparaît qu'en jeu.

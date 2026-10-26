@@ -46,6 +46,18 @@ pub mod learn_result {
     pub const NOT_ENOUGH_POINTS: i32 = 3;
     pub const LOW_LEVEL: i32 = 4;
     pub const WRONG_CLASS: i32 = 5;
+    /// Codes du contrôle d'Archonia, que sa fenêtre d'apprentissage n'affiche pas.
+    pub const NOT_ENOUGH_HEROIC_POINTS: i32 = 6;
+    pub const NOT_ENOUGH_CHARISMA: i32 = 7;
+}
+
+/// Résultats d'une amélioration (0x3B op 3, champ 5 ; Archonia FUN_1405dd9c0).
+pub mod upgrade_result {
+    pub const SUCCESS: i32 = 0;
+    pub const NOT_ENOUGH_MONEY: i32 = 1;
+    pub const NOT_ENOUGH_POINTS: i32 = 2;
+    pub const NOT_ENOUGH_HEROIC_POINTS: i32 = 3;
+    pub const NOT_ENOUGH_CHARISMA: i32 = 4;
 }
 
 /// Indices du sous-paquet « dirt » des facteurs : niveau d'une compétence, points du personnage.
@@ -107,8 +119,8 @@ pub enum SkillEvent {
     MasterOpened { npc: i32 },
     /// Résultat d'un apprentissage (0x3B op 6).
     Learned { tid: i32, result: i32 },
-    /// Amélioration faite (0x3B op 3).
-    Upgraded { id: i32 },
+    /// Résultat d'une amélioration (0x3B op 3) : 0 faite, sinon `upgrade_result`.
+    Upgraded { id: i32, result: i32 },
 }
 
 fn int(values: &[Option<Value>], i: usize) -> Option<i64> {
@@ -188,7 +200,7 @@ pub fn translate(t: u8, values: &[Option<Value>]) -> Option<WorldEvent> {
             Some(WorldEvent::Skill(match int(values, 0)? {
                 master_op::OPENED => SkillEvent::MasterOpened { npc },
                 master_op::LEARN_RESULT => SkillEvent::Learned { tid: int(values, 4).unwrap_or(0) as i32, result: int(values, 5).unwrap_or(-1) as i32 },
-                master_op::UPGRADE_RESULT => SkillEvent::Upgraded { id: int(values, 3).unwrap_or(0) as i32 },
+                master_op::UPGRADE_RESULT => SkillEvent::Upgraded { id: int(values, 3).unwrap_or(0) as i32, result: int(values, 5).unwrap_or(0) as i32 },
                 _ => return None,
             }))
         }

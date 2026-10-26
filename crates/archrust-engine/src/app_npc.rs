@@ -381,6 +381,13 @@ fn start_function(glue: &mut NpcGlue, npc: i32, f: i32, net: Option<&NetLink>, u
                 net.send(Command::Guild(archrust_netclient::guild::GuildCommand::TalkToManager(npc)));
             }
         }
+        // Entrepôt de guilde : AGPMEVENTGUILD op 2, l'accord ouvre `UI_GuildWarehouse` (voir `app_guild.rs`).
+        archrust_netclient::guild::FUNCTION_GUILD_WAREHOUSE => {
+            glue.dialog = None;
+            if let Some(net) = net {
+                net.send(Command::Guild(archrust_netclient::guild::GuildCommand::WarehouseRequest(npc)));
+            }
+        }
         // Forgeron : AGPMEVENTITEMCONVERT op 0, l'accord ouvre `UI_ConvertPhysics` (voir `app_convert.rs`).
         archrust_netclient::convert::FUNCTION_ITEM_CONVERT => {
             glue.dialog = None;
@@ -789,6 +796,8 @@ impl App {
                     function::QUEST => 331,
                     function::SKILL_MASTER => 14,
                     archrust_netclient::guild::FUNCTION_GUILD => 328,
+                    // Entrepôt de guilde chez les gardiens de banque (FUN_1406ca6a0 : fonction 0x23).
+                    archrust_netclient::guild::FUNCTION_GUILD_WAREHOUSE => 611,
                     archrust_netclient::convert::FUNCTION_ITEM_CONVERT => 327,
                     _ => continue,
                 };
@@ -856,11 +865,12 @@ impl App {
                 }
             }
             // Fonction du PNJ le plus proche qui la propose, s'il est à portée.
-            "/boutique" | "/shop" | "/banque" | "/bank" | "/quetespnj" | "/npcquests" | "/instructeur" | "/trainer" | "/registraire" | "/registrar" | "/forgeron" | "/smith" => {
+            "/boutique" | "/shop" | "/banque" | "/bank" | "/quetespnj" | "/npcquests" | "/instructeur" | "/trainer" | "/registraire" | "/registrar" | "/forgeron" | "/smith" | "/entrepot" | "/gstorage" => {
                 let f = match cmd {
                     "/boutique" | "/shop" => function::TRADE,
                     "/forgeron" | "/smith" => archrust_netclient::convert::FUNCTION_ITEM_CONVERT,
                     "/registraire" | "/registrar" => archrust_netclient::guild::FUNCTION_GUILD,
+                    "/entrepot" | "/gstorage" => archrust_netclient::guild::FUNCTION_GUILD_WAREHOUSE,
                     "/banque" | "/bank" => function::BANK,
                     "/instructeur" | "/trainer" => function::SKILL_MASTER,
                     _ => function::QUEST,

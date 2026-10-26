@@ -2,7 +2,10 @@
 //!
 //! Comportement relevé dans Archonia (AgcmUIEventTeleport, sha256 e9c7609b…) :
 //! * clic sur l'objet du décor qui porte le portail (`Function=8`, `PointName` dans `obj*.ini`) :
-//!   demande op 4 ; l'accord (op 5) ouvre la liste (FUN_1406ea050) ;
+//!   demande op 4 ; l'accord (op 5) ouvre la liste (FUN_1406ea050) ; en mode combat (10 s après le
+//!   dernier coup donné ou reçu, FUN_14016ea90) la demande n'est pas envoyée et `Teleport_CombatMode`
+//!   s'affiche dans la discussion, métamorphosé `Teleport_TransformChar` (AgcmEventTeleport
+//!   FUN_1406ac370, messages FUN_1406e9a00 / FUN_1406e9a40) ;
 //! * destinations : les points des groupes visés (`TargetGroup`) par le point de départ, dans l'ordre
 //!   des groupes puis de `TeleportPoint.ini`, sans doublon ni le départ, 20 au plus (FUN_1402e71e0) ;
 //!   un départ en zone dangereuse (`RegionType=1`) ne propose que « Retour » (`Teleport_ReturnOnly`,
@@ -13,14 +16,15 @@
 //! * statut d'une ligne : `NoMoney` si le prix dépasse l'or porté, `Normal` sinon ; `Disable` pour un
 //!   point désactivé par le serveur (champ 5, qu'ArchCore n'envoie pas) — ArchRust y met aussi les
 //!   points dont `UseType` n'admet pas la race du joueur, qu'ArchCore refuse ;
-//! * choix (FUN_1406e9ec0) : or insuffisant → `TELEPORT_NotEnoughMOney` ; arrivée en zone dangereuse
-//!   → `TELEPORT_ConfirmPvPZone` ; sinon op 0 avec le nom du point ; la fenêtre se ferme ;
+//! * choix (FUN_1406e9ec0) : or insuffisant → boîte `TELEPORT_NotEnoughMOney` (`Action=4:0`) ;
+//!   arrivée en zone de combat entre joueurs → boîte de confirmation `TELEPORT_ConfirmPvPZone`
+//!   (`Action=4:1`), qui envoie l'op 0 si elle est acceptée (FUN_1406e9a80) ; sinon op 0 avec le nom
+//!   du point ; la fenêtre se ferme ;
+//! * départ depuis une zone de combat entre joueurs : seule ligne « Retour » (op 7), qui ramène au
+//!   point de départ du dernier trajet ;
 //! * la liste se ferme si le joueur s'éloigne de plus de 149 unités (FUN_1406ea670) ;
-//! * départ (op 1) → `UI_LG_Loading` jusqu'à l'op 8 (FUN_1406e9e50, FUN_1406e9df0).
-//!
-//! Écart : la boîte de confirmation générique d'Archonia (`Action=4:1`, OK / Annuler) n'est pas
-//! décrite dans `UI_1024X768.ini` ; ArchRust affiche sa question en message système et ne part pas
-//! vers une zone dangereuse.
+//! * départ (op 1) → `UI_LG_Loading` jusqu'à l'op 8, ou l'op 2 s'il est annulé (FUN_1406e9e50,
+//!   FUN_1406e9df0).
 
 use super::App;
 use crate::assets::Assets;
@@ -30,7 +34,9 @@ use crate::objects::{tile_portals, PortalObject};
 use crate::ui::UiState;
 use crate::world::{sector_of, tile_of};
 use archrust_data::ini::{decode_text, encode_text, CodePage};
+use archrust_netclient::skills::SkillEvent;
 use archrust_netclient::teleport::{TeleportCommand, TeleportEvent};
+use archrust_netclient::WorldEvent;
 use archrust_netclient::Command;
 use glam::Vec3;
 use std::collections::{HashMap, HashSet};
@@ -39,6 +45,8 @@ use std::collections::{HashMap, HashSet};
 const CLOSE_MOVE: f32 = 149.0;
 /// Destinations au plus (tableau de 20 d'AgcmUIEventTeleport).
 const MAX_TARGETS: usize = 20;
+/// Durée du mode combat après le dernier coup (`+0xb48 + 10000` de FUN_14016ea90).
+const COMBAT_MODE: std::time::Duration = std::time::Duration::from_secs(10);
 
 /// Point de `TeleportPoint.ini`.
 #[derive(Debug, Clone, Default)]
@@ -194,6 +202,14 @@ pub struct PortalGlue {
     first: usize,
     /// Écran de chargement affiché (op 1 reçue, op 8 attendue).
     pub loading: bool,
+    /// Mode combat du joueur jusqu'à cet instant (coup donné ou reçu, compétence sur une cible).
+    combat_until: Option<std::time::Instant>,
+    /// Joueur métamorphosé (AGPMCHARACTER champ 18).
+    transformed: bool,
+    /// Trajet vers une zone de combat entre joueurs en attente de confirmation : objet, point.
+    confirm: Option<(u32, String)>,
+    /// Boîte d'information ouverte (`TELEPORT_NotEnoughMOney`).
+    notice: Option<String>,
 }
 
 impl PortalGlue {
@@ -212,6 +228,24 @@ fn send(net: Option<&NetLink>, cmd: TeleportCommand) {
 pub fn panel(ctx: &egui::Context, glue: &mut PortalGlue, hud: &mut HudState, assets: &Assets, net: Option<&NetLink>, ui: &mut UiState) {
     if glue.loading {
         crate::hud::draw_loading(ctx, hud, assets);
+    }
+    if let Some(text) = glue.notice.clone() {
+        if crate::hud::info_box(ctx, hud, assets, &text) {
+            glue.notice = None;
+        }
+    }
+    if let Some((object, point)) = glue.confirm.clone() {
+        let text = glue.data(assets).events.get("TELEPORT_ConfirmPvPZone").cloned().unwrap_or_default();
+        match crate::hud::confirm_box(ctx, hud, assets, ("portal-pvp", object), &text) {
+            Some(true) => {
+                glue.confirm = None;
+                let data = glue.data(assets);
+                ui.push_chat(format!("[portail] départ vers {} (zone de combat entre joueurs)", data.name(&point)));
+                send(net, TeleportCommand::Go { object, point });
+            }
+            Some(false) => glue.confirm = None,
+            None => {}
+        }
     }
     let Some(open) = glue.open.as_ref() else { return };
     let data = glue.data.get_or_insert_with(|| load_data(assets));
@@ -245,26 +279,61 @@ fn choose(glue: &mut PortalGlue, i: usize, hud: &mut HudState, assets: &Assets, 
         return;
     }
     let data = glue.data(assets);
-    let notice = if fee > hud.stats.money.unwrap_or(0) {
-        Some(data.events.get("TELEPORT_NotEnoughMOney").cloned().unwrap_or_default())
+    if fee > hud.stats.money.unwrap_or(0) {
+        glue.notice = Some(data.events.get("TELEPORT_NotEnoughMOney").cloned().unwrap_or_default());
     } else if data.points.get(&point).is_some_and(|p| p.region_type == 1) {
-        Some(data.events.get("TELEPORT_ConfirmPvPZone").cloned().unwrap_or_default())
+        // Zone de combat entre joueurs : la boîte de confirmation décide du départ (`panel`).
+        glue.confirm = Some((open.object, point));
     } else {
-        None
-    };
-    match notice {
-        Some(text) => {
-            hud.push_system(&text);
-            ui.push_chat(format!("[portail] {text}"));
-        }
-        None => {
-            ui.push_chat(format!("[portail] départ vers {} ({fee} {})", data.name(&point), data.message("Money_Name")));
-            send(net, TeleportCommand::Go { object: open.object, point });
-        }
+        ui.push_chat(format!("[portail] départ vers {} ({fee} {})", data.name(&point), data.message("Money_Name")));
+        send(net, TeleportCommand::Go { object: open.object, point });
     }
 }
 
 impl App {
+    /// Relevé des événements : mode combat (coups et compétences du joueur ou sur lui, FUN_14017aab0)
+    /// et métamorphose, que les portails refusent.
+    pub(super) fn portal_observe(&mut self, ev: &WorldEvent) {
+        let me = self.player.as_ref().map_or(0, |p| p.cid);
+        let fight = match ev {
+            WorldEvent::CharacterAction { cid, target_cid, .. } => *cid == me || *target_cid == me,
+            WorldEvent::Skill(SkillEvent::Cast { caster, target, .. }) => (*caster == me && *target != me && *target != 0) || (*target == me && *caster != me),
+            WorldEvent::Transformed { cid, transformed } if *cid == me => {
+                self.portal.transformed = *transformed;
+                false
+            }
+            WorldEvent::Connected | WorldEvent::Disconnected(_) => {
+                self.portal.combat_until = None;
+                self.portal.transformed = false;
+                false
+            }
+            _ => false,
+        };
+        if fight && me != 0 {
+            self.portal.combat_until = Some(std::time::Instant::now() + COMBAT_MODE);
+        }
+    }
+
+    /// Demande au portail porté par `object` (op 4), sauf en mode combat ou métamorphosé : le message
+    /// d'Archonia va alors dans la discussion (FUN_140515040, canal « SYSTEM »).
+    fn portal_request(&mut self, object: u32) -> bool {
+        let refusal = if self.portal.combat_until.is_some_and(|t| std::time::Instant::now() < t) {
+            Some("Teleport_CombatMode")
+        } else if self.portal.transformed {
+            Some("Teleport_TransformChar")
+        } else {
+            None
+        };
+        if let Some(key) = refusal {
+            let text = self.portal.data(&self.assets.clone()).message(key);
+            log::info!("portail : demande refusée par le client ({key})");
+            self.addon_chat_received("CHAT_MSG_SYSTEM", &text, "");
+            return false;
+        }
+        send(self.net.as_ref(), TeleportCommand::Request(object));
+        true
+    }
+
     /// Portails des tuiles autour du joueur (lus une fois par tuile).
     pub(super) fn portal_frame(&mut self) {
         let Some(me) = self.player.as_ref().map(|p| p.position) else { return };
@@ -304,17 +373,25 @@ impl App {
             .map(|(id, _)| id);
         let Some(object) = hit else { return false };
         log::info!("portail : demande à l'objet {object}");
-        send(self.net.as_ref(), TeleportCommand::Request(object));
+        self.portal_request(object);
         true
     }
 
     /// `/portail` (`/portal`) : demande au portail le plus proche, comme un clic sur l'objet ;
-    /// `/portail n` : choisit la n-ième destination de la liste ouverte, comme un clic sur la ligne.
+    /// `/portail n` : choisit la n-ième destination de la liste ouverte, comme un clic sur la ligne ;
+    /// `/portail oui` / `/portail non` : répond à la confirmation d'une zone de combat entre joueurs.
     pub(super) fn portal_slash(&mut self, cmd: &str, arg: &str) -> bool {
         if !matches!(cmd, "/portail" | "/portal") {
             return false;
         }
         let arg = arg.trim();
+        if let (Some((object, point)), true) = (self.portal.confirm.clone(), matches!(arg, "oui" | "non")) {
+            self.portal.confirm = None;
+            if arg == "oui" {
+                send(self.net.as_ref(), TeleportCommand::Go { object, point });
+            }
+            return true;
+        }
         if !arg.is_empty() {
             let assets = self.assets.clone();
             self.portal.data(&assets);
@@ -334,8 +411,9 @@ impl App {
         match near {
             Some((object, point, d)) => {
                 let name = self.portal.data(&self.assets.clone()).name(&point);
-                self.ui.push_chat(format!("[portail] {name} à {d:.0} unités : demande envoyée."));
-                send(self.net.as_ref(), TeleportCommand::Request(object));
+                if self.portal_request(object) {
+                    self.ui.push_chat(format!("[portail] {name} à {d:.0} unités : demande envoyée."));
+                }
             }
             None => self.ui.push_chat("[portail] Aucun portail dans les tuiles proches."),
         }
@@ -378,7 +456,7 @@ impl App {
                 }
                 self.walking = false;
             }
-            TeleportEvent::Loaded { cid } if Some(cid) == me => self.portal.loading = false,
+            TeleportEvent::Loaded { cid } | TeleportEvent::Canceled { cid } if Some(cid) == me => self.portal.loading = false,
             _ => {}
         }
     }

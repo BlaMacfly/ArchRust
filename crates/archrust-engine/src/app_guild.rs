@@ -32,16 +32,62 @@
 //!   `PARTY_CHAT` (FUN_1407a2b30, couleurs de `ini/color.ini`) ; envoi par `/G texte` et `/P texte`
 //!   (modes `sysstr` 818 « Guilde (/G) » et 817 « Groupe (/P) »), `/N texte` pour la discussion normale.
 //!
-//! Non repris (ArchCore ne les gère pas ou ressource absente) : emblèmes, agrandissement, changement de
-//! nom, classement, missions, second et passation (boutons inactifs) ; position exacte de la boîte
-//! OK / Annuler ; nom de guilde au-dessus des têtes (affichage d'Archonia non établi) ; durée restante
-//! d'une demande de départ (ArchCore n'envoie pas sa date).
+//! * second et passation (FUN_1408c10f0, FUN_1408c0340, FUN_1408c0aa0) : « Nommer » (libellé `sysstr`
+//!   771, ou 772 s'il y a un second) pour le chef, sur un membre de niveau 20 en ligne quand la guilde n'a
+//!   pas de second, ou sur le second (`GuildMemberAppointCancelConfirm_Message` puis rang 1) ;
+//!   « Hériter de la guilde » pour le chef sur le second en ligne ; demandes reçues
+//!   `GuildAppointConfirm_Message` et `GuildSuccessionConfirm_Message` (FUN_1408c0200, FUN_1408c09e0),
+//!   changement annoncé `GuildMemberRankUpdate_Message` (FUN_1408c06f0, rang : FUN_1406a53a0) ;
+//! * agrandissement (FUN_1408cce90, FUN_1408ccfa0, FUN_1408ccd50) : « Augmenter la limite » pour le
+//!   chef ; moins de 20 membres → `Guild_MemberUp_Not_Enought_Member`, sinon `Guild_MemberSize`
+//!   (`Guild_CurrentMaxMember`, `Guild_NextMaxMember` ou `Guild_CanNot_Increase_MaxMember`) ;
+//!   « Appliquer » (or suffisant) confirme `Guild_MaxMemberIncreaseOK` puis op 7 ;
+//! * liste des guildes, onglet « Classement » (FUN_1408c90c0, FUN_1408c8e30, FUN_1408c8eb0) : page 0 à
+//!   l'ouverture, ← →, recherche ; colonnes nom (« @ » → « ... »), membres, classement (champ 4) ;
+//!   pages « page/dernière » ; détail `Guild_GuildDetailInfo`.
+//! * combats de guildes : « Demander la guerre » (`Guild_List_BattleJoin`, FUN_14084ea50) ouvre
+//!   `Guild_GBattle` (FUN_14084de70 : type, durée, effectif des types 3 et 4) ; « Appliquer » confirme
+//!   `Guild_Battle_Request_ConfirmUI_Open` puis op 15 ; défi reçu (FUN_14084f310) : la fenêtre en lecture
+//!   seule et `Guild_Battle_Accept_ConfirmUI_Open` (OK op 16, Annuler op 17 et `Guild_Msg_Battle_Reject`) ;
+//!   acceptation (FUN_14084ebd0) : `sysstr` 0x151 en jaune au centre de l'écran, `Guild_Msg_Battle_Accept` ;
+//!   annulation demandée : `Guild_Battle_Cancel_Accept_ConfirmUI_Open` (op 19 / op 20 et
+//!   `Guild_Msg_Battle_Cancel_Reject`), acceptée : `Guild_Msg_Battle_Cancel_Accpet` (FUN_14084ee80) ;
+//!   début (FUN_14084f610) : `sysstr` 0x152 en rouge, `Guild_Msg_Battle_Start` ; compte à rebours et
+//!   scores (FUN_1408505a0, FUN_140850160) ; résultat (FUN_14084f400) : `Guild_Msg_Battle_Win2`,
+//!   `Draw2`, `Lose2` (« %d-%d »), `Win_By_GG2`, `Lose_By_GG2` ; abandon « GG »
+//!   (`Guild_Battle_Withdraw_ConfirmUI_Open`, op 24).
+//!
+//! * alliances et hostilités (FUN_1408cc910, FUN_1408cc7e0, FUN_1408cc5f0, FUN_1408cc530) : « Alliés » et
+//!   « Hostiles » de `Guild_List` y affichent les alliées ou les hostiles (détails des ops 44 et 45) ; le bouton
+//!   d'alliance (`Guild_Joint_Request_Button_Text`, `Guild_Joint_Leave_Button_Text` dans les alliés) et celui
+//!   d'hostilité (`Guild_Hostile_Request_Button_Text`, `Guild_Hostile_Leave_Button_Text` dans les hostiles)
+//!   confirment `Guild_OpenJointRequestConfirmUI`, `Guild_OpenJointLeaveConfirmUI`,
+//!   `Guild_OpenHostileRequestConfirmUI` ou `Guild_OpenHostileLeaveRequestConfirmUI` (ops 34, 37, 38, 41) ;
+//!   demandes reçues par le chef (FUN_1408cc440, FUN_1408cbb00, FUN_1408cba20) : `Guild_OpenJointAcceptConfirmUI`,
+//!   `Guild_OpenHostileAcceptConfirmUI`, `Guild_OpenHostileLeaveAcceptConfirmUI` ({{Guild_RelationGuildID}},
+//!   {{Guild_RelationMasterID}}), sauf s'il refuse les relations de guilde (options) ; codes 0x3c à 0x59.
+//!
+//! * entrepôt de guilde (AgcmUIGuildWarehouse) : bouton du gardien de banque (fonction 35, `sysstr` 611) →
+//!   AgpmEventGuild op 2, l'accord (op 3, FUN_1405fc020) envoie l'op 1 ; le résultat 2 ouvre `UI_GuildWarehouse`
+//!   (FUN_1405fc6a0), l'op 0 donne l'argent et les pages (FUN_1405fb8a0) ; objets au statut 53 ; dépôt (op 5,
+//!   FUN_1405fc440), reprise vers le sac (op 6, FUN_1405fd4b0), argent (ops 3 et 4 après `UI_GWareConfirm`,
+//!   FUN_1405fbb90), agrandissement (op 7 : `GWARE_EXPAND_CONFIRM` à 999 999 999 999 pièces, sinon
+//!   `GWARE_NOT_ENOUGH_MONEY`) ; la fenêtre se ferme (op 2) si le joueur s'éloigne de plus de 149 du point
+//!   d'ouverture (FUN_1405fc830).
+//!
+//! Commandes d'ArchRust pour les combats : `/gguerre guilde` (fenêtre du défi), `/gguerre appliquer`,
+//! `/gguerre annuler`, `/gg` (abandon) ; pour les relations : `/gliste allies|hostiles`, `/galliance guilde|quitter`,
+//! `/ghostile guilde`, `/gtreve guilde`.
+//!
+//! Non repris (ArchCore ne les gère pas ou ressource absente) : changement de nom, missions ; position
+//! exacte de la boîte OK / Annuler ; nom de guilde au-dessus des têtes (affichage d'Archonia non établi) ;
+//! durée restante d'une demande de départ (ArchCore n'envoie pas sa date).
 
 use super::App;
 use crate::assets::Assets;
-use crate::hud::{GuildEdit, GuildRow, GuildUi, GuildView, HudState, PageColors};
+use crate::hud::{GridCell, GuildEdit, GuildRow, GuildUi, GuildView, GwareItem, GwareView, HudState, ItemUi, ListSpec, PageColors};
 use crate::net::NetLink;
-use archrust_netclient::guild::{self, GuildCommand, GuildEvent, GuildMember, GuildNotice, GuildState};
+use archrust_netclient::guild::{self, GuildBattle, GuildCommand, GuildEvent, GuildMember, GuildNotice, GuildState};
 use archrust_netclient::party::PartyCommand;
 use archrust_netclient::Command;
 use std::collections::{HashMap, HashSet};
@@ -64,6 +110,88 @@ struct GuildData {
     events: HashMap<String, String>,
     /// Prix de création (`guildmaxmember.txt`, ligne de 50 places), 100 000 sans la table.
     create_price: i64,
+    /// Tailles de `guildmaxmember.txt` et leur prix (FUN_1402042f0).
+    sizes: Vec<(i64, i64)>,
+    /// Éléments d'emblème de `guildmark.txt` (FUN_1402050f0).
+    marks: Vec<MarkRow>,
+}
+
+/// Élément d'emblème : couche (1 fond, 2 motif, 3 symbole, 4 couleur), numéro, nom, prix en or et en
+/// argent liquide, couleur ARGB (couche 4).
+#[derive(Debug, Clone, PartialEq)]
+struct MarkRow {
+    layer: u8,
+    number: u32,
+    name: String,
+    gold: i64,
+    cash: i64,
+    argb: u32,
+}
+
+impl MarkRow {
+    /// TID : numéro décalé de 8 bits par couche.
+    fn tid(&self) -> u32 {
+        self.number << (8 * (self.layer as u32 - 1))
+    }
+}
+
+/// Nom de couche des textures d'emblème (`GM_%s%02u.png`, `GM_%sS%02u.png`, FUN_1406033e0).
+const MARK_LAYERS: [&str; 4] = ["Bottom", "Pattern", "Symbol", "Color"];
+/// Fenêtre `Guild_Mark` : onglets des couches, grille (5 colonnes, 7 lignes visibles) et couleurs.
+const MARK_TABS: [&str; 3] = ["CONTROL_26771", "CONTROL_22044", "CONTROL_164"];
+const MARK_GRID: &str = "GUILDMARK_GRID";
+const MARK_COLORS: &str = "GUILDMARK_COLOR_GRID";
+const MARK_COLS: usize = 5;
+const MARK_ROWS: usize = 7;
+/// Membres exigés pour l'emblème (FUN_14055b920).
+const MARK_MIN_MEMBERS: usize = 10;
+
+fn parse_marks(text: &str) -> Vec<MarkRow> {
+    text.lines()
+        .skip(1)
+        .filter_map(|l| {
+            let c: Vec<&str> = l.split('\t').map(str::trim).collect();
+            let layer = MARK_LAYERS.iter().position(|n| c.first() == Some(n))? as u8 + 1;
+            let num = |i: usize| c.get(i).and_then(|v| v.parse::<i64>().ok()).unwrap_or(0);
+            let number = num(1);
+            if !(1..=255).contains(&number) {
+                return None;
+            }
+            let argb = if layer == 4 { c.get(4).and_then(|v| u32::from_str_radix(v, 16).ok()).unwrap_or(0xFFFF_FFFF) } else { 0 };
+            Some(MarkRow { layer, number: number as u32, name: c.get(2).unwrap_or(&"").to_string(), gold: num(3), cash: num(6), argb })
+        })
+        .collect()
+}
+
+/// Partie d'un emblème pour la couche `layer` (1 à 3), et indice de couleur de cette couche.
+fn mark_part(tid: u32, layer: u8) -> u32 {
+    tid & (0xff << (8 * (layer as u32 - 1)))
+}
+
+fn color_index(color: u32, layer: u8) -> u32 {
+    (color >> (8 * (layer as u32 - 1))) & 0xff
+}
+
+/// Images d'un emblème sur trois contrôles (fond, motif, symbole) : grande (`GM_Bottom03.png`) ou petite
+/// (`GM_BottomS03.png`) texture, teinte de la couleur de la couche (FUN_14055d110, FUN_14055c310).
+fn mark_images(d: &GuildData, tid: u32, color: u32, controls: [&'static str; 3], small: bool) -> Vec<(&'static str, String, u32)> {
+    let mut out = Vec::new();
+    for (i, control) in controls.into_iter().enumerate() {
+        let layer = i as u8 + 1;
+        let part = mark_part(tid, layer);
+        let Some(row) = d.marks.iter().find(|m| m.layer == layer && m.tid() == part && part != 0) else { continue };
+        let tint = d.marks.iter().find(|m| m.layer == 4 && m.number == color_index(color, layer)).map_or(0xFFFF_FFFF, |m| m.argb);
+        out.push((control, format!("GM_{}{}{:02}.png", MARK_LAYERS[i], if small { "S" } else { "" }, row.number), tint));
+    }
+    out
+}
+
+/// Éléments choisis d'un emblème, prix en or et en argent liquide (FUN_14055b200).
+fn mark_parts(d: &GuildData, tid: u32) -> (Vec<&MarkRow>, i64, i64) {
+    let parts: Vec<&MarkRow> = (1..=3u8).filter_map(|l| d.marks.iter().find(|m| m.layer == l && m.tid() == mark_part(tid, l) && mark_part(tid, l) != 0)).collect();
+    let gold = parts.iter().map(|m| m.gold).sum();
+    let cash = parts.iter().map(|m| m.cash).sum();
+    (parts, gold, cash)
 }
 
 impl GuildData {
@@ -82,16 +210,19 @@ fn load_data(assets: &Assets) -> GuildData {
         .map(|(k, v)| (k.trim().to_string(), v.trim().to_string()))
         .collect();
     let mut create_price = 100_000;
+    let mut sizes = Vec::new();
     for line in super::npc_glue::client_text_in(assets, "ini", "guildmaxmember.txt").lines() {
         let mut cols = line.split('\t').map(str::trim);
         if let (Some(Ok(size)), Some(Ok(price))) = (cols.next().map(str::parse::<i64>), cols.next().map(str::parse::<i64>)) {
             if size == CREATE_SIZE {
                 create_price = price;
             }
+            sizes.push((size, price));
         }
     }
     let events = super::portal_glue::ui_events(assets);
-    GuildData { messages, events, create_price }
+    let marks = parse_marks(&super::npc_glue::client_text_in(assets, "ini", "guildmark.txt"));
+    GuildData { messages, events, create_price, sizes, marks }
 }
 
 /// Une fenêtre de guilde ouverte.
@@ -106,6 +237,11 @@ enum Win {
     DestroyComplete,
     Notice,
     Member,
+    List,
+    MemberSize,
+    Mark,
+    MarkConfirm,
+    GBattle,
 }
 
 impl Win {
@@ -120,6 +256,11 @@ impl Win {
             Win::DestroyComplete => "Guild_Destroy_Complete",
             Win::Notice => "Guild_Notice",
             Win::Member => "Guild_Member",
+            Win::List => "Guild_List",
+            Win::MemberSize => "Guild_MemberSize",
+            Win::Mark => "Guild_Mark",
+            Win::MarkConfirm => "Guild_MarkConfirm",
+            Win::GBattle => "Guild_GBattle",
         }
     }
 }
@@ -132,6 +273,91 @@ enum Ask {
     Kick(String),
     AllowJoin(String),
     AllowLeave(String),
+    /// Retirer son rang au second.
+    AppointCancel(String),
+    /// Agrandir la guilde à cette taille.
+    Increase(i64),
+    /// Réponse à une nomination ou à une passation reçue.
+    AppointAnswer { guild: String, rank: i32 },
+    SuccessionAnswer { guild: String },
+    /// Demande d'adhésion à la guilde choisie dans la liste.
+    JoinRequest(String),
+    /// Emblème : remettre à zéro le dessin ; acheter malgré une autre guilde au même emblème.
+    MarkReset,
+    MarkForce,
+    /// Alliance, hostilité et trêve : à demander à cette guilde, reçues de cette guilde ; départ de l'alliance.
+    JointRequest(String),
+    JointAccept(String),
+    JointLeave,
+    HostileRequest(String),
+    HostileAccept(String),
+    HostileLeaveRequest(String),
+    HostileLeaveAccept(String),
+    /// Combat : défi à envoyer, défi reçu de cette guilde ; annulation à demander, demande reçue ; abandon.
+    BattleRequest,
+    BattleAnswer(String),
+    BattleCancel,
+    BattleCancelAnswer,
+    BattleWithdraw,
+}
+
+/// Entrepôt de guilde : gardien et point d'ouverture, fenêtre ouverte, argent, pages en plus, page affichée,
+/// objets (statut 53), montant demandé (dépôt ou retrait).
+#[derive(Default)]
+struct Gware {
+    npc: Option<i32>,
+    at: Option<(f32, f32)>,
+    open: bool,
+    money: i64,
+    slots: i32,
+    page: i16,
+    items: Vec<GwareItem>,
+    money_ask: Option<(bool, i64)>,
+}
+
+/// Choix de la fenêtre `Guild_GBattle` : guilde visée, type, durée et effectif (indices des listes),
+/// lecture seule pour un défi reçu.
+#[derive(Default, Clone)]
+struct BattleForm {
+    enemy: String,
+    kind: usize,
+    time: usize,
+    man: usize,
+    received: bool,
+}
+
+impl BattleForm {
+    /// Valeurs des `{{…}}` des questions de combat (`Guild_Battle_Enemy_GuildID`, type, durée).
+    fn named(&self, d: &GuildData) -> Vec<(&'static str, String)> {
+        vec![
+            ("Guild_Battle_Enemy_GuildID", self.enemy.clone()),
+            ("Guild_Battle_Type", d.msg(guild::battle::KINDS[self.kind.min(4)])),
+            ("Guild_Battle_Duration", guild::battle::MINUTES[self.time.min(5)].to_string()),
+        ]
+    }
+
+    fn men(&self) -> &'static [i32] {
+        match self.kind {
+            3 => &guild::battle::TOTAL_MEN,
+            4 => &guild::battle::PRIVATE_MEN,
+            _ => &[],
+        }
+    }
+}
+
+/// Remplace chaque `{{Clé.Clé}}` d'un message d'événement par la valeur de sa clé.
+fn fill_named(text: &str, values: &[(&str, String)]) -> String {
+    let mut out = String::new();
+    let mut rest = text;
+    while let Some(i) = rest.find("{{") {
+        out.push_str(&rest[..i]);
+        let Some(j) = rest[i..].find("}}") else { break };
+        let key = rest[i + 2..i + j].split('.').next_back().unwrap_or("");
+        out.push_str(values.iter().find(|(k, _)| *k == key).map_or("", |(_, v)| v.as_str()));
+        rest = &rest[i + j + 2..];
+    }
+    out.push_str(rest);
+    out
 }
 
 #[derive(Default)]
@@ -153,6 +379,21 @@ pub struct GuildGlue {
     selected: Option<usize>,
     page: usize,
     ask: Option<(Ask, String)>,
+    /// Boîte d'information (`Action=4:0`) affichée.
+    info: Option<String>,
+    /// Liste des guildes : ligne choisie et nom cherché ; contenu (0 classement, 1 alliées, 2 hostiles, `+0x2e20`).
+    list_selected: Option<usize>,
+    list_mode: u8,
+    list_search: String,
+    /// Emblème en cours de dessin : couche (0 fond, 1 motif, 2 symbole), TID, couleur, ligne de la grille.
+    mark_layer: usize,
+    mark_tid: u32,
+    mark_color: u32,
+    mark_scroll: usize,
+    /// Combat de guildes : choix de `Guild_GBattle`, annonce du centre de l'écran (texte, couleur ARGB, fin).
+    battle_form: BattleForm,
+    battle_notice: Option<(String, u32, std::time::Instant)>,
+    gware: Gware,
     /// Clics de la dernière image, traités par `guild_frame`.
     clicks: Vec<GuildUi>,
 }
@@ -160,6 +401,19 @@ pub struct GuildGlue {
 impl GuildGlue {
     fn data(&mut self, assets: &Assets) -> &GuildData {
         self.data.get_or_insert_with(|| load_data(assets))
+    }
+
+    /// Lignes de `Guild_List` : la page du classement, les alliées ou les hostiles.
+    fn list_entries(&self) -> Vec<guild::GuildListEntry> {
+        match self.list_mode {
+            1 => self.state.joint_details.clone(),
+            2 => self.state.hostile_details.clone(),
+            _ => self.state.list.as_ref().map(|l| l.entries.clone()).unwrap_or_default(),
+        }
+    }
+
+    fn list_picked(&self) -> Option<String> {
+        self.list_selected.and_then(|i| self.list_entries().get(i).map(|e| e.name.clone()))
     }
 }
 
@@ -217,7 +471,7 @@ fn printf(fmt: &str, args: &[&dyn std::fmt::Display]) -> String {
 }
 
 /// Message d'un code de guilde (op 10) : texte et couleur ARGB (FUN_1406a44e0) ; `None` = rien.
-fn system_text(d: &GuildData, code: i32, text: &str, number: i64) -> Option<(String, u32)> {
+fn system_text(d: &GuildData, code: i32, text: &str, number: i64, number2: i64) -> Option<(String, u32)> {
     let white = 0xFFFF_FFFF;
     let guild_color = d.color("Guild_System_Message_Color", 0xFFFF_FF33);
     let key = match code {
@@ -239,12 +493,89 @@ fn system_text(d: &GuildData, code: i32, text: &str, number: i64) -> Option<(Str
         18 => "Guild_Msg_ForcedLeave2",
         // Invité qui refuse les invitations de guilde (options) : couleur `Negative_Text_Color`.
         42 => return Some((printf(&d.msg("Option_Guild_Off_User"), &[&text]), d.color("Negative_Text_Color", 0xFFFF_0000))),
+        44 => "Guild_Not_Enought_Gheld",
+        45 => "Guild_Not_Enought_Skull",
+        // Combats de guildes (FUN_1406a44e0) : le code 22 lit le second nombre.
+        19 => return Some((printf(&d.msg("Guild_Msg_Battle_Both_Member_Count"), &[&number]), white)),
+        20 => return Some((printf(&d.msg("Guild_Msg_Battle_Not_Enough_Member"), &[&number]), white)),
+        22 => return Some((printf(&d.msg("Guild_Msg_Battle_Not_Enough_Level"), &[&number2]), white)),
+        21 | 23 | 25 => "Guild_Msg_Battle_Not_Request_Status2",
+        24 => "Guild_Msg_Battle_Not_Request_Status",
+        26 => "Guild_Msg_Battle_Master_Offline",
+        27 => "Guild_Msg_Battle_Not_Exist_Guild",
+        28 => "Guild_Msg_Battle_Request",
+        30 => "Guild_Msg_Battle_Reject_By_Other",
+        31 => return Some((printf(&d.msg("Guild_Msg_Battle_Cancel_Passed_Time"), &[&(number / 60)]), white)),
+        33 => "Guild_Msg_Battle_Cancel_Reject_By_Other",
+        35 => "Guild_Msg_Battle_Cannot_Request_GG",
+        41 => "Guild_Msg_Battle_Not_Usable",
+        43 => return Some((printf(&d.msg("Option_GBattle_Off_User"), &[&text]), d.color("Negative_Text_Color", 0xFFFF_0000))),
         47 => return Some((d.msg("Guild_No_Exist_Search_Guild"), guild_color)),
+        // Alliances et hostilités : 0x41 et 0x4f écrivent 20 et 10, 0x48 et 0x4a le nom de la guilde.
+        0x3c => "Guild_Joint_Disable",
+        0x3d => "Guild_Joint_Not_Leader",
+        0x3e => "Guild_Joint_Already_Joint",
+        0x3f => "Guild_Joint_Max",
+        0x40 => "Guild_Joint_Maste_Offline",
+        0x41 => return Some((printf(&d.msg("Guild_Joint_Not_Enough_Member"), &[&20]), white)),
+        0x42 => "Guild_Joint_Other_Not_Enough_Member",
+        0x43 => "Guild_Joint_Wait",
+        0x44 => "Guild_Joint_Reject",
+        0x45 => "Guild_Joint_Failure",
+        0x46 => "Guild_Joint_Success",
+        0x47 => "Guild_Joint_Leave_Success",
+        0x48 => return Some((printf(&d.msg("Guild_Joint_Leave_Other_Guild"), &[&text]), white)),
+        0x49 => "Guild_Joint_Destroy",
+        0x4a => return Some((printf(&d.msg("Guild_Joint_Success2"), &[&text]), white)),
+        0x4b => "Guild_Hostile_Disable",
+        0x4c => "Guild_Hostile_Already_Hostile",
+        0x4d => "Guild_Hostile_Max",
+        0x4e => "Guild_Hostile_Master_Offline",
+        0x4f => return Some((printf(&d.msg("Guild_Hostile_Not_Enough_Member"), &[&10]), white)),
+        0x50 => "Guild_Hostile_Other_Not_Enough_Member",
+        0x51 => "Guild_Hostile_Wait",
+        0x52 => "Guild_Hostile_Reject",
+        0x53 => "Guild_Hostile_Failure",
+        0x54 => "Guild_Hostile_Success",
+        0x55 => "Guild_Hostile_Leave_Disable",
+        0x56 => "Guild_Hostile_Leave_Wait",
+        0x57 => "Guild_Hostile_Leave_Reject",
+        0x58 => "Guild_Hostile_Leave_Failure",
+        0x59 => "Guild_Hostile_Leave_Success",
         48 => return Some((printf(&d.msg("Guild_Join_Request_Self"), &[&text]), guild_color)),
         50 => return Some((printf(&d.msg("Guild_Leave_Request_Self"), &[&text]), guild_color)),
         _ => return None,
     };
     Some((d.msg(key), white))
+}
+
+/// Titre d'un rang (FUN_1406a53a0).
+fn rank_title(d: &GuildData, r: i32) -> String {
+    match r {
+        guild::rank::NORMAL => d.msg("Guild_Member"),
+        guild::rank::MASTER => d.msg("Guild_Master"),
+        guild::rank::SUBMASTER => d.msg("Guild_SubMaster"),
+        _ => String::new(),
+    }
+}
+
+/// Somme d'or avec une virgule tous les trois chiffres (FUN_14055cca0).
+fn gold(n: i64) -> String {
+    let digits = n.to_string();
+    let mut out = String::new();
+    for (i, c) in digits.chars().enumerate() {
+        if i > 0 && (digits.len() - i) % 3 == 0 && c.is_ascii_digit() {
+            out.push(',');
+        }
+        out.push(c);
+    }
+    out
+}
+
+/// Taille suivante (dizaine supérieure) et son prix, si `guildmaxmember.txt` la prévoit (FUN_1408ccfa0).
+fn next_size(d: &GuildData, max: i64) -> (i64, Option<i64>) {
+    let next = if max < 1 { 10 } else { (max / 10 + 1) * 10 };
+    (next, d.sizes.iter().find(|(s, _)| *s == next).map(|(_, g)| *g))
 }
 
 /// Nom de race et de classe d'un modèle (clés de `uimessage.txt`).
@@ -274,7 +605,24 @@ pub fn panel(ctx: &egui::Context, glue: &mut GuildGlue, hud: &mut HudState, asse
     let d = glue.data.take().expect("données lues");
     let colors = PageColors { selected: d.color("Guild_SelectPageColor", 0xFFFF_F0C8), other: d.color("Guild_DeselectPageColor", 0xFF80_8080) };
     let mut out = Vec::new();
-    let open: Vec<Win> = [Win::Main, Win::Create, Win::Destroy, Win::Notice, Win::Member, Win::CreateRequest, Win::CreateComplete, Win::DestroyConfirm, Win::DestroyComplete]
+    let has_sub = rows.iter().any(|m| m.rank == guild::rank::SUBMASTER);
+    let (my_tid, my_color) = info.as_ref().map_or((0, 0), |i| (i.mark_tid as u32, i.mark_color as u32));
+    let open: Vec<Win> = [
+        Win::Main,
+        Win::Create,
+        Win::Destroy,
+        Win::Notice,
+        Win::Member,
+        Win::List,
+        Win::MemberSize,
+        Win::Mark,
+        Win::MarkConfirm,
+        Win::GBattle,
+        Win::CreateRequest,
+        Win::CreateComplete,
+        Win::DestroyConfirm,
+        Win::DestroyComplete,
+    ]
         .into_iter()
         .filter(|w| glue.open.contains(w))
         .collect();
@@ -289,8 +637,12 @@ pub fn panel(ctx: &egui::Context, glue: &mut GuildGlue, hud: &mut HudState, asse
                 if !(master && rows.len() == 1) {
                     v.disabled.insert("GD_Main_Button_2");
                 }
-                // Emblème, agrandissement, changement de nom : non gérés par ArchCore.
-                v.disabled.extend(["GD_Main_Button_3", "CONTROL_29434", "CONTROL_10138"]);
+                // « Emblème » et « Augmenter la limite » : Guild_Enable_Guild_Master. Changement de nom :
+                // non géré par ArchCore.
+                if !master {
+                    v.disabled.extend(["GD_Main_Button_3", "CONTROL_29434"]);
+                }
+                v.disabled.insert("CONTROL_10138");
             }
             Win::Create => {
                 v.texts.insert("Guild_Create_Edit_Info", d.msg("Guild_Create_Text"));
@@ -313,6 +665,7 @@ pub fn panel(ctx: &egui::Context, glue: &mut GuildGlue, hud: &mut HudState, asse
                 v.texts.insert("GD_Create_Complete_Edit", printf(&d.msg("Guild_Create_Complete_Text"), &[n, n, &me]));
             }
             Win::DestroyConfirm => {
+                v.images = mark_images(&d, my_tid, my_color, ["CONTROL_24108", "CONTROL_28196", "CONTROL_11609"], false);
                 v.texts.insert("GD_Destroy_Confirm_Edit", printf(&d.msg("Guild_Guild_Info"), &[&guild_name, &me]));
                 v.texts.insert("GD_Destroy_Confirm_Edit2", d.msg("Guild_Destroy_Confirm_Text"));
             }
@@ -321,7 +674,8 @@ pub fn panel(ctx: &egui::Context, glue: &mut GuildGlue, hud: &mut HudState, asse
             }
             Win::Notice => {
                 v.active.insert("GD_Notice_Button_Tab1");
-                v.disabled.extend(["GD_Notice_Button_Tab3", "GD_Notice_Button_GvGTournament"]);
+                v.disabled.insert("GD_Notice_Button_GvGTournament");
+                v.images = mark_images(&d, my_tid, my_color, ["CONTROL_3065", "CONTROL_30928", "CONTROL_19292"], false);
                 if info.is_none() {
                     v.disabled.insert("GD_Notice_Button_Tab2");
                 }
@@ -352,7 +706,8 @@ pub fn panel(ctx: &egui::Context, glue: &mut GuildGlue, hud: &mut HudState, asse
             }
             Win::Member => {
                 v.active.insert("GD_Member_Button_Tab2");
-                v.disabled.extend(["GD_Member_Button_Tab3", "GD_Member_Button_GvGTournament", "CONTROL_31321", "CONTROL_3394"]);
+                v.disabled.insert("GD_Member_Button_GvGTournament");
+                v.list = Some(ListSpec::MEMBERS);
                 let pages = rows.len().div_ceil(PAGE).max(1);
                 v.pages = pages;
                 v.page = glue.page.min(pages - 1);
@@ -363,14 +718,14 @@ pub fn panel(ctx: &egui::Context, glue: &mut GuildGlue, hud: &mut HudState, asse
                         guild::rank::LEAVE_REQUEST => d.msg("Guild_Member_Leave_Request"),
                         _ => m.level.to_string(),
                     };
-                    v.rows.push(GuildRow { name: shown_name(&m.name), level, class, race, online: m.online });
+                    v.rows.push(GuildRow { cols: vec![shown_name(&m.name), level, class, race], online: Some(m.online) });
                 }
                 v.selected = glue.selected;
                 v.texts.insert("CONTROL_2357", pages.to_string());
                 // Détail et boutons selon le membre choisi (FUN_1408c10f0, FUN_1408bfa80).
                 let mut detail = String::new();
                 let mut allow = d.msg("Guild_Join_Allow_Button_Text");
-                let (mut kick, mut invite, mut allow_on, mut whisper) = (false, false, false, false);
+                let (mut kick, mut invite, mut allow_on, mut whisper, mut appoint, mut succession) = (false, false, false, false, false, false);
                 if let Some(s) = &selected {
                     let (race, class) = race_class(assets, &d, s.tid);
                     detail = match s.rank {
@@ -390,18 +745,209 @@ pub fn panel(ctx: &egui::Context, glue: &mut GuildGlue, hud: &mut HudState, asse
                     invite = s.online && !s.name.eq_ignore_ascii_case(&me);
                     // Guild_Enable_Chat_Whisper : membre en ligne, sans autre condition (FUN_1408c10f0).
                     whisper = s.online;
+                    // Guild_Enable_Appoint_Button / Guild_Enable_Succession_Button (FUN_1408c10f0) : le chef,
+                    // sur un membre de niveau 20 (en ligne et sans second dans la guilde, ou le second
+                    // lui-même) ; la passation sur le second en ligne.
+                    let not_master = s.rank != guild::rank::MASTER;
+                    appoint = master && not_master && s.level >= 20 && ((!has_sub && s.online) || s.rank == guild::rank::SUBMASTER);
+                    succession = master && s.rank == guild::rank::SUBMASTER && s.online;
                 }
                 v.texts.insert("CONTROL_5979", detail);
                 v.texts.insert("CONTROL_23938", allow);
-                for (on, c) in [(kick, "GD_Member_Button_Leave"), (invite, "CONTROL_14314"), (allow_on, "CONTROL_23938"), (whisper, "CONTROL_24708")] {
+                // Guild_AppointAndCancel_BtnText : sysstr 0x303 « Nommer », 0x304 s'il y a un second.
+                v.texts.insert("CONTROL_31321", super::npc_glue::sysstr(assets, 0x303 + has_sub as u32).unwrap_or_default());
+                for (on, c) in [
+                    (kick, "GD_Member_Button_Leave"),
+                    (invite, "CONTROL_14314"),
+                    (allow_on, "CONTROL_23938"),
+                    (whisper, "CONTROL_24708"),
+                    (appoint, "CONTROL_31321"),
+                    (succession, "CONTROL_3394"),
+                ] {
                     if !on {
                         v.disabled.insert(c);
                     }
                 }
                 v.edits.push(GuildEdit { control: "CONTROL_12329", text: &mut glue.search, password: false, max: 48, multiline: false });
             }
+            Win::List => {
+                v.active.insert("CONTROL_12509");
+                v.list = Some(ListSpec::GUILDS);
+                if info.is_none() {
+                    v.disabled.insert("CONTROL_26096");
+                }
+                // Tournoi de guildes : pas repris.
+                v.disabled.insert("GD_Ranking_Button_GvGTournament");
+                let entries = glue.list_entries();
+                let (total, page) = match (glue.list_mode, &glue.state.list) {
+                    (0, Some(l)) => (l.total, l.page),
+                    _ => (entries.len() as i32, 0),
+                };
+                let pages = ((total.max(1) - 1) / PAGE as i32 + 1) as usize;
+                v.pages = pages;
+                v.page = (page.max(0) as usize).min(pages - 1);
+                for e in &entries {
+                    v.rows.push(GuildRow { cols: vec![shown_name(&e.name), e.members.to_string(), e.ranking.to_string()], online: None });
+                }
+                v.selected = glue.list_selected.filter(|i| *i < entries.len());
+                v.texts.insert("CONTROL_22866", if total > 0 { format!("{}/{}", v.page + 1, pages) } else { String::new() });
+                let picked = v.selected.and_then(|i| entries.get(i));
+                // Boutons d'alliance et d'hostilité (FUN_1408cac30, FUN_1408cabb0) : libellé selon la liste
+                // affichée ; le chef, sur une autre guilde (ou, dans les alliés, pour quitter l'alliance).
+                let mode = glue.list_mode;
+                v.texts.insert("CONTROL_19137", d.msg(if mode == 1 { "Guild_Joint_Leave_Button_Text" } else { "Guild_Joint_Request_Button_Text" }));
+                v.texts.insert("CONTROL_18911", d.msg(if mode == 2 { "Guild_Hostile_Leave_Button_Text" } else { "Guild_Hostile_Request_Button_Text" }));
+                let picked_other = picked.is_some_and(|e| !e.name.eq_ignore_ascii_case(&guild_name));
+                if !(master && ((mode == 0 && picked_other) || (mode == 1 && !glue.state.joints.is_empty()))) {
+                    v.disabled.insert("CONTROL_19137");
+                }
+                if !(master && picked_other && mode != 1) {
+                    v.disabled.insert("CONTROL_18911");
+                }
+                if info.is_none() {
+                    v.disabled.extend(["CONTROL_24849", "CONTROL_20569"]);
+                }
+                let detail = picked.map(|e| printf(&d.msg("Guild_GuildDetailInfo"), &[&e.name, &e.level, &e.master, &e.submaster, &e.members, &e.max_members])).unwrap_or_default();
+                v.texts.insert("CONTROL_18338", detail);
+                // Emblème de la guilde choisie (FUN_1408c97e0).
+                if let Some(e) = picked {
+                    v.images = mark_images(&d, e.mark_tid as u32, e.mark_color as u32, ["CONTROL_4449", "CONTROL_30582", "CONTROL_8644"], false);
+                }
+                // Guild_List_BattleJoin : « Demander la guerre » dans une guilde (le chef, sur une autre guilde,
+                // hors combat), « Rejoindre » sinon.
+                v.texts.insert("CONTROL_6490", d.msg(if info.is_some() { "Guild_List_Battle_Button_Text" } else { "Guild_List_Join_Request_Button_Text" }));
+                let other = picked.is_some_and(|e| !e.name.eq_ignore_ascii_case(&guild_name));
+                if picked.is_none() || (info.is_some() && !(master && other && mode == 0 && glue.state.status == guild::battle::status::NONE)) {
+                    v.disabled.insert("CONTROL_6490");
+                }
+                v.edits.push(GuildEdit { control: "CONTROL_12575", text: &mut glue.list_search, password: false, max: 32, multiline: false });
+            }
+            Win::MemberSize => {
+                let max = info.as_ref().map_or(0, |i| i.max_members as i64);
+                v.texts.insert("CONTROL_16864", printf(&d.msg("Guild_CurrentMaxMember"), &[&max]));
+                let (next, price) = next_size(&d, max);
+                let text = match price {
+                    Some(p) => printf(&d.msg("Guild_NextMaxMember"), &[&next, &gold(p)]),
+                    None => d.msg("Guild_CanNot_Increase_MaxMember"),
+                };
+                v.texts.insert("CONTROL_22644", text);
+                // Guild_Enable_Inc_Max_Member : chef, or suffisant (crânes : aucun dans la table).
+                if !(master && price.is_some_and(|p| money >= p)) {
+                    v.disabled.insert("CONTROL_10606");
+                }
+            }
+            Win::Mark => {
+                let layer = glue.mark_layer.min(2);
+                v.active.insert(MARK_TABS[layer]);
+                let l = layer as u8 + 1;
+                let mut rows: Vec<&MarkRow> = d.marks.iter().filter(|m| m.layer == l).collect();
+                rows.sort_by_key(|m| m.number);
+                let current = mark_part(glue.mark_tid, l);
+                for (slot, m) in rows.iter().skip(glue.mark_scroll * MARK_COLS).take(MARK_COLS * MARK_ROWS).enumerate() {
+                    let texture = format!("GM_{}S{:02}.png", MARK_LAYERS[layer], m.number);
+                    v.cells.push(GridCell { control: MARK_GRID, slot, id: m.tid() as usize, texture, tint: 0xFFFF_FFFF, selected: m.tid() == current });
+                }
+                let colors: Vec<&MarkRow> = d.marks.iter().filter(|m| m.layer == 4).collect();
+                for (slot, m) in colors.iter().enumerate() {
+                    let texture = format!("GM_ColorS{:02}.png", m.number);
+                    v.cells.push(GridCell { control: MARK_COLORS, slot, id: m.number as usize, texture, tint: 0xFFFF_FFFF, selected: color_index(glue.mark_color, l) == m.number });
+                }
+                v.images = mark_images(&d, glue.mark_tid, glue.mark_color, ["CONTROL_29950", "CONTROL_4465", "CONTROL_2086"], false);
+                v.images.extend(mark_images(&d, glue.mark_tid, glue.mark_color, ["CONTROL_31034", "CONTROL_10592", "CONTROL_15384"], true));
+                // Guild_Mark_DetailInfo (FUN_14055b200) : « couche : nom » de chaque élément, puis le prix.
+                let (parts, price, cash) = mark_parts(&d, glue.mark_tid);
+                let mut detail: Vec<String> = parts
+                    .iter()
+                    .map(|m| format!(" {} : {}", super::npc_glue::sysstr(assets, 0x20b + m.layer as u32 - 1).unwrap_or_default(), m.name))
+                    .collect();
+                if price > 0 {
+                    detail.push(format!("[{}]", super::npc_glue::sysstr(assets, 0x20e).unwrap_or_default()));
+                    detail.push(format!(" {} {}", gold(price), super::npc_glue::sysstr(assets, 10).unwrap_or_default()));
+                }
+                if cash > 0 {
+                    detail.push(format!(" {} {}", gold(cash), super::npc_glue::sysstr(assets, 10).unwrap_or_default()));
+                }
+                v.texts.insert("CONTROL_7757", detail.join("___"));
+                // Guild_Enable_Buy_GuildMark : le chef, un emblème différent de celui de la guilde, payable.
+                if !(master && glue.mark_tid != my_tid && money >= price) {
+                    v.disabled.insert("CONTROL_5906");
+                }
+            }
+            Win::MarkConfirm => {
+                v.images = mark_images(&d, glue.mark_tid, glue.mark_color, ["GUILDMARK_GRID_BOTTOM", "GUILDMARK_GRID_PATTERN", "GUILDMARK_GRID_SYMBOL"], false);
+            }
+            // Guild_GBattle (FUN_14084de70) : type, durée, effectif (types 3 et 4) ; lecture seule pour un défi
+            // reçu.
+            Win::GBattle => {
+                let f = &glue.battle_form;
+                v.texts.insert("CONTROL_4060", d.msg(guild::battle::KINDS[f.kind.min(4)]));
+                v.texts.insert("CONTROL_17192", guild::battle::MINUTES[f.time.min(5)].to_string());
+                let men = f.men();
+                v.texts.insert("CONTROL_21248", men.get(f.man).map(|n| n.to_string()).unwrap_or_default());
+                if men.is_empty() {
+                    v.disabled.extend(["CONTROL_21248", "CONTROL_12900"]);
+                }
+                if f.received {
+                    v.disabled.extend(["CONTROL_4060", "CONTROL_29955", "CONTROL_17192", "CONTROL_6484", "CONTROL_21248", "CONTROL_12900", "CONTROL_12454"]);
+                }
+            }
         }
         crate::hud::draw_guild_window(ctx, hud, assets, win.name(), v, &colors, &mut out);
+    }
+    // Combat de guildes : compte à rebours, adversaire, scores (FUN_1408505a0, FUN_140850160).
+    let mut lines: Vec<(String, u32, f32)> = Vec::new();
+    if let Some(b) = &glue.state.battle {
+        let left = b.remaining(glue.state.status);
+        let clock = if left < 60 {
+            let tenth = 9 - (std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.subsec_millis()) / 100);
+            format!("{left:02}.{tenth}")
+        } else {
+            format!("{}:{:02}", left / 60, left % 60)
+        };
+        let sys = |n: u32| super::npc_glue::sysstr(assets, n).unwrap_or_default();
+        match glue.state.status {
+            guild::battle::status::READY => {
+                lines.push((format!("{} {clock} {}", sys(0x153), sys(0x154)), 0xFF_FFFF, 200.0));
+                lines.push((format!("vs {}", b.enemy), 0xFF_FFFF, 230.0));
+            }
+            guild::battle::status::BATTLE => {
+                lines.push((format!("vs {}[{}] {clock}", b.enemy, b.enemy_master), 0xFF_FFFF, 230.0));
+                lines.push((format!("{} : {}{}", sys(0x155), b.score, if b.up_score > 0 { format!("  +{}", b.up_score) } else { String::new() }), 0x1C_41FF, 280.0));
+                lines.push((format!("{} : {}{}", sys(0x156), b.enemy_score, if b.enemy_up_score > 0 { format!("  +{}", b.enemy_up_score) } else { String::new() }), 0xFF_0606, 325.0));
+            }
+            _ => {}
+        }
+    }
+    glue.battle_notice = glue.battle_notice.take().filter(|(_, _, until)| std::time::Instant::now() < *until);
+    if !lines.is_empty() || glue.battle_notice.is_some() {
+        crate::hud::draw_battle_texts(ctx, &lines, glue.battle_notice.as_ref().map(|(t, c, _)| (t.as_str(), *c)));
+    }
+    // Entrepôt de guilde : le chef retire de l'argent (droit 8) ; l'agrandissement n'est jamais payable
+    // (FUN_1405fc200 : 999 999 999 999 pièces).
+    if glue.gware.open {
+        let master = glue.state.member(me).is_some_and(|m| m.rank == guild::rank::MASTER);
+        let rights = if master { guild::warehouse::RIGHTS_MASTER } else { guild::warehouse::RIGHTS_MEMBER };
+        let pages = (1 + glue.gware.slots.clamp(0, 3)) as i16;
+        let g = &mut glue.gware;
+        let view = GwareView { items: &g.items, money: g.money, pages, page: &mut g.page, money_out: rights & guild::warehouse::RIGHT_MONEY_OUT != 0, expand: false };
+        crate::hud::draw_guild_warehouse(ctx, hud, assets, view, &mut out);
+    }
+    if let Some((deposit, mut amount)) = glue.gware.money_ask {
+        let max = if deposit { hud.stats.money.unwrap_or(0) } else { glue.gware.money };
+        let answer = crate::hud::draw_gware_money(ctx, hud, assets, deposit, &mut amount, max);
+        glue.gware.money_ask = Some((deposit, amount.clamp(0, max.max(0))));
+        // GWARE_MONEY_CONF (FUN_1405fbb90) : op 3 ou 4 avec le montant, passé à `guild_click`.
+        if let Some(ok) = answer {
+            glue.gware.money_ask = None;
+            if ok && amount > 0 {
+                out.push(GuildUi::Click { window: "UI_GWareConfirm".into(), control: format!("{}:{amount}", if deposit { "in" } else { "out" }) });
+            }
+        }
+    }
+    if let Some(text) = glue.info.clone() {
+        if crate::hud::info_box(ctx, hud, assets, &text) {
+            glue.info = None;
+        }
     }
     if let Some((_, text)) = &glue.ask {
         crate::hud::draw_message_box(ctx, hud, assets, text, &d.msg("UI_Name_OK"), &d.msg("UI_Name_Cancel"), &mut out);
@@ -410,6 +956,31 @@ pub fn panel(ctx: &egui::Context, glue: &mut GuildGlue, hud: &mut HudState, asse
     glue.clicks.extend(out);
 }
 
+/// Demandes du sac pendant que l'entrepôt est ouvert (avant celles de la banque) : un objet de l'entrepôt
+/// lâché dans le sac est repris (op 6) ; le clic droit sur un objet du sac le dépose dans la première case
+/// libre de la page affichée.
+pub fn item_requests(glue: &GuildGlue, requests: &mut Vec<ItemUi>, net: Option<&NetLink>) {
+    if !glue.gware.open {
+        return;
+    }
+    let w = &glue.gware;
+    requests.retain(|r| match *r {
+        ItemUi::DropOnBag { drag, grid } if drag.bank && w.items.iter().any(|i| i.iid == drag.iid) => {
+            send(net, GuildCommand::WarehouseTake { iid: drag.iid, grid: Some(grid) });
+            false
+        }
+        ItemUi::Activate { iid, worn: false } => {
+            let (_, rows, cols) = guild::warehouse::GRID;
+            let free = (0..rows).flat_map(|r| (0..cols).map(move |c| (r, c))).map(|(r, c)| [w.page, r, c]).find(|g| !w.items.iter().any(|i| i.grid == *g));
+            match free {
+                Some(grid) => send(net, GuildCommand::WarehouseStore { iid, grid }),
+                None => log::info!("[entrepôt] page {} pleine", w.page + 1),
+            }
+            false
+        }
+        _ => true,
+    });
+}
 
 impl App {
     fn my_name(&self) -> String {
@@ -440,9 +1011,53 @@ impl App {
                 self.guild.open.insert(Win::Main);
                 return;
             }
-            GuildEvent::System { code, text, number, .. } => {
+            // Accord du gardien (FUN_1405fc020) : point d'ouverture retenu, puis l'op 1.
+            // Les objets d'une ouverture précédente sont retirés (FUN_14030b630), le serveur les renvoie.
+            GuildEvent::WarehouseGranted { npc } => {
+                self.items.retain(|_, i| i.status != Some(guild::warehouse::ITEM_STATUS));
+                self.guild.gware.npc = Some(*npc);
+                self.guild.gware.at = self.player.as_ref().map(|p| (p.position.x, p.position.z));
+                send(self.net.as_ref(), GuildCommand::WarehouseOpen);
+                return;
+            }
+            GuildEvent::Warehouse { op, money, slots, result } => {
+                let w = &mut self.guild.gware;
+                match *op {
+                    guild::warehouse::INFO => {
+                        if *money >= 0 {
+                            w.money = *money;
+                        }
+                        w.slots = *slots;
+                    }
+                    guild::warehouse::OPEN if *result == guild::warehouse::RESULT_OPEN => {
+                        w.open = true;
+                        w.page = 0;
+                    }
+                    guild::warehouse::EXPAND if *result == guild::warehouse::RESULT_NOT_ENOUGH_MONEY => {
+                        let assets = self.assets.clone();
+                        self.guild.info = Some(crate::hud::ui_message(&mut self.hud, &assets, "GWARE_NOT_ENOUGH_MONEY"));
+                    }
+                    _ => {}
+                }
+                return;
+            }
+            // Une autre guilde a le même emblème (code 59) : Guild_GuildMark_Duplicate, OK → op 33.
+            GuildEvent::System { code: guild::code::BUY_GUILDMARK_DUPLICATE, .. } => {
+                let text = self.guild.data.as_ref().and_then(|d| d.events.get("Guild_GuildMark_Duplicate").cloned()).unwrap_or_default();
+                self.guild.ask = Some((Ask::MarkForce, text));
+                return;
+            }
+            // Emblème acheté (FUN_14055b760) : le chef voit Guild_GuildMark_BuyComplete.
+            GuildEvent::MarkBought { guild, .. } => {
+                let mine = self.guild.state.name().eq_ignore_ascii_case(guild);
+                if mine && self.my_member().is_some_and(|m| m.rank == guild::rank::MASTER) {
+                    self.guild.open.remove(&Win::MarkConfirm);
+                    self.guild.info = self.guild.data.as_ref().and_then(|d| d.events.get("Guild_GuildMark_BuyComplete").cloned());
+                }
+            }
+            GuildEvent::System { code, text, number, number2, .. } => {
                 let d = self.guild.data.as_ref().expect("données lues");
-                if let Some((t, color)) = system_text(d, *code, text, *number) {
+                if let Some((t, color)) = system_text(d, *code, text, *number, *number2) {
                     self.guild_message(&t, color);
                 }
                 return;
@@ -459,6 +1074,57 @@ impl App {
                 if self.guild.pending_destroy.take().is_some() {
                     self.guild.complete_name = guild.clone();
                     self.guild.open.insert(Win::DestroyComplete);
+                }
+            }
+            // Nomination proposée (FUN_1408c0200) : « %s de la guilde [%s] nomme %s %s. Acceptez-vous ? ».
+            GuildEvent::AppointAsk { guild, master, member, rank } => {
+                let d = self.guild.data.as_ref().expect("données lues");
+                let text = printf(&d.msg("GuildAppointConfirm_Message"), &[master, guild, member, &rank_title(d, guild::rank::SUBMASTER)]);
+                self.guild.ask = Some((Ask::AppointAnswer { guild: guild.clone(), rank: *rank }, text));
+                return;
+            }
+            // Passation proposée (FUN_1408c09e0).
+            GuildEvent::SuccessionAsk { guild, master, member } => {
+                let d = self.guild.data.as_ref().expect("données lues");
+                let text = printf(&d.msg("GuildSuccessionConfirm_Message"), &[master, guild, member]);
+                self.guild.ask = Some((Ask::SuccessionAnswer { guild: guild.clone() }, text));
+                return;
+            }
+            // Rang changé (FUN_1408c06f0) : message système, puis rang mis à jour.
+            GuildEvent::RankChanged { guild, member, rank } => {
+                let d = self.guild.data.as_ref().expect("données lues");
+                let text = printf(&d.msg("GuildMemberRankUpdate_Message"), &[member, guild, &rank_title(d, *rank)]);
+                self.guild_message(&text, 0xFFFF_FFFF);
+            }
+            GuildEvent::SocietyText(text) => {
+                let text = text.clone();
+                self.guild_message(&text, 0xFFFF_FFFF);
+                return;
+            }
+            GuildEvent::Battle { op, battle, .. } => self.guild_battle_event(*op, battle),
+            // Demande reçue par le chef (FUN_1408cc440, FUN_1408cbb00, FUN_1408cba20) : rien s'il refuse les
+            // relations de guilde (options, bit 0x40).
+            GuildEvent::RelationAsk { kind, guild, other, master } => {
+                let mine = self.guild.state.name().eq_ignore_ascii_case(guild) && self.my_member().is_some_and(|m| m.rank == guild::rank::MASTER);
+                if mine && !self.options.refuse.guild_relation {
+                    let (ask, event) = match kind {
+                        guild::Relation::Joint => (Ask::JointAccept(other.clone()), "Guild_OpenJointAcceptConfirmUI"),
+                        guild::Relation::Hostile => (Ask::HostileAccept(other.clone()), "Guild_OpenHostileAcceptConfirmUI"),
+                        guild::Relation::HostileLeave => (Ask::HostileLeaveAccept(other.clone()), "Guild_OpenHostileLeaveAcceptConfirmUI"),
+                    };
+                    let d = self.guild.data.as_ref().expect("données lues");
+                    let text = fill_named(d.events.get(event).map_or("", String::as_str), &[("Guild_RelationGuildID", other.clone()), ("Guild_RelationMasterID", master.clone())]);
+                    self.guild.ask = Some((ask, text));
+                }
+                return;
+            }
+            GuildEvent::List(l) => {
+                if l.page != self.guild.state.list.as_ref().map_or(-1, |x| x.page) || !l.searched.is_empty() {
+                    self.guild.list_selected = None;
+                }
+                // Recherche : la ligne de la guilde trouvée est choisie.
+                if !l.searched.is_empty() {
+                    self.guild.list_selected = l.entries.iter().position(|e| e.name.eq_ignore_ascii_case(&l.searched));
                 }
             }
             _ => {}
@@ -491,6 +1157,66 @@ impl App {
         }
     }
 
+    /// Combat de guildes reçu (avant sa prise en compte par `GuildState`).
+    fn guild_battle_event(&mut self, o: i8, b: &GuildBattle) {
+        let assets = self.assets.clone();
+        let sys = |n: u32| super::npc_glue::sysstr(&assets, n).unwrap_or_default();
+        let d = self.guild.data.as_ref().expect("données lues");
+        let white = 0xFFFF_FFFF;
+        let until = std::time::Instant::now() + std::time::Duration::from_millis(5000);
+        match o {
+            // Défi reçu (FUN_14084f310) : Guild_GBattle en lecture seule, puis la question.
+            guild::op::BATTLE_REQUEST => {
+                let kind = (b.kind.max(0) as usize).min(4);
+                let time = guild::battle::MINUTES.iter().position(|m| m * 60 == b.duration).unwrap_or(0);
+                let mut form = BattleForm { enemy: b.enemy.clone(), kind, time, man: 0, received: true };
+                form.man = form.men().iter().position(|n| *n == b.person).unwrap_or(0);
+                let text = fill_named(d.events.get("Guild_Battle_Accept_ConfirmUI_Open").map_or("", String::as_str), &form.named(d));
+                self.guild.battle_form = form;
+                self.guild.open.insert(Win::GBattle);
+                self.guild.ask = Some((Ask::BattleAnswer(b.enemy.clone()), text));
+            }
+            // Acceptation (FUN_14084ebd0) : sysstr 0x151 en jaune 5 s, Guild_Msg_Battle_Accept (minutes).
+            guild::op::BATTLE_ACCEPT => {
+                let t = printf(&d.msg("Guild_Msg_Battle_Accept"), &[&(b.ready / 60)]);
+                self.guild.battle_notice = Some((printf(&sys(0x151), &[&b.enemy]), 0xFFFF_FF00, until));
+                self.guild.open.remove(&Win::GBattle);
+                self.guild_message(&t, white);
+            }
+            // Demande d'annulation de l'adversaire.
+            guild::op::BATTLE_CANCEL_REQUEST => {
+                let form = BattleForm { enemy: b.enemy.clone(), ..self.guild.battle_form.clone() };
+                let text = fill_named(d.events.get("Guild_Battle_Cancel_Accept_ConfirmUI_Open").map_or("", String::as_str), &form.named(d));
+                self.guild.ask = Some((Ask::BattleCancelAnswer, text));
+            }
+            guild::op::BATTLE_CANCEL_ACCEPT => {
+                let t = d.msg("Guild_Msg_Battle_Cancel_Accpet");
+                self.guild_message(&t, white);
+            }
+            // Début (FUN_14084f610) : sysstr 0x152 en rouge 5 s, Guild_Msg_Battle_Start.
+            guild::op::BATTLE_START => {
+                let t = d.msg("Guild_Msg_Battle_Start");
+                self.guild.battle_notice = Some((sys(0x152), 0xFFFF_0000, until));
+                self.guild_message(&t, white);
+            }
+            // Résultat (FUN_14084f400) : « %d-%d » des scores, ou victoire / défaite par abandon.
+            guild::op::BATTLE_RESULT => {
+                let key = match b.result {
+                    1 => "Guild_Msg_Battle_Win2",
+                    2 => "Guild_Msg_Battle_Draw2",
+                    3 => "Guild_Msg_Battle_Lose2",
+                    4 => "Guild_Msg_Battle_Win_By_GG2",
+                    5 => "Guild_Msg_Battle_Lose_By_GG2",
+                    _ => return,
+                };
+                let t = if b.result <= 3 { printf(&d.msg(key), &[&b.score, &b.enemy_score]) } else { d.msg(key) };
+                self.guild.battle_notice = None;
+                self.guild_message(&t, white);
+            }
+            _ => {}
+        }
+    }
+
     /// Touche G et `/guilde` : `Guild_Notice_Open_Request` (FUN_1408c7f10).
     pub(super) fn guild_toggle(&mut self) {
         if self.guild.open.remove(&Win::Notice) | self.guild.open.remove(&Win::Member) {
@@ -517,7 +1243,9 @@ impl App {
 
     /// `/G texte`, `/P texte`, `/N texte` (modes de discussion d'Archonia) et commandes de guilde
     /// d'ArchRust : `/guilde`, `/ginviter [nom]`, `/gquitter`, `/gexclure nom`, `/gannonce texte`,
-    /// `/gaccepter`, `/grefuser`.
+    /// `/gaccepter`, `/grefuser`, `/gliste [page|nom]`, `/gmembres [nom]`, `/gagrandir`,
+    /// `/gsecond nom`, `/gheritier nom`, `/gguerre guilde|appliquer|annuler`, `/gg`, `/galliance guilde|quitter`,
+    /// `/ghostile guilde`, `/gtreve guilde`, `/gentrepot deposer|reprendre|argent …`.
     pub(super) fn guild_slash(&mut self, cmd: &str, arg: &str) -> bool {
         let arg = arg.trim();
         let lower = cmd.to_ascii_lowercase();
@@ -581,9 +1309,146 @@ impl App {
             }
             "/gaccepter" | "/gaccept" => self.guild_answer(true),
             "/grefuser" | "/gdecline" => self.guild_answer(false),
+            // Mêmes effets que les boutons d'Archonia : onglet « Classement » (page ou guilde cherchée),
+            // onglet « Membres » sur un membre (« Rechercher »), « Augmenter la limite », « Nommer »,
+            // « Hériter de la guilde ».
+            "/gliste" | "/glist" => {
+                self.guild_click(GuildUi::Click { window: "Guild_Member".into(), control: "GD_Member_Button_Tab3".into() }, 0);
+                let relation = match arg {
+                    "allies" | "alliés" => Some("CONTROL_24849"),
+                    "hostiles" => Some("CONTROL_20569"),
+                    _ => None,
+                };
+                if let Some(control) = relation {
+                    self.guild_click(GuildUi::Click { window: "Guild_List".into(), control: control.into() }, 0);
+                } else if let Ok(page) = arg.parse::<i32>() {
+                    send(self.net.as_ref(), GuildCommand::ListPage { page: (page - 1).max(0) });
+                } else if !arg.is_empty() {
+                    self.guild.list_search = arg.to_string();
+                    self.guild_click(GuildUi::Click { window: "Guild_List".into(), control: "CONTROL_854".into() }, 0);
+                }
+            }
+            "/gmembres" | "/gmembers" => {
+                self.guild.open.remove(&Win::Notice);
+                self.guild.open.remove(&Win::List);
+                self.guild.open.insert(Win::Member);
+                if !arg.is_empty() {
+                    self.guild.search = arg.to_string();
+                    self.guild_click(GuildUi::Click { window: "Guild_Member".into(), control: "CONTROL_23904".into() }, 0);
+                }
+            }
+            // « Emblème » de Guild_Main ; `fond motif symbole [couleurs…]` compose l'emblème comme les clics
+            // dans les grilles, `acheter` et `confirmer` comme les boutons.
+            "/gembleme" | "/gmark" => match arg {
+                "acheter" | "buy" => self.guild_click(GuildUi::Click { window: "Guild_Mark".into(), control: "CONTROL_5906".into() }, 0),
+                "confirmer" | "confirm" => self.guild_click(GuildUi::Click { window: "Guild_MarkConfirm".into(), control: "CONTROL_30466".into() }, 0),
+                _ => {
+                    self.guild_click(GuildUi::Click { window: "Guild_Main".into(), control: "GD_Main_Button_3".into() }, 0);
+                    let n: Vec<u32> = arg.split_whitespace().filter_map(|x| x.parse().ok()).collect();
+                    if n.len() >= 3 && self.guild.open.contains(&Win::Mark) {
+                        self.guild.mark_tid = (n[0] & 0xff) | (n[1] & 0xff) << 8 | (n[2] & 0xff) << 16;
+                        for (i, c) in n.iter().skip(3).take(3).enumerate() {
+                            let shift = 8 * i as u32;
+                            self.guild.mark_color = (self.guild.mark_color & !(0xff << shift)) | ((c & 0xff) << shift);
+                        }
+                    }
+                }
+            },
+            "/gagrandir" | "/gincrease" => self.guild_click(GuildUi::Click { window: "Guild_Main".into(), control: "CONTROL_29434".into() }, 0),
+            "/gsecond" | "/gappoint" | "/gheritier" | "/gsuccession" => {
+                if !arg.is_empty() {
+                    self.guild.search = arg.to_string();
+                    self.guild_click(GuildUi::Click { window: "Guild_Member".into(), control: "CONTROL_23904".into() }, 0);
+                }
+                let control = if matches!(lower.as_str(), "/gsecond" | "/gappoint") { "CONTROL_31321" } else { "CONTROL_3394" };
+                self.guild_click(GuildUi::Click { window: "Guild_Member".into(), control: control.into() }, 0);
+            }
+            // Comme « Demander la guerre » sur la guilde nommée ; `appliquer` : bouton « Appliquer » ; `annuler` :
+            // demande d'annulation confirmée (`Guild_Battle_Cancel_Request_ConfirmUI_Open`).
+            "/gguerre" | "/gwar" => match arg {
+                "" => {}
+                "annuler" | "cancel" => {
+                    if self.guild.state.battle.is_some() {
+                        let text = self.guild.data.as_ref().and_then(|d| d.events.get("Guild_Battle_Cancel_Request_ConfirmUI_Open").cloned()).unwrap_or_default();
+                        self.guild.ask = Some((Ask::BattleCancel, text));
+                    }
+                }
+                "appliquer" | "apply" => self.guild_click(GuildUi::Click { window: "Guild_GBattle".into(), control: "CONTROL_12454".into() }, 0),
+                name => self.guild_battle_form(name.to_string()),
+            },
+            // Mêmes questions que les boutons d'alliance et d'hostilité de Guild_List, pour la guilde nommée ;
+            // `/galliance quitter` : départ de l'alliance.
+            "/galliance" | "/gunion" | "/ghostile" | "/gtreve" | "/gtruce" => {
+                let d = self.guild.data.as_ref().expect("données lues");
+                let named = [("Guild_RelationGuildID", arg.to_string())];
+                let ask = match lower.as_str() {
+                    "/galliance" | "/gunion" if matches!(arg, "quitter" | "leave") => (Ask::JointLeave, "Guild_OpenJointLeaveConfirmUI"),
+                    "/galliance" | "/gunion" => (Ask::JointRequest(arg.to_string()), "Guild_OpenJointRequestConfirmUI"),
+                    "/ghostile" => (Ask::HostileRequest(arg.to_string()), "Guild_OpenHostileRequestConfirmUI"),
+                    _ => (Ask::HostileLeaveRequest(arg.to_string()), "Guild_OpenHostileLeaveRequestConfirmUI"),
+                };
+                if !arg.is_empty() && self.my_member().is_some_and(|m| m.rank == guild::rank::MASTER) {
+                    let text = fill_named(d.events.get(ask.1).map_or("", String::as_str), &named);
+                    self.guild.ask = Some((ask.0, text));
+                }
+            }
+            // Entrepôt ouvert : mêmes effets que les gestes de la fenêtre (clic droit dans le sac, objet glissé vers le
+            // sac, boutons d'argent) ; `argent +N` dépose, `argent -N` retire.
+            "/gentrepot" | "/gwarehouse" => {
+                let (verb, rest) = arg.split_once(char::is_whitespace).map_or((arg, ""), |(v, r)| (v, r.trim()));
+                let assets = self.assets.clone();
+                let find = |status: i8| {
+                    let wanted = rest.to_lowercase();
+                    let mut v: Vec<&archrust_netclient::world::ItemRecord> = self
+                        .items
+                        .values()
+                        .filter(|i| i.status == Some(status))
+                        .filter(|i| i.template_id.map(|t| t.to_string()) == Some(wanted.clone()) || i.template_id.and_then(|t| crate::scene::item_name_for_tid(&assets, t)).is_some_and(|n| n.to_lowercase().contains(&wanted)))
+                        .collect();
+                    v.sort_by_key(|i| i.id);
+                    v.first().map(|i| i.id)
+                };
+                match verb {
+                    _ if !self.guild.gware.open => self.ui.push_chat("[entrepôt] Ouvrez l'entrepôt de guilde chez un gardien de banque (/entrepot)."),
+                    "deposer" | "store" => {
+                        if let Some(iid) = find(2) {
+                            let mut req = vec![crate::hud::ItemUi::Activate { iid, worn: false }];
+                            item_requests(&self.guild, &mut req, self.net.as_ref());
+                        }
+                    }
+                    "reprendre" | "take" => {
+                        if let Some(iid) = find(guild::warehouse::ITEM_STATUS) {
+                            send(self.net.as_ref(), GuildCommand::WarehouseTake { iid, grid: None });
+                        }
+                    }
+                    "argent" | "money" => {
+                        if let Ok(n) = rest.replace('+', "").parse::<i64>() {
+                            send(self.net.as_ref(), GuildCommand::WarehouseMoney { deposit: n > 0, amount: n.abs() });
+                        }
+                    }
+                    _ => self.ui.push_chat("[entrepôt] Usage : /gentrepot deposer|reprendre nom (ou TID), /gentrepot argent +N|-N."),
+                }
+            }
+            // « GG » d'Archonia : abandon confirmé (`Guild_Battle_Withdraw_ConfirmUI_Open`).
+            "/gg" => {
+                if self.guild.state.battle.is_some() {
+                    let text = self.guild.data.as_ref().and_then(|d| d.events.get("Guild_Battle_Withdraw_ConfirmUI_Open").cloned()).unwrap_or_default();
+                    self.guild.ask = Some((Ask::BattleWithdraw, text));
+                }
+            }
             _ => return false,
         }
         true
+    }
+
+    /// `Guild_GBattle` pour défier `enemy` (le chef d'une guilde hors combat).
+    fn guild_battle_form(&mut self, enemy: String) {
+        let master = self.my_member().is_some_and(|m| m.rank == guild::rank::MASTER);
+        if !master || self.guild.state.status != guild::battle::status::NONE || enemy.eq_ignore_ascii_case(self.guild.state.name()) {
+            return;
+        }
+        self.guild.battle_form = BattleForm { enemy, ..Default::default() };
+        self.guild.open.insert(Win::GBattle);
     }
 
     /// Réponse à la boîte OK / Annuler.
@@ -596,7 +1461,58 @@ impl App {
                 self.guild.state.invitation = None;
                 send(net, if ok { GuildCommand::Join { guild } } else { GuildCommand::Reject { guild } });
             }
+            Ask::AppointAnswer { guild, rank } => send(net, GuildCommand::AppointAnswer { guild, rank, yes: ok }),
+            Ask::SuccessionAnswer { guild } => send(net, GuildCommand::SuccessionAnswer { guild, yes: ok }),
+            // Agrandissement (FUN_1408ccd50) : la fenêtre se ferme, que la réponse soit oui ou non.
+            Ask::Increase(max) => {
+                self.guild.open.remove(&Win::MemberSize);
+                if ok {
+                    send(net, GuildCommand::IncreaseMax { guild, max: max as i32 });
+                }
+            }
+            // Demandes d'alliance, d'hostilité et de trêve reçues (FUN_1408cafa0, FUN_1408cad50, FUN_1408cada0).
+            Ask::JointAccept(other) => send(net, GuildCommand::JointAnswer { guild, other, yes: ok }),
+            Ask::HostileAccept(other) => send(net, GuildCommand::HostileAnswer { guild, other, yes: ok }),
+            Ask::HostileLeaveAccept(other) => send(net, GuildCommand::HostileLeaveAnswer { guild, other, yes: ok }),
+            // Défi reçu (FUN_14084e7a0) : OK → op 16 ; Annuler → op 17 et Guild_Msg_Battle_Reject.
+            Ask::BattleAnswer(enemy) => {
+                self.guild.open.remove(&Win::GBattle);
+                send(net, GuildCommand::BattleAnswer { guild, enemy, yes: ok });
+                if !ok {
+                    let t = self.guild.data.as_ref().map(|d| d.msg("Guild_Msg_Battle_Reject")).unwrap_or_default();
+                    self.guild_message(&t, 0xFFFF_FFFF);
+                }
+            }
+            Ask::BattleCancelAnswer => {
+                send(net, GuildCommand::BattleCancelAnswer { guild, yes: ok });
+                if !ok {
+                    let t = self.guild.data.as_ref().map(|d| d.msg("Guild_Msg_Battle_Cancel_Reject")).unwrap_or_default();
+                    self.guild_message(&t, 0xFFFF_FFFF);
+                }
+            }
             _ if !ok => {}
+            Ask::BattleRequest => {
+                let f = self.guild.battle_form.clone();
+                self.guild.open.remove(&Win::GBattle);
+                let duration = guild::battle::MINUTES[f.time.min(5)] * 60;
+                let person = f.men().get(f.man).copied().unwrap_or(0);
+                send(net, GuildCommand::BattleRequest { guild, enemy: f.enemy, kind: f.kind as i32, duration, person });
+            }
+            Ask::BattleCancel => send(net, GuildCommand::BattleCancel { guild }),
+            Ask::JointRequest(target) => send(net, GuildCommand::JointRequest { guild, name: self.my_name(), target }),
+            Ask::JointLeave => send(net, GuildCommand::JointLeave { guild }),
+            Ask::HostileRequest(target) => send(net, GuildCommand::HostileRequest { guild, name: self.my_name(), target }),
+            Ask::HostileLeaveRequest(target) => send(net, GuildCommand::HostileLeaveRequest { guild, name: self.my_name(), target }),
+            Ask::BattleWithdraw => send(net, GuildCommand::BattleWithdraw { guild }),
+            Ask::MarkForce => send(net, GuildCommand::BuyMark { guild, tid: self.guild.mark_tid as i32, color: self.guild.mark_color as i32, force: true }),
+            // Guild_GuildMark_Initialize (FUN_14055bb90) : dessin remis à zéro, puis Initialize_Complete.
+            Ask::MarkReset => {
+                self.guild.mark_tid = 0;
+                self.guild.mark_color = 0xFFFF_FFFF;
+                self.guild.info = self.guild.data.as_ref().and_then(|d| d.events.get("Guild_GuildMark_Initialize_Complete").cloned());
+            }
+            Ask::AppointCancel(name) => send(net, GuildCommand::Appoint { name, rank: guild::rank::NORMAL }),
+            Ask::JoinRequest(guild) => send(net, GuildCommand::Join { guild }),
             Ask::Leave => send(net, GuildCommand::Leave { guild, name: self.my_name() }),
             Ask::Kick(name) => send(net, GuildCommand::Kick { guild, name }),
             Ask::AllowJoin(name) => send(net, GuildCommand::AllowJoin { guild, name }),
@@ -660,7 +1576,43 @@ impl App {
     fn guild_click(&mut self, r: GuildUi, level: i64) {
         let (window, control) = match r {
             GuildUi::MessageBox(ok) => return self.guild_answer(ok),
-            GuildUi::Row(i) => {
+            GuildUi::GwareClose => return self.guild_warehouse_close(),
+            GuildUi::GwareMoney(deposit) => {
+                self.guild.gware.money_ask = Some((deposit, 0));
+                return;
+            }
+            // GWARE_EXPAND (FUN_1405fb920) : confirmation du prix, puis l'op 7.
+            GuildUi::GwareExpand => return send(self.net.as_ref(), GuildCommand::WarehouseExpand),
+            GuildUi::GwareStore { iid, grid } => return send(self.net.as_ref(), GuildCommand::WarehouseStore { iid, grid }),
+            GuildUi::GwareTake(iid) => return send(self.net.as_ref(), GuildCommand::WarehouseTake { iid, grid: None }),
+            GuildUi::Click { window, control } if window == "UI_GWareConfirm" => {
+                if let Some((dir, amount)) = control.split_once(':') {
+                    if let Ok(amount) = amount.parse::<i64>() {
+                        send(self.net.as_ref(), GuildCommand::WarehouseMoney { deposit: dir == "in", amount });
+                    }
+                }
+                return;
+            }
+            // Grille des éléments (FUN_14055be90) : choisir l'élément de la couche, ou le retirer s'il l'est.
+            GuildUi::Cell(MARK_GRID, id) => {
+                let l = self.guild.mark_layer.min(2) as u8 + 1;
+                let part = id as u32;
+                let rest = self.guild.mark_tid & !(0xff << (8 * (l as u32 - 1)));
+                self.guild.mark_tid = if mark_part(self.guild.mark_tid, l) == part { rest } else { rest | part };
+                return;
+            }
+            // Couleurs (FUN_14055bdc0) : couleur de la couche choisie.
+            GuildUi::Cell(MARK_COLORS, id) => {
+                let shift = 8 * self.guild.mark_layer.min(2) as u32;
+                self.guild.mark_color = (self.guild.mark_color & !(0xff << shift)) | ((id as u32 & 0xff) << shift);
+                return;
+            }
+            GuildUi::Cell(..) => return,
+            GuildUi::Row(list, i) if list == ListSpec::GUILDS.list => {
+                self.guild.list_selected = (i < self.guild.list_entries().len()).then_some(i);
+                return;
+            }
+            GuildUi::Row(_, i) => {
                 self.guild.selected = (self.guild.page * PAGE + i < self.guild.state.members.len()).then_some(i);
                 return;
             }
@@ -687,6 +1639,198 @@ impl App {
             ("Guild_Main", "GD_Main_Button_2") => {
                 close(&mut self.guild, Win::Main);
                 self.guild.open.insert(Win::Destroy);
+            }
+            // Guild_Create_GuildMark (FUN_14055b920) : le chef, 10 membres au moins ; le dessin part de
+            // l'emblème de la guilde (FUN_14055bcb0).
+            ("Guild_Main", "GD_Main_Button_3") => {
+                if self.my_member().is_none_or(|m| m.rank != guild::rank::MASTER) {
+                    return;
+                }
+                if self.guild.state.counts().1 < MARK_MIN_MEMBERS {
+                    self.guild.info = self.guild.data.as_ref().and_then(|d| d.events.get("Guild_GuildMark_Not_Enought_Member").cloned());
+                    return;
+                }
+                let (tid, color) = self.guild.state.info.as_ref().map_or((0, 0), |i| (i.mark_tid as u32, i.mark_color as u32));
+                (self.guild.mark_tid, self.guild.mark_color, self.guild.mark_layer, self.guild.mark_scroll) = (tid, color, 0, 0);
+                close(&mut self.guild, Win::Main);
+                self.guild.open.insert(Win::Mark);
+            }
+            ("Guild_Mark", c) if MARK_TABS.contains(&c) => {
+                self.guild.mark_layer = MARK_TABS.iter().position(|t| *t == c).unwrap_or(0);
+                self.guild.mark_scroll = 0;
+            }
+            ("Guild_Mark", "GUILDMARK_PGUP") => self.guild.mark_scroll = self.guild.mark_scroll.saturating_sub(1),
+            ("Guild_Mark", "GUILDMARK_PGDN") => {
+                let l = self.guild.mark_layer.min(2) as u8 + 1;
+                let n = self.guild.data.as_ref().map_or(0, |d| d.marks.iter().filter(|m| m.layer == l).count());
+                if (self.guild.mark_scroll + MARK_ROWS) * MARK_COLS < n {
+                    self.guild.mark_scroll += 1;
+                }
+            }
+            // Guild_GuildMarkClickBuy (FUN_14055ba60) : un fond est exigé, puis Guild_MarkConfirm.
+            ("Guild_Mark", "CONTROL_5906") => {
+                if self.guild.mark_tid & 0xff == 0 {
+                    self.guild.info = self.guild.data.as_ref().and_then(|d| d.events.get("Guild_GuildMark_No_Exist_Bottom").cloned());
+                } else {
+                    self.guild.open.insert(Win::MarkConfirm);
+                }
+            }
+            ("Guild_Mark", "CONTROL_20548") => {
+                let text = self.guild.data.as_ref().and_then(|d| d.events.get("Guild_GuildMark_Initialize").cloned()).unwrap_or_default();
+                self.guild.ask = Some((Ask::MarkReset, text));
+            }
+            ("Guild_Mark", "CONTROL_5198" | "CONTROL_18977") => {
+                close(&mut self.guild, Win::Mark);
+                close(&mut self.guild, Win::MarkConfirm);
+            }
+            // Guild_GuildMarkClickBuyOK (FUN_14055bad0) : op 32.
+            ("Guild_MarkConfirm", "CONTROL_30466") => {
+                close(&mut self.guild, Win::MarkConfirm);
+                let guild = self.guild.state.name().to_string();
+                send(self.net.as_ref(), GuildCommand::BuyMark { guild, tid: self.guild.mark_tid as i32, color: self.guild.mark_color as i32, force: false });
+            }
+            ("Guild_MarkConfirm", _) => close(&mut self.guild, Win::MarkConfirm),
+            // Guild_Main_Increase_Request (FUN_1408cce90) : le chef, 20 membres au moins.
+            ("Guild_Main", "CONTROL_29434") => {
+                if self.my_member().is_none_or(|m| m.rank != guild::rank::MASTER) {
+                    return;
+                }
+                if self.guild.state.counts().1 < 20 {
+                    self.guild.info = self.guild.data.as_ref().and_then(|d| d.events.get("Guild_MemberUp_Not_Enought_Member").cloned());
+                } else {
+                    close(&mut self.guild, Win::Main);
+                    self.guild.open.insert(Win::MemberSize);
+                }
+            }
+            ("Guild_MemberSize", "CONTROL_10606") => {
+                let max = self.guild.state.info.as_ref().map_or(0, |i| i.max_members as i64);
+                let next = if max < 1 { 10 } else { (max / 10 + 1) * 10 };
+                let text = self.guild.data.as_ref().and_then(|d| d.events.get("Guild_MaxMemberIncreaseOK").cloned()).unwrap_or_default();
+                self.guild.ask = Some((Ask::Increase(next), text));
+            }
+            ("Guild_MemberSize", _) => close(&mut self.guild, Win::MemberSize),
+            // Onglet « Classement » : Guild_GuildList_Tab_Click (FUN_1408c8f90), page 0 (FUN_1408c90c0).
+            ("Guild_Notice", "GD_Notice_Button_Tab3") | ("Guild_Member", "GD_Member_Button_Tab3") => {
+                close(&mut self.guild, Win::Notice);
+                close(&mut self.guild, Win::Member);
+                self.guild.list_selected = None;
+                self.guild.list_mode = 0;
+                self.guild.open.insert(Win::List);
+                send(self.net.as_ref(), GuildCommand::ListPage { page: 0 });
+            }
+            ("Guild_List", "CONTROL_11612") => {
+                close(&mut self.guild, Win::List);
+                self.guild.notice = self.guild.state.info.as_ref().map(|i| i.notice.clone()).unwrap_or_default();
+                self.guild.open.insert(Win::Notice);
+            }
+            ("Guild_List", "CONTROL_26096") => {
+                close(&mut self.guild, Win::List);
+                self.guild.open.insert(Win::Member);
+            }
+            ("Guild_List", "CONTROL_6149" | "CONTROL_10973") => close(&mut self.guild, Win::List),
+            // Guild_OpenJointList, Guild_OpenHostileList (FUN_1408cc7b0, FUN_1408cc780).
+            ("Guild_List", "CONTROL_24849" | "CONTROL_20569") => {
+                self.guild.list_mode = if control == "CONTROL_24849" { 1 } else { 2 };
+                self.guild.list_selected = None;
+            }
+            ("Guild_List", "CONTROL_12509") => {
+                self.guild.list_mode = 0;
+                self.guild.list_selected = None;
+            }
+            // Guild_OnJointRequestBtnClk (FUN_1408cc5f0) : demande sur la guilde choisie ; départ dans les alliés.
+            ("Guild_List", "CONTROL_19137") => {
+                let d = self.guild.data.as_ref().expect("données lues");
+                match (self.guild.list_mode, self.guild.list_picked()) {
+                    (0, Some(name)) => {
+                        let text = fill_named(d.events.get("Guild_OpenJointRequestConfirmUI").map_or("", String::as_str), &[("Guild_RelationGuildID", name.clone())]);
+                        self.guild.ask = Some((Ask::JointRequest(name), text));
+                    }
+                    (1, _) if !self.guild.state.joints.is_empty() => {
+                        let text = d.events.get("Guild_OpenJointLeaveConfirmUI").cloned().unwrap_or_default();
+                        self.guild.ask = Some((Ask::JointLeave, text));
+                    }
+                    _ => {}
+                }
+            }
+            // Guild_OnHostileRequestBtnClk (FUN_1408cc530) : déclaration, ou trêve dans les hostiles.
+            ("Guild_List", "CONTROL_18911") => {
+                let d = self.guild.data.as_ref().expect("données lues");
+                let Some(name) = self.guild.list_picked() else { return };
+                let named = [("Guild_RelationGuildID", name.clone())];
+                match self.guild.list_mode {
+                    0 => self.guild.ask = Some((Ask::HostileRequest(name), fill_named(d.events.get("Guild_OpenHostileRequestConfirmUI").map_or("", String::as_str), &named))),
+                    2 => self.guild.ask = Some((Ask::HostileLeaveRequest(name), fill_named(d.events.get("Guild_OpenHostileLeaveRequestConfirmUI").map_or("", String::as_str), &named))),
+                    _ => {}
+                }
+            }
+            ("Guild_List", "CONTROL_22721" | "CONTROL_24225") => {
+                let (page, total) = self.guild.state.list.as_ref().map_or((0, 0), |l| (l.page, l.total));
+                let wanted = if control == "CONTROL_22721" { page - 1 } else { page + 1 };
+                if wanted >= 0 && wanted * (PAGE as i32) < total {
+                    send(self.net.as_ref(), GuildCommand::ListPage { page: wanted });
+                }
+            }
+            ("Guild_List", "CONTROL_854") => {
+                let name = self.guild.list_search.trim().to_string();
+                if !name.is_empty() && name.len() <= 32 {
+                    send(self.net.as_ref(), GuildCommand::Search { name });
+                }
+            }
+            // Guild_GuildBattleTime_Request (FUN_14084ea50) : Guild_GBattle sur la guilde choisie ; sans
+            // guilde, Guild_Confirm_Join_Request.
+            ("Guild_List", "CONTROL_6490") => {
+                let picked = self.guild.list_picked();
+                match (picked, self.guild.state.in_guild()) {
+                    (Some(name), true) => self.guild_battle_form(name),
+                    (Some(name), false) => {
+                        let text = self.guild.data.as_ref().and_then(|d| d.events.get("Guild_Confirm_Join_Request").cloned()).unwrap_or_default();
+                        self.guild.ask = Some((Ask::JoinRequest(name), text));
+                    }
+                    _ => {}
+                }
+            }
+            // Guild_GBattle : chaque liste (ou sa flèche) passe au choix suivant ; l'effectif revient au
+            // premier quand le type change.
+            ("Guild_GBattle", "CONTROL_4060" | "CONTROL_29955") if !self.guild.battle_form.received => {
+                let f = &mut self.guild.battle_form;
+                f.kind = (f.kind + 1) % guild::battle::KINDS.len();
+                f.man = 0;
+            }
+            ("Guild_GBattle", "CONTROL_17192" | "CONTROL_6484") if !self.guild.battle_form.received => {
+                let f = &mut self.guild.battle_form;
+                f.time = (f.time + 1) % guild::battle::MINUTES.len();
+            }
+            ("Guild_GBattle", "CONTROL_21248" | "CONTROL_12900") if !self.guild.battle_form.received => {
+                let f = &mut self.guild.battle_form;
+                let n = f.men().len();
+                if n > 0 {
+                    f.man = (f.man + 1) % n;
+                }
+            }
+            // « Appliquer » (OP_GuildBattleRequest) : Guild_Battle_Request_ConfirmUI_Open, OK → op 15.
+            ("Guild_GBattle", "CONTROL_12454") if !self.guild.battle_form.received => {
+                let d = self.guild.data.as_ref().expect("données lues");
+                let text = fill_named(d.events.get("Guild_Battle_Request_ConfirmUI_Open").map_or("", String::as_str), &self.guild.battle_form.named(d));
+                self.guild.ask = Some((Ask::BattleRequest, text));
+            }
+            ("Guild_GBattle", "CONTROL_9564" | "CONTROL_26698") => close(&mut self.guild, Win::GBattle),
+            // Guild_Appoint_Click (FUN_1408c0340) : le second se voit retirer son rang après confirmation ;
+            // sinon la nomination part aussitôt.
+            ("Guild_Member", "CONTROL_31321") => {
+                let Some(s) = self.guild_selected() else { return };
+                if s.rank == guild::rank::SUBMASTER {
+                    let d = self.guild.data.as_ref().expect("données lues");
+                    let text = printf(&d.msg("GuildMemberAppointCancelConfirm_Message"), &[&self.guild.state.name(), &s.name, &rank_title(d, guild::rank::SUBMASTER)]);
+                    self.guild.ask = Some((Ask::AppointCancel(s.name), text));
+                } else {
+                    send(self.net.as_ref(), GuildCommand::Appoint { name: s.name, rank: guild::rank::SUBMASTER });
+                }
+            }
+            // Guild_Succession_Click (FUN_1408c0aa0) : la demande part aussitôt.
+            ("Guild_Member", "CONTROL_3394") => {
+                if let Some(s) = self.guild_selected() {
+                    send(self.net.as_ref(), GuildCommand::Succession { name: s.name });
+                }
             }
             ("Guild_Create", "GD_Create_Button_OK") => {
                 let (n, p, p2) = (self.guild.name.trim().to_string(), self.guild.password.clone(), self.guild.password2.clone());
@@ -817,10 +1961,47 @@ impl App {
             let d = self.guild.data(&assets);
             self.ui.chat_tabs = vec![(d.msg("Chat_Tab_Normal"), u16::MAX), (d.msg("Chat_Tab_Party"), MASK_PARTY), (d.msg("Chat_Tab_Guild"), MASK_GUILD), (d.msg("Chat_Tab_Whisper"), MASK_WHISPER)];
         }
+        self.guild_warehouse_frame();
         let level = self.hud.stats.level.map_or(0, |l| l as i64);
         for r in std::mem::take(&mut self.guild.clicks) {
             self.guild_click(r, level);
         }
+    }
+
+    /// Fermeture de l'entrepôt (croix, ou joueur éloigné) : op 2.
+    fn guild_warehouse_close(&mut self) {
+        if std::mem::take(&mut self.guild.gware.open) {
+            send(self.net.as_ref(), GuildCommand::WarehouseClose);
+        }
+        self.guild.gware.money_ask = None;
+        self.guild.gware.npc = None;
+    }
+
+    /// Objets de l'entrepôt (statut 53) pour la fenêtre ; fermeture à plus de 149 du point d'ouverture.
+    fn guild_warehouse_frame(&mut self) {
+        let w = &self.guild.gware;
+        if !w.open {
+            return;
+        }
+        let here = self.player.as_ref().map(|p| (p.position.x, p.position.z));
+        if let (Some((x0, z0)), Some((x, z))) = (w.at, here) {
+            if ((x - x0).powi(2) + (z - z0).powi(2)).sqrt() > 149.0 {
+                return self.guild_warehouse_close();
+            }
+        }
+        let assets = self.assets.clone();
+        let mut items: Vec<GwareItem> = self
+            .items
+            .values()
+            .filter(|i| i.status == Some(guild::warehouse::ITEM_STATUS))
+            .filter_map(|i| {
+                let tid = i.template_id?;
+                let name = crate::scene::item_name_for_tid(&assets, tid).unwrap_or_else(|| format!("Objet TID {tid}"));
+                Some(GwareItem { iid: i.id, tid, count: i.count.unwrap_or(1), grid: i.grid?, name })
+            })
+            .collect();
+        items.sort_by_key(|i| i.grid);
+        self.guild.gware.items = items;
     }
 
     /// Déconnexion : plus de guilde ni de fenêtre.

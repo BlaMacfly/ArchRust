@@ -7,9 +7,9 @@
 //! op 4 (1 EVENT_BASE : type 1 objet, identifiant = section de l'objet, fonction 8 ; 2 CID)
 //!     → op 5 : accord (renvoie l'EVENT_BASE) ; de loin, le serveur fait d'abord courir le joueur
 //! op 0 (1 EVENT_BASE du départ, 2 CID, 3 nom du point d'arrivée en CP949)
-//!     → op 1 (2 CID, 4 position d'arrivée), déplacement, op 8 (chargement fini)
-//! op 7 (1 EVENT_BASE, 2 CID) : « Retour » depuis un point de zone dangereuse (Archonia
-//!     FUN_1402e7f90 ; ArchCore ne le traite pas encore)
+//!     → op 1 (2 CID, 4 position d'arrivée), déplacement, op 8 (chargement fini) ; op 2 : départ annulé
+//! op 7 (1 EVENT_BASE, 2 CID) : « Retour » depuis un point de zone de combat entre joueurs
+//!     (Archonia FUN_1402e7f90) → op 1, op 8 : retour au point de départ du dernier trajet (`sim pvp`)
 //! ```
 
 use archrust_protocol::packet::{build_mini, decode_mini, sparse, Value};
@@ -23,6 +23,7 @@ const BASE_TYPE_OBJECT: i8 = 1;
 pub mod op {
     pub const TELEPORT_POINT: i8 = 0;
     pub const TELEPORT_START: i8 = 1;
+    pub const TELEPORT_CANCELED: i8 = 2;
     pub const TELEPORT_RETURN: i8 = 7;
     pub const REQUEST: i8 = 4;
     pub const GRANTED: i8 = 5;
@@ -70,6 +71,8 @@ pub enum TeleportEvent {
     Start { cid: i32, position: Option<[f32; 3]> },
     /// Chargement terminé (op 8).
     Loaded { cid: i32 },
+    /// Départ annulé (op 2) : l'écran de chargement se ferme (FUN_1406e9df0).
+    Canceled { cid: i32 },
 }
 
 fn int(values: &[Option<Value>], i: usize) -> Option<i64> {
@@ -89,6 +92,7 @@ pub fn translate(packet_type: u8, values: &[Option<Value>]) -> Option<TeleportEv
         }
         op::TELEPORT_START => TeleportEvent::Start { cid, position: values.get(4).and_then(Option::as_ref).and_then(Value::as_vec3) },
         op::LOADING => TeleportEvent::Loaded { cid },
+        op::TELEPORT_CANCELED => TeleportEvent::Canceled { cid },
         _ => return None,
     })
 }

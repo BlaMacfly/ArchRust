@@ -94,6 +94,7 @@ pub mod packet_type {
     pub const REFINERY: u8 = 0x4b;
     pub const EVENT_REFINERY: u8 = 0x3f;
     pub const EVENT_GUILD: u8 = 0x39;
+    pub const GUILD_WAREHOUSE: u8 = 0x54;
     pub const EVENT_NPC_DIALOG: u8 = 0x37;
     pub const EVENT_SKILL_MASTER: u8 = 0x3b;
     pub const EVENT_MANAGER: u8 = 0x3c;
@@ -205,6 +206,12 @@ pub mod main {
         f!(Int8), f!(Int32), f!(Int32), f!(Int32), f!(Char, 65), f!(Char, 65),
     ]);
 
+    // AgpmReconnect — drapeaux 4 (Archonia FUN_14027c3f0) : op (1 demande, 2 réponse), CID, nom, compte,
+    // mot de passe, clé de reconnexion, accord.
+    schema!(pub RECONNECT = "AGPMRECONNECT", T::RECONNECT, 4, [
+        f!(Int8), f!(Int32), f!(Char, 48), f!(Char, 1024), f!(Char, 1024), f!(Int32), f!(Int8),
+    ]);
+
     // AgpmReturnToLogin — drapeaux 1
     schema!(pub RETURN_TO_LOGIN = "AGPMRETURNTOLOGIN", T::RETURN_TO_LOGIN, 1, [
         f!(Int8), f!(Int32), f!(Char, 49), f!(Char, 32), f!(Char, 25), f!(Int32),
@@ -313,6 +320,18 @@ pub mod main {
 
     // AgpmEventGuild (0x39) — drapeaux 1 : op (0 demande, 1 accord), événement (EVENT_BASE), CID du joueur.
     schema!(pub EVENT_GUILD = "AGPMEVENTGUILD", T::EVENT_GUILD, 1, [f!(Int8), f!(Packet), f!(Int32)]);
+    // AgpmGuildWarehouse (0x54) — drapeaux 2 : op, CID, argent, pages en plus, IID, page, ligne, colonne, résultat.
+    schema!(pub GUILD_WAREHOUSE = "AGPMGUILDWAREHOUSE", T::GUILD_WAREHOUSE, 2, [
+        f!(Int8),
+        f!(Int32),
+        f!(Int64),
+        f!(Int32),
+        f!(Int32),
+        f!(Int32),
+        f!(Int32),
+        f!(Int32),
+        f!(Int32),
+    ]);
     // AgpmUIStatus (0x14) — drapeaux 2 : barre de raccourcis, potions et seuils de leur prise automatique.
     schema!(pub UI_STATUS = "AGPMUISTATUS", T::UI_STATUS, 2, [
         f!(Int8),        // 0 opération (0 envoi complet, 1 changement, 2 barre encodée, 3 casque)
@@ -439,6 +458,7 @@ pub mod main {
             T::EVENT_REFINERY => EVENT_REFINERY,
             T::GUILD => GUILD,
             T::EVENT_GUILD => EVENT_GUILD,
+            T::GUILD_WAREHOUSE => GUILD_WAREHOUSE,
             T::UI_STATUS => UI_STATUS,
             T::EVENT_QUEST => EVENT_QUEST,
             T::QUEST => QUEST,
@@ -454,6 +474,7 @@ pub mod main {
             T::CHATTING => CHATTING,
             T::SYSTEM_MESSAGE => SYSTEM_MESSAGE,
             T::RETURN_TO_LOGIN => RETURN_TO_LOGIN,
+            T::RECONNECT => RECONNECT,
             T::OPT_CHAR_MOVE => OPT_CHAR_MOVE,
             T::OPT_CHAR_ACTION => OPT_CHAR_ACTION,
             T::OPT_VIEW => OPT_VIEW,
@@ -599,6 +620,28 @@ pub mod mini {
     // Membre d'une guilde (champ 16 d'AGPMGUILD) — drapeaux 1 : nom, rang (1 membre, 2 demande d'adhésion,
     // 3 demande de départ, 10 chef, 11 second), date d'adhésion, niveau, TID, en ligne (0 ou 1).
     schema!(pub GUILD_MEMBER = "AGPMGUILD_MEMBER", 155, 1, [f!(Char, 49), f!(Int32), f!(Int64), f!(UInt64), f!(Int32), f!(Int8)]);
+
+    // Liste des guildes (champ 21 d'AGPMGUILD, op 28) — drapeaux 4 : nombre total de guildes, page, nombre de la
+    // page (INT16), puis 19 entrées GUILD_LIST_ITEM (FUN_140203630 d'Archonia).
+    schema!(pub GUILD_LIST = "AGPMGUILD_LIST", 156, 4, [
+        f!(Int32), f!(Int32), f!(Int16),
+        f!(Packet), f!(Packet), f!(Packet), f!(Packet), f!(Packet), f!(Packet), f!(Packet), f!(Packet), f!(Packet), f!(Packet),
+        f!(Packet), f!(Packet), f!(Packet), f!(Packet), f!(Packet), f!(Packet), f!(Packet), f!(Packet), f!(Packet),
+    ]);
+
+    // Combat de guildes (champ 17 d'AGPMGUILD) — drapeaux 2 : guilde adverse, chef adverse, acceptation, délai,
+    // début (secondes), type, durée (s), nombre de combattants, horloge, score, score adverse, gain, gain
+    // adverse, résultat, manche.
+    schema!(pub GUILD_BATTLE = "AGPMGUILD_BATTLE", 158, 2, [
+        f!(Char, 33), f!(Char, 49), f!(UInt64), f!(UInt64), f!(UInt64), f!(UInt32), f!(UInt32), f!(UInt32), f!(UInt64),
+        f!(Int32), f!(Int32), f!(Int32), f!(Int32), f!(Int8), f!(UInt32),
+    ]);
+
+    // Entrée de la liste des guildes — drapeaux 2 : nom, chef, second, niveau, (inconnu), membres, taille,
+    // (inconnu), emblème (TID, couleur), points de combat.
+    schema!(pub GUILD_LIST_ITEM = "AGPMGUILD_LIST_ITEM", 157, 2, [
+        f!(Char, 33), f!(Char, 49), f!(Char, 49), f!(Int32), f!(UInt32), f!(Int32), f!(Int32), f!(Int32), f!(Int32), f!(Int32), f!(Int32),
+    ]);
 }
 
 /// Opérations (champ 0) du paquet de connexion (AgpmLogin).

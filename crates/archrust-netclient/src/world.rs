@@ -256,6 +256,13 @@ pub enum WorldEvent {
     Guild(crate::guild::GuildEvent),
     /// Potions de la barre et seuils de leur prise automatique, reçus à l'entrée en jeu.
     UiStatus(crate::ui_status::UiStatus),
+    /// Métamorphose d'un personnage (AGPMCHARACTER champ 18) : les portails la refusent
+    /// (`Teleport_TransformChar`).
+    Transformed { cid: i32, transformed: bool },
+    /// Connexion au monde perdue : reconnexion en cours (`ReconnectingServerShow`, voir `reconnect`).
+    Reconnecting,
+    /// Reconnexion acceptée : la partie reprend (`ReconnectingServerHide`).
+    Reconnected,
     Disconnected(String),
 }
 
@@ -315,6 +322,9 @@ pub enum Command {
     Chat { kind: i8, message: String },
     /// Chuchotement (AGPMCHATTING type 5) : destinataire au champ 5.
     Whisper { to: String, message: String },
+    /// Essai de la reconnexion (`/coupure`) : la connexion au monde est coupée comme par une panne du
+    /// réseau ; la reconnexion automatique suit.
+    CutConnection,
     Quit,
 }
 
@@ -491,6 +501,12 @@ fn decode_view_with_equipment(mini_bytes: &[u8], items: Option<&Value>) -> Optio
 /// (l'inventaire du champ 6 donne l'événement principal).
 pub fn extra_events(p: &Incoming) -> Vec<WorldEvent> {
     let mut out = Vec::new();
+    // Métamorphose (champ 18 des paquets personnage).
+    if p.packet_type == packet_type::CHARACTER && matches!(p.op(), Some(op) if op == character_op::ADD as i64 || op == character_op::UPDATE as i64) {
+        if let (Some(cid), Some(t)) = (p.get(1).and_then(Value::as_i64), p.get(18).and_then(Value::as_i64)) {
+            out.push(WorldEvent::Transformed { cid: cid as i32, transformed: t != 0 });
+        }
+    }
     // Options d'un objet (AGPMITEM op 0, champ 20), à part de l'objet lui-même.
     if p.packet_type == packet_type::ITEM {
         out.extend(p.packet.as_ref().and_then(|packet| crate::convert::options_of(&packet.values)).map(WorldEvent::Convert));
@@ -525,7 +541,7 @@ pub fn translate(p: &Incoming) -> WorldEvent {
         return WorldEvent::UiStatus(st);
     }
     // Guildes (voir `guild`).
-    if let Some(ev) = p.packet.as_ref().and_then(|packet| crate::guild::translate(p.packet_type, &packet.values)) {
+    if let Some(ev) = p.packet.as_ref().and_then(|packet| crate::guild::translate(p.packet_type, &packet.values, &p.raw)) {
         return WorldEvent::Guild(ev);
     }
     // Portails (voir `teleport`).
@@ -845,6 +861,8 @@ fn item_record(values: &[Option<Value>], operation: u8) -> Option<ItemRecord> {
     let grid_field = match status {
         Some(2) => 7,   // Inventory
         Some(100) => 8, // Bank
+        // Entrepôt de guilde : case au champ 7 comme le sac (Archonia FUN_1401b4d00).
+        Some(53) => 7,
         _ => usize::MAX,
     };
     let grid = field(grid_field)
@@ -874,6 +892,11 @@ pub struct WorldClient {
     pub cid: i32,
     pub position: Vec3,
     pub seen: Vec<SeenCharacter>,
+    /// Compte et mot de passe saisis à la connexion, renvoyés par une reconnexion (0x63 op 1).
+    pub account: String,
+    pub password: String,
+    /// Clé de reconnexion reçue du serveur (0 : pas de reconnexion possible).
+    pub reconnect_key: i32,
 }
 
 impl WorldClient {
@@ -953,6 +976,9 @@ impl WorldClient {
             cid: 0,
             position: Vec3::ZERO,
             seen: Vec::new(),
+            account: String::new(),
+            password: String::new(),
+            reconnect_key: 0,
         })
     }
 
@@ -1173,8 +1199,7 @@ impl WorldClient {
             tokio::select! {
                 _ = tick.tick() => {
                     if let Err(e) = self.keepalive().await {
-                        let _ = events.send(WorldEvent::Disconnected(e.to_string())).await;
-                        return;
+                        if !self.recover(&events, e.to_string()).await { return; }
                     }
                 }
                 cmd = commands.recv() => {
@@ -1196,10 +1221,13 @@ impl WorldClient {
                             let (schema, values) = crate::ui_status::option_flags_packet(flags, self.cid);
                             self.conn.send(schema, &values).await
                         }
-                        Some(Command::Guild(c)) => {
-                            let (schema, values) = crate::guild::command_packet(&c, self.cid);
-                            self.conn.send(schema, &values).await
-                        }
+                        Some(Command::Guild(c)) => match crate::guild::raw_command(&c, &self.ticket.character) {
+                            Some(raw) => self.conn.send_raw(&raw).await,
+                            None => {
+                                let (schema, values) = crate::guild::command_packet(&c, self.cid);
+                                self.conn.send(schema, &values).await
+                            }
+                        },
                         Some(Command::AddonSend { request_id, prefix, channel, target, payload }) => {
                             self.send_addon(request_id, &prefix, channel, target.as_deref(), &payload).await
                         }
@@ -1237,11 +1265,11 @@ impl WorldClient {
                             let (schema, values) = crate::teleport::command_packet(&c, self.cid);
                             self.conn.send(schema, &values).await
                         }
+                        Some(Command::CutConnection) => { self.conn.cut().await; Ok(()) }
                         Some(Command::Quit) | None => { self.conn.close().await; return; }
                     };
                     if let Err(e) = r {
-                        let _ = events.send(WorldEvent::Disconnected(e.to_string())).await;
-                        return;
+                        if !self.recover(&events, e.to_string()).await { return; }
                     }
                 }
                 p = self.conn.next() => {
@@ -1249,6 +1277,11 @@ impl WorldClient {
                         Ok(p) => {
                             if let Some(e) = self.conn.take_new_extensions() {
                                 if events.send(WorldEvent::ExtensionsReady(e)).await.is_err() { return; }
+                            }
+                            // Clé de reconnexion (0x63 op 2), gardée par le client.
+                            if let Some((key, _)) = crate::reconnect::result_of(&p) {
+                                if key != 0 { self.reconnect_key = key; }
+                                continue;
                             }
                             let ev = translate(&p);
                             Self::track_view_event(&mut self.seen, &ev);
@@ -1258,13 +1291,59 @@ impl WorldClient {
                             }
                         }
                         Err(e) => {
-                            let _ = events.send(WorldEvent::Disconnected(e.to_string())).await;
-                            return;
+                            if !self.recover(&events, e.to_string()).await { return; }
                         }
                     }
                 }
             }
         }
+    }
+
+    /// Connexion perdue (`why`) : reconnexion d'AgcmReconnect, une tentative toutes les 5 s pendant 60 s,
+    /// si le serveur a donné une clé. Rend `false` (et envoie `Disconnected`) en cas d'échec.
+    async fn recover(&mut self, events: &mpsc::Sender<WorldEvent>, why: String) -> bool {
+        if self.reconnect_key == 0 || self.cid == 0 {
+            let _ = events.send(WorldEvent::Disconnected(why)).await;
+            return false;
+        }
+        log::warn!("[world] connexion perdue ({why}) : reconnexion pendant {} s", crate::reconnect::WINDOW.as_secs());
+        let _ = events.send(WorldEvent::Reconnecting).await;
+        let deadline = tokio::time::Instant::now() + crate::reconnect::WINDOW;
+        loop {
+            let attempt = tokio::time::Instant::now();
+            match tokio::time::timeout_at(deadline, self.reconnect_once()).await {
+                Ok(Ok(true)) => {
+                    log::info!("[world] reconnecté (nouvelle clé {})", self.reconnect_key);
+                    let _ = events.send(WorldEvent::Reconnected).await;
+                    return true;
+                }
+                Ok(Ok(false)) => log::warn!("[world] reconnexion refusée par le serveur"),
+                Ok(Err(e)) => log::info!("[world] tentative de reconnexion : {e}"),
+                Err(_) => {}
+            }
+            let next = attempt + crate::reconnect::RETRY;
+            if next >= deadline {
+                let _ = events.send(WorldEvent::Disconnected(format!("{why} ; reconnexion impossible"))).await;
+                return false;
+            }
+            tokio::time::sleep_until(next).await;
+        }
+    }
+
+    /// Une tentative : nouvelle connexion au monde, demande de reprise (0x63 op 1), réponse attendue.
+    async fn reconnect_once(&mut self) -> Result<bool, NetError> {
+        let mut conn = Connection::connect("world", &self.ticket.host, self.ticket.port).await?;
+        conn.language = self.ticket.language.clone();
+        conn.handshake().await?;
+        let (schema, values) = crate::reconnect::request_packet(self.cid, &self.ticket.character, &self.account, &self.password, self.reconnect_key);
+        conn.send(schema, &values).await?;
+        let reply = conn.expect(packet_type::RECONNECT, Some(crate::reconnect::op::RESULT as i64)).await?;
+        let Some((key, true)) = crate::reconnect::result_of(&reply) else { return Ok(false) };
+        if key != 0 {
+            self.reconnect_key = key;
+        }
+        self.conn = conn;
+        Ok(true)
     }
 }
 

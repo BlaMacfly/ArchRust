@@ -455,7 +455,8 @@ impl App {
             self.ui.push_chat(format!("[combat] {name} est déjà mort."));
             return false;
         }
-        if !self.combat_attackable(tid) {
+        // Joueur de la guilde adverse, pendant un combat de guildes.
+        if !self.combat_attackable(tid) && !self.guild.state.is_enemy(cid) {
             self.ui.push_chat(format!("[combat] {name} ne peut pas être attaqué."));
             return false;
         }
@@ -586,7 +587,7 @@ impl App {
         match self.entity_under_cursor() {
             Some(cid) if self.addons.target_cid() == Some(cid) => {
                 let tid = self.entities.iter().find(|e| e.cid == cid).map(|e| e.tid);
-                if tid.is_some_and(|t| self.combat_attackable(t)) {
+                if tid.is_some_and(|t| self.combat_attackable(t)) || self.guild.state.is_enemy(cid) {
                     self.combat_attack(cid);
                     return true;
                 }
@@ -611,7 +612,7 @@ impl App {
         }
         if let Some(cid) = self.entity_under_cursor() {
             let tid = self.entities.iter().find(|e| e.cid == cid).map(|e| e.tid);
-            if tid.is_some_and(|t| self.combat_attackable(t)) {
+            if tid.is_some_and(|t| self.combat_attackable(t)) || self.guild.state.is_enemy(cid) {
                 self.combat_attack(cid);
             } else if !self.npc_talk(cid) {
                 // PNJ : dialogue (voir `app_npc.rs`) ; autre personnage : il devient la cible.
