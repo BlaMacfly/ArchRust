@@ -475,7 +475,8 @@ les listes du groupe) ; libellés `Option_Msg_NEAR`, `_NORMAL`, `_FAR`, `_ALL` d
 de 31 250 unités est un choix d'ArchRust : la distance à laquelle Archonia applique ces facteurs (modèles
 LOD) n'est pas relevée.
 
-**Refus envoyés au serveur** (à reprendre par ArchCore, qui ignore aujourd'hui l'op 0x11) :
+**Refus envoyés au serveur** (appliqués par ArchCore : invitations et demandes arrêtées à la source, messages
+d'Archonia renvoyés à l'auteur, voir « Refus des options » dans le protocole d'ArchCore) :
 - paquet **AgpmCharacter (0x02) op 0x11**, client → serveur : champ 1 = CID, champ 22 = drapeaux (`INT32`) ;
   Archonia l'envoie à l'entrée en jeu (`FUN_140706ef0`, tous les drapeaux de `COption.ini`) puis à chaque
   case (`FUN_14070ea70` → `FUN_1404b7f80` → `FUN_14017ae50`) ; ArchRust fait de même ;

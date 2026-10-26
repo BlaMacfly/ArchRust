@@ -237,6 +237,8 @@ fn system_text(d: &GuildData, code: i32, text: &str, number: i64) -> Option<(Str
         16 => return Some((printf(&d.msg("Guild_Msg_ForcedLeave"), &[&text]), white)),
         17 => "Guild_Msg_AlreadyMember2",
         18 => "Guild_Msg_ForcedLeave2",
+        // Invité qui refuse les invitations de guilde (options) : couleur `Negative_Text_Color`.
+        42 => return Some((printf(&d.msg("Option_Guild_Off_User"), &[&text]), d.color("Negative_Text_Color", 0xFFFF_0000))),
         47 => return Some((d.msg("Guild_No_Exist_Search_Guild"), guild_color)),
         48 => return Some((printf(&d.msg("Guild_Join_Request_Self"), &[&text]), guild_color)),
         50 => return Some((printf(&d.msg("Guild_Leave_Request_Self"), &[&text]), guild_color)),

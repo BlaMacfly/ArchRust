@@ -44,6 +44,8 @@ pub mod mgmt {
     pub const FAILED_FULL: i8 = 7;
     pub const FAILED_NOT_LEADER: i8 = 8;
     pub const FAILED_NO_LOGIN: i8 = 10;
+    /// L'invité refuse les invitations de groupe (options).
+    pub const FAILED_REFUSE: i8 = 14;
     pub const DELEGATION_LEADER: i8 = 11;
 }
 
@@ -257,6 +259,8 @@ impl PartyNotice {
                     mgmt::FAILED_FULL => "Le groupe est plein.".into(),
                     mgmt::FAILED_NOT_LEADER => "Seul le chef du groupe peut inviter.".into(),
                     mgmt::FAILED_NO_LOGIN => format!("{who} n'est pas en jeu."),
+                    // « Option_Party_Off_User » d'`ini_fr/uimessage.txt`.
+                    mgmt::FAILED_REFUSE => format!("{who} bloque desormais les invitations en groupe."),
                     other => format!("Échec de la demande de groupe ({other})."),
                 }
             }
@@ -407,7 +411,8 @@ impl PartyState {
             | mgmt::FAILED_ALREADY_MEMBER
             | mgmt::FAILED_FULL
             | mgmt::FAILED_NOT_LEADER
-            | mgmt::FAILED_NO_LOGIN) => Some(PartyNotice::Failed {
+            | mgmt::FAILED_NO_LOGIN
+            | mgmt::FAILED_REFUSE) => Some(PartyNotice::Failed {
                 code,
                 name: m.name.clone(),
             }),
