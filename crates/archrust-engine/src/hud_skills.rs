@@ -3,7 +3,9 @@
 //! des potions de vie et de mana).
 //!
 //! Glisser une compétence du livre, ou un objet du sac, sur une case de la barre l'y range ; glisser
-//! une case hors de la barre la vide. Les demandes reviennent au moteur en [`SkillUi`] (voir
+//! une case hors de la barre la vide. Les deux curseurs `PointScrollBar` posés sur les jauges de PV et de
+//! PM (`CONTROL_9745`, `CONTROL_24256`, piste de 350 sur 370) règlent le seuil de prise automatique des
+//! potions des cases 1 et 2 (`ChangeHPPointScrollBarValue` d'Archonia : position × 100, en %). Les demandes reviennent au moteur en [`SkillUi`] (voir
 //! `app_skills.rs`).
 
 use super::items_ui::{icon as item_icon, ItemDrag};
@@ -41,6 +43,8 @@ pub enum SkillUi {
     SlotSwap(usize, usize),
     SlotClear(usize),
     SlotUse(usize),
+    /// Seuil de prise automatique de la potion de vie (`hp`) ou de mana, en %.
+    AutoGauge { hp: bool, value: u8 },
 }
 
 /// Compétence du livre.
@@ -306,8 +310,11 @@ pub fn draw_trainer(ctx: &egui::Context, hud: &mut HudState, assets: &Assets, vi
     });
 }
 
+/// Course des curseurs de prise automatique (`Scroll=0:0:350` de `CONTROL_9745`).
+const AUTO_TRACK: f32 = 350.0;
+
 /// Barre de raccourcis : douze cases posées sur les grilles de `UI_CharInfo`.
-pub fn draw_quickbar(ctx: &egui::Context, hud: &mut HudState, assets: &Assets, slots: &[SlotView; 12], out: &mut Vec<SkillUi>) {
+pub fn draw_quickbar(ctx: &egui::Context, hud: &mut HudState, assets: &Assets, slots: &[SlotView; 12], auto: [u8; 2], out: &mut Vec<SkillUi>) {
     let Some(w) = hud.windows(assets).iter().find(|w| w.name == "UI_CharInfo").cloned() else { return };
     let layout = Layout::new(ctx.screen_rect());
     let origin = layout.window_origin(&w);
@@ -368,6 +375,32 @@ pub fn draw_quickbar(ctx: &egui::Context, hud: &mut HudState, assets: &Assets, s
             if target {
                 painter.rect_stroke(*cell, 2.0, egui::Stroke::new(1.5_f32, Color32::from_rgb(255, 210, 110)), egui::StrokeKind::Inside);
             }
+        });
+    }
+    // Curseurs de prise automatique des potions, sur les jauges de PV et de PM.
+    for (k, (bar, thumb, tip)) in [("CONTROL_9745", "CONTROL_5672", "Use Life Potion Automatically"), ("CONTROL_24256", "CONTROL_3123", "Use Mana Potion Automatically")].into_iter().enumerate() {
+        let (Some(b), Some(t)) = (w.controls.iter().find(|c| c.name == bar), w.controls.iter().find(|c| c.name == thumb)) else { continue };
+        let track = layout.rect(origin, b.pos, b.size);
+        let id = egui::Id::new(("archrust-auto-potion", k));
+        let mut value = ctx.data(|d| d.get_temp::<f32>(id)).unwrap_or(auto[k] as f32);
+        egui::Area::new(id).fixed_pos(track.min).order(egui::Order::Foreground).show(ctx, |ui| {
+            let (_, resp) = ui.allocate_exact_size(track.size(), egui::Sense::click_and_drag());
+            if resp.dragged() || resp.clicked() {
+                if let Some(p) = resp.interact_pointer_pos() {
+                    value = (((p.x - track.left()) / s - t.size[0] / 2.0) / AUTO_TRACK * 100.0).clamp(0.0, 100.0);
+                    ctx.data_mut(|d| d.insert_temp(id, value));
+                }
+            }
+            if resp.drag_stopped() || resp.clicked() {
+                ctx.data_mut(|d| d.remove::<f32>(id));
+                out.push(SkillUi::AutoGauge { hp: k == 0, value: value.round() as u8 });
+            }
+            let resp = resp.on_hover_text(tip);
+            let thumb_rect = layout.rect(origin, [b.pos[0] + value / 100.0 * AUTO_TRACK, b.pos[1]], t.size);
+            if let Some((_, tex)) = t.textures.first() {
+                control_image(ctx, hud, assets, ui.painter(), thumb_rect, t.size, &tex.clone(), 1.0);
+            }
+            let _ = resp;
         });
     }
     // Case glissée hors de la barre : vidée.

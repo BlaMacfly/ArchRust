@@ -118,6 +118,34 @@ pub fn tile_portals(assets: &Assets, tile: u32) -> Vec<PortalObject> {
     out
 }
 
+/// Objets d'une tuile qui portent la fonction d'événement `function` (`Function=26` : sphère
+/// d'alchimie) : section de l'objet (identifiant de l'EVENT_BASE) et placement.
+pub fn tile_function_objects(assets: &Assets, tile: u32, function: i32) -> Vec<(u32, Placement)> {
+    let Ok(table) = assets.table("ini", &format!("obj{tile:05}.ini")) else {
+        return Vec::new();
+    };
+    let wanted = function.to_string();
+    let mut out = Vec::new();
+    for s in &table.sections {
+        let Ok(id) = s.name.trim().parse::<u32>() else { continue };
+        if !s.entries.iter().any(|(k, v)| k.eq_ignore_ascii_case("Function") && v.trim() == wanted) {
+            continue;
+        }
+        let Some(position) = s.get("Position").and_then(vec3_of) else { continue };
+        out.push((
+            id,
+            Placement {
+                tid: s.get("TID").and_then(|t| t.trim().parse().ok()).unwrap_or(0),
+                position,
+                scale: s.get("Scale").and_then(vec3_of).unwrap_or(Vec3::ONE),
+                degree_x: s.get_f32("DegreeX").unwrap_or(0.0),
+                degree_y: s.get_f32("DegreeY").unwrap_or(0.0),
+            },
+        ));
+    }
+    out
+}
+
 /// Fichier de modèle d'un modèle d'objet, ou `None` s'il ne doit pas être dessiné.
 pub fn template_model(assets: &Assets, tid: u32) -> Option<String> {
     let table = assets.table("ini", "objecttemplate.ini").ok()?;

@@ -122,7 +122,13 @@ pub(super) fn bag_grid(
                     } else {
                         "Clic droit : utiliser ou porter · glisser : déplacer, hors fenêtre : détruire"
                     };
-                    resp.clone().on_hover_text(format!("{label}\n{hint}"));
+                    match hud.item_tips.get(&item.id) {
+                        Some(tip) if resp.hovered() => super::item_tooltip(ctx, tip, hint),
+                        Some(_) => {}
+                        None => {
+                            resp.clone().on_hover_text(format!("{label}\n{hint}"));
+                        }
+                    }
                 }
             }
             if let Some(drag) = resp.dnd_release_payload::<ItemDrag>() {
@@ -258,7 +264,14 @@ pub fn draw_character(
                                 out.push(ItemUi::Activate { iid: e.item.id, worn: true });
                             }
                             if dragging.is_none() {
-                                resp.clone().on_hover_text(format!("{}\nClic droit ou glisser vers l'inventaire : ranger", e.name));
+                                let hint = "Clic droit ou glisser vers l'inventaire : ranger";
+                                match hud.item_tips.get(&e.item.id) {
+                                    Some(tip) if resp.hovered() => super::item_tooltip(ctx, tip, hint),
+                                    Some(_) => {}
+                                    None => {
+                                        resp.clone().on_hover_text(format!("{}\n{hint}", e.name));
+                                    }
+                                }
                             }
                         }
                         if let Some(drag) = resp.dnd_release_payload::<ItemDrag>() {

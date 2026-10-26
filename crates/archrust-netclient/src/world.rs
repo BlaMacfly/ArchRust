@@ -244,12 +244,18 @@ pub enum WorldEvent {
     PartyManagement(crate::party::PartyManagement),
     /// Dialogue, boutique, banque, quêtes (voir `npc`).
     Npc(crate::npc::NpcEvent),
+    /// Conversion des objets : fenêtre du forgeron, état des objets, résultats (voir `convert`).
+    Convert(crate::convert::ConvertEvent),
+    /// Sphère d'alchimie : ouverture, devis, résultat (voir `refinery`).
+    Refinery(crate::refinery::RefineryEvent),
     /// Compétences : liste, niveau, lancement, instructeur (voir `skills`).
     Skill(crate::skills::SkillEvent),
     /// Portails : accord, départ, chargement fini (voir `teleport`).
     Teleport(crate::teleport::TeleportEvent),
     /// Guildes : guilde, membres, invitation, liens, messages (voir `guild`).
     Guild(crate::guild::GuildEvent),
+    /// Potions de la barre et seuils de leur prise automatique, reçus à l'entrée en jeu.
+    UiStatus(crate::ui_status::UiStatus),
     Disconnected(String),
 }
 
@@ -289,12 +295,22 @@ pub enum Command {
     Item(crate::items::ItemCommand),
     /// Dialogue, boutique, banque, quêtes (voir `npc`).
     Npc(crate::npc::NpcCommand),
+    /// Forgeron : renforcement, sockets, pierres d'esprit (voir `convert`).
+    Convert(crate::convert::ConvertCommand),
+    /// Sphère d'alchimie : ouverture, devis, raffinage (voir `refinery`).
+    Refinery(crate::refinery::RefineryCommand),
     /// Lancement et apprentissage des compétences (voir `skills`).
     Skill(crate::skills::SkillCommand),
     /// Demande au portail, destination choisie (voir `teleport`).
     Teleport(crate::teleport::TeleportCommand),
     /// Demande de guilde (voir `guild`).
     Guild(crate::guild::GuildCommand),
+    /// Potions de la barre ou seuils de leur prise automatique changés.
+    UiStatus(crate::ui_status::UiStatusUpdate),
+    /// Casque visible ou non (AgpmUIStatus op 3, champ 8).
+    ViewHelmet(bool),
+    /// Drapeaux de refus du personnage (AgpmCharacter op 0x11, champ 22).
+    OptionFlags(u32),
     /// Message sur un canal de discussion (AGPMCHATTING champ 2 : 3 guilde, 4 groupe…).
     Chat { kind: i8, message: String },
     /// Chuchotement (AGPMCHATTING type 5) : destinataire au champ 5.
@@ -471,14 +487,23 @@ fn decode_view_with_equipment(mini_bytes: &[u8], items: Option<&Value>) -> Optio
 }
 
 /// Événements en plus de celui de `translate` : compétences connues, au champ 8 de la vue optimisée
-/// op 2 (l'inventaire du champ 6 donne l'événement principal).
+/// op 2, et états de conversion (AGPMITEMCONVERT op 0) glissés parmi les objets du champ 6
+/// (l'inventaire du champ 6 donne l'événement principal).
 pub fn extra_events(p: &Incoming) -> Vec<WorldEvent> {
+    let mut out = Vec::new();
+    // Options d'un objet (AGPMITEM op 0, champ 20), à part de l'objet lui-même.
+    if p.packet_type == packet_type::ITEM {
+        out.extend(p.packet.as_ref().and_then(|packet| crate::convert::options_of(&packet.values)).map(WorldEvent::Convert));
+    }
     if p.packet_type == packet_type::OPT_VIEW && p.op() == Some(view_op::ADD_CHARACTER_ITEMS as i64) {
+        if let Some(b) = p.get(6).and_then(Value::as_bytes) {
+            out.extend(crate::convert::states_in_block(b).into_iter().map(WorldEvent::Convert));
+        }
         if let Some(b) = p.get(8).and_then(Value::as_bytes) {
-            return crate::skills::decode_skill_block(b);
+            out.extend(crate::skills::decode_skill_block(b));
         }
     }
-    Vec::new()
+    out
 }
 
 /// Traduit un paquet reçu en événement.
@@ -486,6 +511,18 @@ pub fn translate(p: &Incoming) -> WorldEvent {
     // Dialogue, boutique, banque, quêtes (voir `npc`).
     if let Some(ev) = p.packet.as_ref().and_then(|packet| crate::npc::translate(p.packet_type, &packet.values)) {
         return WorldEvent::Npc(ev);
+    }
+    // Forgeron et état des objets convertis (voir `convert`).
+    if let Some(ev) = p.packet.as_ref().and_then(|packet| crate::convert::translate(p.packet_type, &packet.values)) {
+        return WorldEvent::Convert(ev);
+    }
+    // Sphère d'alchimie (voir `refinery`).
+    if let Some(ev) = p.packet.as_ref().and_then(|packet| crate::refinery::translate(p.packet_type, &packet.values)) {
+        return WorldEvent::Refinery(ev);
+    }
+    // Statut d'interface (voir `ui_status`).
+    if let Some(st) = p.packet.as_ref().and_then(|packet| crate::ui_status::translate(p.packet_type, &packet.values)) {
+        return WorldEvent::UiStatus(st);
     }
     // Guildes (voir `guild`).
     if let Some(ev) = p.packet.as_ref().and_then(|packet| crate::guild::translate(p.packet_type, &packet.values)) {
@@ -766,6 +803,12 @@ fn decode_item_packets(mut bytes: &[u8]) -> Option<Vec<ItemRecord>> {
             return None;
         }
         let (one, rest) = bytes.split_at(len);
+        // ArchCore glisse l'état des objets convertis (AGPMITEMCONVERT op 0) après leur AGPMITEM :
+        // relevé à part par `extra_events`.
+        if one.get(5) != Some(&main::ITEM.id) {
+            bytes = rest;
+            continue;
+        }
         let packet = archrust_protocol::packet::decode_packet(&main::ITEM, one).ok()?;
         let operation = packet.op()? as u8;
         items.push(item_record(&packet.values, operation)?);
@@ -1141,6 +1184,18 @@ impl WorldClient {
                         Some(Command::Say(m)) => self.send_say(&m).await,
                         Some(Command::Chat { kind, message }) => self.send_chat(kind, &message).await,
                         Some(Command::Whisper { to, message }) => self.send_whisper(&to, &message).await,
+                        Some(Command::UiStatus(u)) => {
+                            let (schema, values) = crate::ui_status::update_packet(&u, self.cid);
+                            self.conn.send(schema, &values).await
+                        }
+                        Some(Command::ViewHelmet(view)) => {
+                            let (schema, values) = crate::ui_status::helmet_packet(view, self.cid);
+                            self.conn.send(schema, &values).await
+                        }
+                        Some(Command::OptionFlags(flags)) => {
+                            let (schema, values) = crate::ui_status::option_flags_packet(flags, self.cid);
+                            self.conn.send(schema, &values).await
+                        }
                         Some(Command::Guild(c)) => {
                             let (schema, values) = crate::guild::command_packet(&c, self.cid);
                             self.conn.send(schema, &values).await
@@ -1164,6 +1219,14 @@ impl WorldClient {
                         }
                         Some(Command::Npc(c)) => {
                             let (schema, values) = crate::npc::command_packet(&c, self.cid);
+                            self.conn.send(schema, &values).await
+                        }
+                        Some(Command::Convert(c)) => {
+                            let (schema, values) = crate::convert::command_packet(&c, self.cid);
+                            self.conn.send(schema, &values).await
+                        }
+                        Some(Command::Refinery(c)) => {
+                            let (schema, values) = crate::refinery::command_packet(&c, self.cid);
                             self.conn.send(schema, &values).await
                         }
                         Some(Command::Skill(c)) => {

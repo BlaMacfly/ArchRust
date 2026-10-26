@@ -22,6 +22,9 @@ use std::time::Instant;
 const SCALE: f32 = 1.0;
 /// Famille egui de la police des noms (police n° 0 d'AgcmFont).
 const ID_FAMILY: &str = "archonia-id";
+/// Fond du nom d'un membre du groupe quand l'option « Détails du groupe » est cochée
+/// (`board+0x464` = 1), couleur de police `0xAABBGGRR`.
+const PARTY_FRAME: u32 = 0xBF8B_3F3F;
 /// Au plus autant de panneaux de dégâts et de mentions vivants (Archonia en alloue 1000).
 const MAX_BOARDS: usize = 64;
 
@@ -44,6 +47,8 @@ struct IdLine {
     name: String,
     color: u32,
     guild: Option<(String, u32)>,
+    /// Membre du groupe (option « Détails du groupe ») : nom sur un cadre.
+    party: bool,
 }
 
 /// Ce que la fermeture egui dessine, calculé avant l'emprunt du GPU.
@@ -175,6 +180,13 @@ impl App {
         let my_guild = state.info.as_ref().map(|i| i.name.clone());
         let guilds: HashMap<i32, String> = state.links.clone();
         let ranks: HashMap<String, i32> = state.members.iter().map(|m| (m.name.to_lowercase(), m.rank)).collect();
+        // Onglet Affichage des options : noms par sorte (`board+0x100` d'Archonia : 1 soi, 2 monstre,
+        // 8 autre joueur ; les PNJ toujours), la cible gardant le sien comme Archonia le rallume au survol.
+        let display = self.options.display.clone();
+        let me = self.player.as_ref().map_or(0, |p| p.cid);
+        let target = self.addons.target_cid();
+        let party: HashSet<i32> = if display.name_party { self.party.state.members.iter().copied().filter(|&c| c != me).collect() } else { HashSet::new() };
+        let (char_distance, eye) = (self.options.video.char_distance(), self.camera.eye());
         for (cid, tid, name, pos, turn, player) in chars {
             let (height, depth) = self.boards_template(tid);
             let forward = Vec3::new(turn.to_radians().sin(), 0.0, turn.to_radians().cos());
@@ -191,12 +203,23 @@ impl App {
             } else {
                 IdKind::Monster
             };
+            let shown = match kind {
+                _ if Some(cid) == target => true,
+                IdKind::Player if cid == me => display.name_self,
+                IdKind::Player => display.name_others,
+                IdKind::Monster => display.name_monster,
+                IdKind::Npc => true,
+            };
+            // Personnage au-delà de la distance `CharView` (non tracé) : pas de nom non plus.
+            if !shown || (cid != me && char_distance.is_some_and(|d| pos.distance(eye) > d)) {
+                continue;
+            }
             let color = boards::name_color(kind, None);
-            let guild = guilds.get(&cid).filter(|g| !g.is_empty()).map(|g| {
+            let guild = guilds.get(&cid).filter(|g| !g.is_empty() && display.name_guild).map(|g| {
                 let gv = GuildView { my_guild: my_guild.as_deref(), rank_in_mine: ranks.get(&name.to_lowercase()).copied(), allies: &[] };
                 (boards::guild_text(g), boards::guild_color(color, g, &gv))
             });
-            view.ids.push(IdLine { anchor, name, color, guild });
+            view.ids.push(IdLine { anchor, name, color, guild, party: party.contains(&cid) });
         }
         for (cid, board, born) in &self.boards.dmg {
             let Some((foot, height)) = feet.get(cid) else { continue };
@@ -270,6 +293,12 @@ pub fn panel(ctx: &egui::Context, glue: &mut BoardsGlue, view: &BoardsView, hud:
         let guild = line.guild.as_ref().map(|(text, color)| painter.layout_no_wrap(text.clone(), font.clone(), boards::font_color(*color)));
         let height = name.size().y;
         let (at, guild_at) = boards::id_lines(line.anchor, name.size().x, guild.as_ref().map(|g| g.size().x), height, SCALE);
+        if line.party {
+            // Cadre `0xBF8B3F3F` (`FUN_140825a20`) derrière le nom d'un membre du groupe.
+            let c = boards::font_color(PARTY_FRAME);
+            let fill = Color32::from_rgba_unmultiplied(c.r(), c.g(), c.b(), (PARTY_FRAME >> 24) as u8);
+            painter.rect_filled(Rect::from_min_size(at, name.size()).expand(1.0), 0.0, fill);
+        }
         for (galley, pos) in [(Some(name), Some(at)), (guild, guild_at)] {
             let (Some(galley), Some(pos)) = (galley, pos) else { continue };
             painter.galley_with_override_text_color(pos + egui::vec2(1.0, 1.0), galley.clone(), shadow);

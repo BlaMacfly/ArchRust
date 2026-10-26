@@ -53,6 +53,10 @@ pub struct UiState {
     pub server_language: Option<(String, Vec<String>)>,
     /// Les packs de ressources ont changé : ils s'appliqueront au prochain démarrage.
     pub packs_restart: bool,
+    /// AddOns proposés dans les Options : (nom, titre, activé) ; vide = à relire.
+    pub addon_list: Vec<(String, String, bool)>,
+    /// AddOn activé ou désactivé depuis les Options, à appliquer par le moteur.
+    pub addon_toggle: Option<(String, bool)>,
 }
 
 /// Changement demandé dans la section « Packs de ressources » des Options.
@@ -122,6 +126,8 @@ impl Default for UiState {
             show_options: false,
             server_language: None,
             packs_restart: false,
+            addon_list: Vec::new(),
+            addon_toggle: None,
         }
     }
 }
@@ -142,9 +148,8 @@ pub struct AudioStatus {
 pub fn options_panel(
     ctx: &egui::Context,
     st: &mut UiState,
-    audio: &mut crate::audio::AudioSettings,
+    options: &mut crate::options::ClientOptions,
     status: &AudioStatus,
-    language: &mut Option<String>,
     packs: &mut archrust_patch::PatchStack,
     pack_action: &mut PackAction,
     hud: &mut crate::hud::HudState,
@@ -153,10 +158,14 @@ pub fn options_panel(
     if !st.show_options {
         return false;
     }
+    let crate::options::ClientOptions { audio, language, display, refuse, video } = options;
     // Fenêtres d'options d'Archonia (`Option_*`, voir `hud_options.rs`).
-    let edit = crate::hud::OptionsEdit { audio, language, languages: LANGUAGES, packs, packs_restart: st.packs_restart };
+    let edit = crate::hud::OptionsEdit { audio, language, languages: LANGUAGES, packs, packs_restart: st.packs_restart, addons: &st.addon_list, display, refuse, video };
     if let Some(out) = crate::hud::draw_options(ctx, hud, assets, edit) {
         *pack_action = out.pack_action;
+        if out.addon_toggle.is_some() {
+            st.addon_toggle = out.addon_toggle;
+        }
         if out.close {
             st.show_options = false;
         }

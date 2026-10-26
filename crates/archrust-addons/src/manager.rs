@@ -585,6 +585,36 @@ pub enum EditEvent {
     FocusLost,
 }
 
+/// Fichier des AddOns désactivés dans `saved-variables`, comme `AddOns.txt` de WoW : une ligne
+/// « Nom: disabled » par AddOn désactivé (les autres sont actifs).
+pub const ADDONS_FILE: &str = "AddOns.txt";
+
+/// Noms (en minuscules) des AddOns désactivés.
+pub fn disabled_addons(saved_dir: &Path) -> HashSet<String> {
+    std::fs::read_to_string(saved_dir.join(ADDONS_FILE))
+        .unwrap_or_default()
+        .lines()
+        .filter_map(|l| l.split_once(':'))
+        .filter(|(_, state)| state.trim().eq_ignore_ascii_case("disabled"))
+        .map(|(name, _)| name.trim().to_ascii_lowercase())
+        .collect()
+}
+
+/// Active ou désactive un AddOn (pris en compte au prochain chargement : `/reload`).
+pub fn set_addon_enabled(saved_dir: &Path, name: &str, enabled: bool) -> std::io::Result<()> {
+    let mut off = disabled_addons(saved_dir);
+    if enabled {
+        off.remove(&name.to_ascii_lowercase());
+    } else {
+        off.insert(name.to_ascii_lowercase());
+    }
+    let mut names: Vec<&String> = off.iter().collect();
+    names.sort();
+    std::fs::create_dir_all(saved_dir)?;
+    std::fs::write(saved_dir.join(ADDONS_FILE), names.iter().map(|n| format!("{n}: disabled
+")).collect::<String>())
+}
+
 impl AddonManager {
     /// Crée l'état Lua (bibliothèques sûres uniquement) et installe l'API. Les AddOns ne sont pas
     /// encore chargés (voir [`AddonManager::load_dir`]).
@@ -670,8 +700,14 @@ impl AddonManager {
             s.manifests = manifests.clone();
         }
         let names: HashSet<String> = manifests.iter().map(|m| m.name.clone()).collect();
+        let off = disabled_addons(&self.shared.borrow().saved_dir);
         for m in &manifests {
             if m.load_on_demand {
+                continue;
+            }
+            // Désactivé par le joueur (Options, `DisableAddOn`) : connu mais pas chargé.
+            if off.contains(&m.name.to_ascii_lowercase()) {
+                self.shared.borrow_mut().addons.push(LoadedAddon { manifest: m.clone(), enabled: false, loaded: false, error: None });
                 continue;
             }
             if let Some(dep) = m.dependencies.iter().find(|d| !names.contains(*d)) {

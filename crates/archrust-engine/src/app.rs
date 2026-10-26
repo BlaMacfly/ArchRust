@@ -60,6 +60,15 @@ mod guild_glue;
 #[path = "app_boards.rs"]
 mod boards_glue;
 
+#[path = "app_convert.rs"]
+mod convert_glue;
+
+#[path = "app_refinery.rs"]
+mod refinery_glue;
+
+#[path = "app_options.rs"]
+mod options_glue;
+
 /// Configuration du client.
 #[derive(Debug, Clone)]
 pub struct Config {
@@ -201,6 +210,10 @@ pub struct App {
     guild: guild_glue::GuildGlue,
     /// Panneaux au-dessus des personnages : noms, guildes, dégâts, voir `app_boards.rs`.
     boards: boards_glue::BoardsGlue,
+    /// Forgeron et état des objets convertis (renforcement, sockets, pierres), voir `app_convert.rs`.
+    convert: convert_glue::ConvertGlue,
+    /// Sphère d'alchimie : grille, recettes, prix et barre d'attente, voir `app_refinery.rs`.
+    refinery: refinery_glue::RefineryGlue,
 }
 
 impl App {
@@ -218,6 +231,7 @@ impl App {
         );
         // Options persistées, puis périphérique audio (muet s'il n'y en a pas).
         let options = crate::options::load(&config.saved_dir);
+        crate::assets::set_text_language(options.language.as_deref());
         let audio = Audio::new(
             assets.clone(),
             Some(config.addons_dir.clone()),
@@ -270,8 +284,8 @@ impl App {
             tab_history: Default::default(),
             npc_tids: None,
             preview: Vec::new(),
-            terrain: Terrain::default(),
-            objects: WorldObjects::new(3),
+            terrain: Terrain::new(options.video.sector_radius()),
+            objects: WorldObjects::new(options.video.sector_radius()),
             walking: false,
             started: Instant::now(),
             screenshot_done: false,
@@ -304,6 +318,8 @@ impl App {
             portal: Default::default(),
             guild: Default::default(),
             boards: Default::default(),
+            convert: Default::default(),
+            refinery: Default::default(),
         })
     }
 
@@ -961,10 +977,10 @@ impl App {
                     request_id: crate::net::LANGUAGE_REQUEST_ID,
                     language: lang.to_string(),
                 });
-                ui.push_chat(format!("[langue] {lang} demandée au serveur"));
+                ui.push_chat(format!("[langue] {lang} demandée au serveur ; textes du client ({}) au prochain démarrage", crate::assets::text_dir_for(Some(lang))));
             }
-            (_, Some(lang)) => ui.status = format!("langue {lang} : appliquée à la prochaine connexion"),
-            (_, None) => ui.status = "langue automatique : appliquée à la prochaine connexion".into(),
+            (_, Some(lang)) => ui.status = format!("langue {lang} : textes du serveur à la prochaine connexion, du client au prochain démarrage"),
+            (_, None) => ui.status = "langue automatique : textes du serveur à la prochaine connexion, du client (français) au prochain démarrage".into(),
         }
     }
 
@@ -1426,6 +1442,9 @@ impl App {
             WorldEvent::Teleport(ev) => self.on_teleport_event(ev),
             // Guildes (0x15 / 0x39), voir `app_guild.rs`.
             WorldEvent::Guild(ev) => self.on_guild_event(ev),
+            WorldEvent::UiStatus(st) => self.on_ui_status(st),
+            WorldEvent::Convert(ev) => self.on_convert_event(ev),
+            WorldEvent::Refinery(ev) => self.on_refinery_event(ev),
             // Messages système réduits à un code (banque agrandie…, voir `app_npc.rs`).
             WorldEvent::SystemCode(code) => self.npc_system_code(code),
             WorldEvent::Chat {
@@ -1470,6 +1489,8 @@ impl App {
                 self.ui.status = "en jeu".into();
                 // Chargement des AddOns (comme sous WoW), PLAYER_LOGIN, PLAYER_ENTERING_WORLD.
                 self.enter_world_addons();
+                // Refus et casque d'`options.toml` (onglets Fonction et Affichage des options).
+                self.options_enter_world();
                 self.ui
                     .push_chat(format!("[système] {} entités en vue", self.entities.len()));
                 if let Some(cmds) = &self.config.exec_on_enter {
@@ -1613,7 +1634,17 @@ impl App {
             "/reload" | "/rl" => self.reload_addons(),
             // Fenêtre Options du client (son, langue, packs de ressources), comme la touche Échap ;
             // « /options » appartient déjà à l'AddOn ArchAce.
-            "/reglages" | "/réglages" => self.ui.show_options = !self.ui.show_options,
+            // `/reglages [gfx|son|affichage|fonction|avance]` : options, sur l'onglet demandé.
+            "/reglages" | "/réglages" => {
+                let tab = ["gfx", "son", "affichage", "fonction", "avance"].iter().position(|t| arg.trim().eq_ignore_ascii_case(t));
+                match tab {
+                    Some(t) => {
+                        self.hud.options_tab = t as u8;
+                        self.ui.show_options = true;
+                    }
+                    None => self.ui.show_options = !self.ui.show_options,
+                }
+            }
             // /music <chemin> | off | auto : musique forcée (comme PlayMusic / StopMusic des AddOns).
             "/music" => {
                 let arg = arg.trim();
@@ -1740,6 +1771,8 @@ impl App {
             _ if self.npc_slash(cmd, arg) => {}
             // Portails : /portail, /portail n (voir `app_portal.rs`).
             _ if self.portal_slash(cmd, arg) => {}
+            // Sphère d'alchimie : /sphere, /grille, /raffiner, /repeter, /recette (voir `app_refinery.rs`).
+            _ if self.refinery_slash(cmd, arg) => {}
             // Compétences : /competences, /lancer (voir `app_skills.rs`).
             _ if self.skills_slash(cmd, arg) => {}
             // Groupes : /inviter, /accepter, /refuser, /quittergroupe, /exclure, /chef, /groupe.
@@ -1748,6 +1781,8 @@ impl App {
             _ if self.guild_slash(cmd, arg) => {}
             // Panneaux au-dessus des personnages : /panneau (coup simulé, voir `app_boards.rs`).
             _ if self.boards_slash(cmd, arg) => {}
+            // Forgeron : /ameliorer, /catalyseur, /onglet, /convertir, /infobulle (voir `app_convert.rs`).
+            _ if self.convert_slash(cmd, arg) => {}
             // Comme Archonia : une commande inconnue du client part au serveur dans la discussion,
             // qui traite les commandes MJ (`/create`, `/money`, `/move`… d'ArchCore) ou répond.
             _ if self.net.is_some() => {
@@ -1763,9 +1798,6 @@ impl App {
 
     /// TID du personnage local affiché en mode sans client (humain par défaut, `a0000060.ecl`).
     const LOCAL_PREVIEW_TID: i32 = 96;
-
-    /// Distance de tracé des objets du monde (unités ArchLord), en deçà du brouillard.
-    const OBJECT_DRAW_DISTANCE: f32 = 25_000.0;
 
     /// Avance une entité vers sa destination et la pose sur le terrain.
     fn step_entity(terrain: &Terrain, e: &mut Entity, dt: f32) {
@@ -2001,6 +2033,10 @@ impl App {
         if self.portal_left_click() {
             return;
         }
+        // Clic sur une sphère d'alchimie du décor (voir `app_refinery.rs`).
+        if self.refinery_left_click() {
+            return;
+        }
         let (Some(gpu), Some((cx, cy)), Some(player)) =
             (&self.gpu, self.last_cursor, self.player.as_ref())
         else {
@@ -2055,8 +2091,11 @@ impl App {
         self.items_frame();
         // Approche d'un PNJ, fenêtres fermées en s'éloignant (voir `app_npc.rs`).
         self.npc_frame();
+        // Infobulles des objets, fenêtre du forgeron fermée en s'éloignant (voir `app_convert.rs`).
+        self.convert_frame();
         // Portails des tuiles proches, liste fermée en s'éloignant (voir `app_portal.rs`).
         self.portal_frame();
+        self.refinery_frame();
         self.guild_frame();
         // Demandes des fenêtres de compétences, barre du personnage (voir `app_skills.rs`).
         self.skills_frame();
@@ -2253,6 +2292,10 @@ impl App {
                 // Barre de raccourcis avant les fenêtres d'objets : un objet lâché dessus y reste.
                 skills_glue::panel(ctx, &mut self.skills, &skill_views, &mut self.hud, &self.assets);
                 npc_glue::panel(ctx, &mut self.npc, &npc_views, &mut item_requests, &self.items, &mut self.hud, &self.assets, self.net.as_ref(), &mut self.ui);
+                // Forgeron et pierre d'esprit lâchée sur un objet du sac.
+                convert_glue::panel(ctx, &mut self.convert, &mut item_requests, &self.items, &mut self.hud, &self.assets, self.net.as_ref(), &mut self.ui);
+                // Sphère d'alchimie : clic droit sur un objet du sac pour le poser dans la grille.
+                refinery_glue::panel(ctx, &mut self.refinery, &mut item_requests, &self.items, &mut self.hud, &self.assets, self.net.as_ref(), &mut self.ui);
                 items_glue::panel(ctx, &mut self.item_ui, std::mem::take(&mut item_requests), &self.items, &mut self.hud, &self.assets, self.net.as_ref(), &mut self.ui);
                 // Groupe : bouton, fenêtre des membres, invitations reçues.
                 party_glue::panel(ctx, &mut self.party, &party_view, self.net.as_ref(), &mut self.ui, &mut self.hud, &self.assets);
@@ -2281,14 +2324,25 @@ impl App {
                     )
                 }),
             };
+            // AddOns des Options : liste relue à l'ouverture et après chaque changement.
+            if self.ui.show_options && self.ui.addon_list.is_empty() {
+                let off = archrust_addons::manager::disabled_addons(&self.config.saved_dir);
+                self.ui.addon_list = archrust_addons::AddonManager::discover(&self.config.addons_dir)
+                    .into_iter()
+                    .map(|m| {
+                        let on = !off.contains(&m.name.to_ascii_lowercase());
+                        (m.name, m.title, on)
+                    })
+                    .collect();
+            }
             let language_before = self.options.language.clone();
+            let options_before = self.options.clone();
             let mut pack_action = ui::PackAction::None;
             if ui::options_panel(
                 ctx,
                 &mut self.ui,
-                &mut self.options.audio,
+                &mut self.options,
                 &status,
-                &mut self.options.language,
                 &mut self.packs,
                 &mut pack_action,
                 &mut self.hud,
@@ -2296,6 +2350,7 @@ impl App {
             ) {
                 self.audio.set_settings(&self.options.audio);
                 self.options_dirty = true;
+                Self::options_changed(&self.options, &options_before, &mut self.terrain, &mut self.objects, self.net.as_ref(), phase == Phase::InWorld);
                 if self.options.language != language_before {
                     Self::apply_language_option(
                         self.net.as_ref(),
@@ -2303,6 +2358,20 @@ impl App {
                         &mut self.ui,
                         phase == Phase::InWorld,
                     );
+                }
+            }
+            // AddOn activé ou désactivé dans les Options : enregistré, puis interface rechargée en jeu.
+            if let Some((name, on)) = self.ui.addon_toggle.take() {
+                match archrust_addons::manager::set_addon_enabled(&self.config.saved_dir, &name, on) {
+                    Ok(()) => {
+                        self.ui.addon_list.clear();
+                        if phase == Phase::InWorld {
+                            actions.chat = Some("/reload".into());
+                        } else {
+                            self.ui.status = format!("AddOn {name} {} : appliqué à l'entrée en jeu", if on { "activé" } else { "désactivé" });
+                        }
+                    }
+                    Err(e) => log::error!("AddOns.txt : {e}"),
                 }
             }
             match pack_action {
@@ -2379,7 +2448,13 @@ impl App {
                 });
             }
         }
+        // Personnages au-delà de la distance `CharView` des options : non tracés.
+        let char_distance = self.options.video.char_distance();
+        let char_eye = self.camera.eye();
         for e in &self.entities {
+            if char_distance.is_some_and(|d| e.position.distance(char_eye) > d) {
+                continue;
+            }
             for (mesh, local) in &e.meshes {
                 items.push(DrawItem {
                     mesh: mesh.clone(),

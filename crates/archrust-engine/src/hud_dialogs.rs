@@ -32,7 +32,7 @@ fn fixed(c: &UiControl) -> Option<&str> {
 pub fn ui_message(hud: &mut HudState, assets: &Assets, key: &str) -> String {
     let map = hud.ui_messages.get_or_insert_with(|| {
         let mut map = HashMap::new();
-        for dir in ["ini", "ini_fr"] {
+        for dir in crate::assets::text_dirs().into_iter().rev() {
             let Ok(raw) = assets.read_file(&format!("{dir}/uimessage.txt")) else { continue };
             let cp = CodePage::for_dir(dir);
             let plain = raw.iter().take(256).filter(|&&b| b < 0x20 && b != b'\r' && b != b'\n' && b != b'\t').count() * 20 < raw.len().min(256);

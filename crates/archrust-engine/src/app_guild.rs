@@ -463,6 +463,12 @@ impl App {
         }
         let notice = self.guild.state.apply(&ev, &me, my_cid);
         match notice.clone() {
+            // Invitations de guilde bloquées (onglet Fonction des options) : déclinée sans boîte.
+            Some(GuildNotice::Invited(i)) if self.options.refuse.guild => {
+                log::info!("[guilde] invitation de « {} » déclinée (invitations de guilde bloquées)", i.guild);
+                self.guild.state.invitation = None;
+                send(self.net.as_ref(), GuildCommand::Reject { guild: i.guild });
+            }
             Some(GuildNotice::Invited(i)) => {
                 let d = self.guild.data.as_ref().expect("données lues");
                 let text = fill_braces(d.events.get("Guild_Invite_ConfirmUI_Open").map_or("", String::as_str), &i.guild);

@@ -199,7 +199,7 @@ impl App {
             AddonManager::new(&config.saved_dir).map_err(|e| anyhow::anyhow!("AddOns : {e}"))?;
         m.set_host(|h| {
             h.realm = "ArchCore".into();
-            h.locale = "frFR".into();
+            h.locale = crate::assets::wow_locale().into();
         });
         for (name, default, _) in CVARS {
             m.register_cvar(name, default);
@@ -547,11 +547,12 @@ impl App {
         }
     }
 
-    /// Distance de tracé des objets (CVar `objectDrawDistance`).
+    /// Distance de tracé des objets : CVar `objectDrawDistance`, sinon la distance de la carte des options
+    /// (`MapView`, onglet GFX).
     pub(super) fn object_draw_distance(&self) -> f32 {
         self.addons
             .cvar_f32("objectDrawDistance")
-            .unwrap_or(Self::OBJECT_DRAW_DISTANCE)
+            .unwrap_or_else(|| self.options.video.object_distance())
             .clamp(1_000.0, 500_000.0)
     }
 

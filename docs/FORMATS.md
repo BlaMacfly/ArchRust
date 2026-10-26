@@ -416,14 +416,104 @@ client. Les fenêtres egui suivantes sont remplacées par leurs équivalents d'`
     `ambience_on` d'`options.toml`.
   - **Avancé** : sa liste générique porte la langue des textes du serveur et l'activation des
     packs de ressources.
-  - **Autres onglets** : leurs contrôles sont dessinés inactifs, ArchRust n'ayant pas ces
-    réglages.
+  - **GFX**, **Affichage**, **Fonction** : réglages réels pour ce qu'ArchRust sait honorer,
+    les autres contrôles restent inactifs (texture « d ») ; détail plus bas (« Options GFX,
+    Affichage et Fonction »).
 
 Les libellés viennent d'`ini_fr/UI_1024X768.ini`, et les phrases d'`uimessage.txt` (`ini_fr`
 d'abord). Restent en egui :
 - la console Lua et le tableau de bord de développement, visibles seulement avec la console
   (touche `) ;
 - les fenêtres de secours, quand les données d'interface manquent.
+
+### Prise automatique des potions
+
+Deux curseurs `PointScrollBar.png` (15 × 15) sont posés sur les jauges de PV et de PM de `UI_CharInfo` :
+`CONTROL_9745` (« Use Life Potion Automatically ») et `CONTROL_24256` (« Use Mana Potion
+Automatically »), 370 × 15, `Scroll=0:0:350`. Le rappel `ChangeHPPointScrollBarValue` d'Archonia
+(`FUN_14060c520`) garde position × 100 comme seuil en pourcentage. ArchRust boit la potion de la case 1
+(vie) ou 2 (mana) de la barre quand la jauge passe sous le seuil, une fois par seconde au plus ; seuils et
+potions sont envoyés au serveur (AgpmUIStatus op 1) qui les renvoie à l'entrée en jeu (op 0). Commande
+d'essai : `/potionauto vie|mana 0-100`.
+
+### Langue et AddOns
+
+La langue choisie dans l'onglet Avancé des options vaut pour les textes du serveur (extension ArchCore) et
+pour ceux du client : le dossier `ini_*` lu au démarrage suit la langue comme dans Archonia (`ini` pour
+l'anglais, `ini_fr`, `ini_de`, `ini_es`, `ini_ko`, `ini_ja` en Shift-JIS, `ini_zh` en GBK), ainsi
+que `GetLocale()` des AddOns. Le même onglet active ou désactive chaque AddOn
+(`saved-variables/AddOns.txt`, une ligne « Nom: disabled » ; `EnableAddOn` et `DisableAddOn` font de
+même), appliqué aussitôt en jeu par un rechargement de l'interface.
+
+### Options GFX, Affichage et Fonction
+
+Établi sur Archonia.exe (rappels enregistrés par `FUN_1407099d0`, module AgcmUIOption). Archonia garde
+tout dans `Ini\COption.ini` (écrit par `FUN_14070dc20`, lu par `FUN_140708400`), sauf le casque et les
+refus, qu'il envoie au serveur. ArchRust relie un contrôle par son rappel `Action=3:OP_…` (des noms de
+contrôle se répètent dans `Option_Option`) et garde les réglages dans `saved-variables/options.toml`,
+sections `[display]`, `[refuse]` et `[video]` ; ce fichier fait foi comme `COption.ini`.
+
+Réglages honorés :
+
+| Onglet | Rappel (clé de `COption.ini`) | Effet dans Archonia | Dans ArchRust (`options.toml`) |
+|---|---|---|---|
+| GFX | `OP_CharView` (`CharView`) | facteur de distance des personnages (AgcmTuner) : 0,25 / 0,45 / 0,875 / 999 (`FUN_14070f7f0`) | `video.char_view` : personnages (et leurs noms) tracés jusqu'à 31 250 × facteur, sans limite pour « Global » |
+| GFX | `OP_MapView` (`MapView`) | facteur de la carte 0,5 / 0,8 / 1,3 / 1,8 ; sol grossier sur 4 / 6 / 7 / 9 secteurs, détaillé sur 1 / 1 / 2 / 3 (`FUN_140711050`, `FUN_140537f60`) | `video.map_view` : objets tracés jusqu'à 31 250 × facteur (25 000 pour « Moyen », la valeur d'avant), sol et objets chargés sur 2 à 5 secteurs (un seul niveau de détail) ; la CVar `objectDrawDistance` garde la main |
+| Affichage | `OP_ViewNameMine` (`VN_MINE`) | nom du joueur (`board+0x100` = 1) | `display.name_self` |
+| Affichage | `OP_ViewNameMonster` (`VN_MONSTER`) | noms des monstres (sorte 2) | `display.name_monster` |
+| Affichage | `OP_ViewNameOthers` (`VN_OTHERS`) | noms des autres joueurs (sorte 8) | `display.name_others` |
+| Affichage | `OP_ViewNameGuild` (`VN_GUILD`) | ligne de guilde (`board+0x46c`) | `display.name_guild` |
+| Affichage | `OP_ViewNameParty` (`VN_PARTY`) | nom d'un membre du groupe sur un cadre `0xBF8B3F3F` (`board+0x464`, `FUN_140825a20`) | `display.name_party` |
+| Affichage | `OP_VisibleViewHelmet` (`VS_HELMET`) | AgpmUIStatus op 3 (`FUN_140267160`) | `display.helmet` : même paquet, casque (`Part` 3) retiré du modèle du joueur |
+| Fonction | `OP_RefuseTrade` (`REF_TRADE`) | drapeau 1 (serveur) | `refuse.trade` : drapeau envoyé (pas d'échange entre joueurs dans ArchRust) |
+| Fonction | `OP_RefusePartyIn` (`REF_PIN`) | drapeau 2 (serveur) | `refuse.party` : drapeau envoyé, invitation reçue déclinée aussitôt (op de refus) |
+| Fonction | `OP_RefuseGuildIn` (`REF_GIN`) | drapeau 0x10 (serveur) | `refuse.guild` : drapeau envoyé, invitation reçue déclinée sans boîte |
+
+Les noms masqués reviennent pour la cible (Archonia les rallume au survol, `FUN_14082b250`) ; ceux des PNJ
+(sorte 4) ne dépendent d'aucune option. Les listes de distances se règlent d'un clic (choix suivant, comme
+les listes du groupe) ; libellés `Option_Msg_NEAR`, `_NORMAL`, `_FAR`, `_ALL` d'`uimessage.txt`. La base
+de 31 250 unités est un choix d'ArchRust : la distance à laquelle Archonia applique ces facteurs (modèles
+LOD) n'est pas relevée.
+
+**Refus envoyés au serveur** (à reprendre par ArchCore, qui ignore aujourd'hui l'op 0x11) :
+- paquet **AgpmCharacter (0x02) op 0x11**, client → serveur : champ 1 = CID, champ 22 = drapeaux (`INT32`) ;
+  Archonia l'envoie à l'entrée en jeu (`FUN_140706ef0`, tous les drapeaux de `COption.ini`) puis à chaque
+  case (`FUN_14070ea70` → `FUN_1404b7f80` → `FUN_14017ae50`) ; ArchRust fait de même ;
+- bits : 1 échange (`REF_TRADE`), 2 invitation de groupe (`REF_PIN`), 4 combat de guilde (`REF_GBAT`),
+  8 combat (`REF_BAT`, sans case), 0x10 invitation de guilde (`REF_GIN`), 0x40 alliance/hostilité de
+  guilde (`REF_GR`), 0x80 ami (`REF_BUDDY`) ; bits 9-10 : une préférence de discussion (`CHATSAFETY_PREF`,
+  `FUN_140704950`), non envoyée par ArchRust ;
+- attendu du serveur : garder la valeur (ArchCore la renvoie déjà au champ 22 du paquet du personnage,
+  colonne `option_flag`), la recopier au champ 22 d'un op 0x11 vers le client (rappel 0x2d, `FUN_1404ac840`,
+  qui la range en `character+0xbf8`), et refuser à la source : invitation de groupe, de guilde, demande
+  d'échange visant un joueur qui a le bit. L'inviteur reçoit alors les phrases `Option_Party_Off_User`,
+  `Option_Trade_Off_User`, `Option_Guild_Off_User` (`%s` = nom) d'`uimessage.txt` ; le paquet qui les porte
+  n'a pas été relevé. Archonia ne vérifie lui-même que 0x80 (`FUN_140733660`) et 0x40 (`FUN_1408cbb00`).
+
+Réglages restés inactifs (ArchRust ne sait pas les honorer) :
+- GFX : `OP_SpeedTuning` (réglage automatique de la qualité par AgcmTuner, sans équivalent),
+  `OP_TurnOffAllEffects` et `OP_Effect` avec sa fenêtre « Avancé » (ArchRust ne dessine pas d'effets),
+  `OP_Nature` et « Avancé » (herbe AgcmGrass `FUN_140597390`, objets naturels, halo, brouillard : non
+  dessinés), `OP_Shadow` et « Avancé » (pas d'ombres), `OP_Water` (AgcmWater, eau non dessinée),
+  `OP_AntiAliasing` (rendu sans multiéchantillonnage), `OP_HighOptimization` (libellé « V-Sync » ; liste non
+  relevée, présentation fixée à `AutoVsync`), `OP_WideView` (`FUN_1407080f0` non relevé), `OP_BrightVal`
+  (gamma), `OP_AutoExposure`, `OP_MatEffect`, `OP_Impact`, `OP_Bloom`, `OP_BloomVal` (post-traitements
+  AgcmPostFX absents) ;
+- Affichage : `OP_ViewHelpBaloonTip`, `OP_ViewHelpBaloonChat`, `OP_ViewHelpUclie` (pas de bulles d'aide ni
+  de discussion), `OP_ViewSelfBars` (barres PV/PM sous le nom, `FUN_1408291b0`, non dessinées),
+  `OP_VisiblePartyBuffIcon` (pas d'icônes d'améliorations dans la fenêtre du groupe) ; `OP_VisibleViewItem`,
+  `OP_UseNewSlot`, `OP_SlotIndicators`, `OP_AshtalScionIndicators`, `OP_PartyTargetMarks`,
+  `OP_VisibleMurderer`, `OP_VisibleWanted`, `OP_VisibleCriminal` sont déjà en texture « d » dans le
+  fichier d'interface (radar, indicateurs, noms du butin absents d'ArchRust) ;
+- Fonction : `OP_RefuseGuildBattle`, `OP_RefuseGuildRelation`, `OP_RefuseBuddy` (ni combats de guilde, ni
+  alliances, ni amis dans ArchRust et ArchCore ; les drapeaux 4, 0x40 et 0x80 restent réglables à la main
+  dans `[refuse]`), `OP_PreventDelete` (pas de suppression par glisser), `OP_CastingToggleStop`,
+  `OP_CastingMode`, `OP_ClickStopMacro` (pas de suites d'incantations ni de macros), `OP_NoAutoAttack`,
+  `OP_SwitchItem`.
+
+Données d'origine : dans `ini_fr`, les deux contrôles nommés `CONTROL_5393` d'`Option_Option` portent le
+même libellé « Desactiver la suppression par glisser » ; celui de gauche est la case du refus d'échange
+(« Block Trades » en anglais). ArchRust l'affiche tel quel.
 
 ## Panneaux au-dessus des personnages
 
@@ -539,7 +629,8 @@ n'est **jamais dessiné** : le passage de niveau n'a pas de mention.
   relations (guerre de races, champs de bataille, combats de guildes), guildes alliées,
   titres, marques `TAG_*`, emblèmes, charisme, monture ;
 - options d'affichage des noms d'Archonia (`+0x1e1c` soi, `+0x1e20` monstres, `+0x1e24`
-  guildes, `+0x1e30` autres) non relevées : tout est affiché ;
+  guildes, `+0x1e28` groupe, `+0x1e30` autres) : suivies (voir « Options GFX, Affichage et
+  Fonction ») ;
 - Archonia ne dessine un nom que pour un personnage rendu à l'image ; ArchRust dessine tout
   personnage dont l'ancre est devant la caméra ;
 - les chiffres et mentions prennent l'ancre `HEIGHT` ; Archonia prend un nœud du squelette

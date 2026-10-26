@@ -89,6 +89,10 @@ pub mod packet_type {
     pub const EVENT_TELEPORT: u8 = 0x31;
     pub const EVENT_NPC_TRADE: u8 = 0x32;
     pub const EVENT_BANK: u8 = 0x36;
+    pub const ITEM_CONVERT: u8 = 0x16;
+    pub const EVENT_ITEM_CONVERT: u8 = 0x38;
+    pub const REFINERY: u8 = 0x4b;
+    pub const EVENT_REFINERY: u8 = 0x3f;
     pub const EVENT_GUILD: u8 = 0x39;
     pub const EVENT_NPC_DIALOG: u8 = 0x37;
     pub const EVENT_SKILL_MASTER: u8 = 0x3b;
@@ -309,6 +313,21 @@ pub mod main {
 
     // AgpmEventGuild (0x39) — drapeaux 1 : op (0 demande, 1 accord), événement (EVENT_BASE), CID du joueur.
     schema!(pub EVENT_GUILD = "AGPMEVENTGUILD", T::EVENT_GUILD, 1, [f!(Int8), f!(Packet), f!(Int32)]);
+    // AgpmUIStatus (0x14) — drapeaux 2 : barre de raccourcis, potions et seuils de leur prise automatique.
+    schema!(pub UI_STATUS = "AGPMUISTATUS", T::UI_STATUS, 2, [
+        f!(Int8),        // 0 opération (0 envoi complet, 1 changement, 2 barre encodée, 3 casque)
+        f!(Int32),       // 1 CID
+        f!(Packet, 50),  // 2 barre de raccourcis
+        f!(Int8),        // 3 case changée
+        f!(Packet),      // 4 contenu de la case
+        f!(MemoryBlock), // 5 barre encodée (texte)
+        f!(Int32),       // 6 TID de la potion de vie
+        f!(Int32),       // 7 TID de la potion de mana
+        f!(Int8),        // 8 affichage du casque
+        f!(Int8),        // 9 seuil de prise automatique des PV (%)
+        f!(Int8),        // 10 seuil de prise automatique des PM (%)
+        f!(MemoryBlock), // 11 temps de recharge encodés (texte)
+    ]);
 
     // ApmEventManager (0x3C) — drapeaux 1 : désignation (mini EVENT_BASE), données de la fonction.
     // Les fonctions d'un PNJ arrivent ainsi, paquets complets mis bout à bout, au champ 4 de sa vue.
@@ -343,6 +362,37 @@ pub mod main {
 
     // AgpmEventBank (0x36) — drapeaux 1 : op (0 demande, 1 accord), événement, CID du joueur.
     schema!(pub EVENT_BANK = "AGPMEVENTBANK", T::EVENT_BANK, 1, [f!(Int8), f!(Packet), f!(Int32)]);
+
+    // AgpmItemConvert (0x16) — drapeaux 2 : conversion d'un objet (renforcement, sockets, pierres).
+    schema!(pub ITEM_CONVERT = "AGPMITEMCONVERT", T::ITEM_CONVERT, 2, [
+        f!(Int8),           // 0 opération (0 état ; 1, 2, 4 demandes → 5, 6, 7)
+        f!(Int32),          // 1 CID du joueur
+        f!(Int32),          // 2 IID de l'objet
+        f!(Int32),          // 3 IID de ce qui le convertit (potion, pierre)
+        f!(Int8),           // 4 résultat
+        f!(Int8),           // 5 niveau de renforcement
+        f!(Int8),           // 6 sockets
+        f!(Int8),           // 7 sockets remplis
+        f!(Int32),          // 8 TID ajouté
+        f!(Packet),         // 9 TID sertis (mini ITEM_CONVERT_TIDS)
+    ]);
+
+    // AgpmEventItemConvert (0x38) — drapeaux 1 : op (0 demande, 1 accord), événement, CID du joueur.
+    schema!(pub EVENT_ITEM_CONVERT = "AGPMEVENTITEMCONVERT", T::EVENT_ITEM_CONVERT, 1, [f!(Int8), f!(Packet), f!(Int32)]);
+
+    // AgpmRefinery (0x4B) — drapeaux 2 : raffinage à la sphère d'alchimie.
+    schema!(pub REFINERY = "AGPMREFINERY", T::REFINERY, 2, [
+        f!(Int8),           // 0 opération (5 devis, 2 grille, 6 recette → 1 résultat)
+        f!(Int32),          // 1 CID du joueur
+        f!(Int32),          // 2 identifiant de recette
+        f!(Int32, 20),      // 3 IID des 20 cases de la grille (0 : vide)
+        f!(Int32),          // 4 résultat
+        f!(Int32),          // 5 TID produit
+        f!(Int64),          // 6 prix
+    ]);
+
+    // AgpmEventRefinery (0x3F) — drapeaux 1 : op (0 demande, 1 accord), événement, CID du joueur.
+    schema!(pub EVENT_REFINERY = "AGPMEVENTREFINERY", T::EVENT_REFINERY, 1, [f!(Int8), f!(Packet), f!(Int32)]);
 
     // AgpmEventQuest (0x3E) — drapeaux 1 : op, événement, CID, entier.
     schema!(pub EVENT_QUEST = "AGPMEVENTQUEST", T::EVENT_QUEST, 1, [f!(Int8), f!(Packet), f!(Int32), f!(Int32)]);
@@ -383,8 +433,13 @@ pub mod main {
             T::EVENT_NPC_DIALOG => EVENT_NPC_DIALOG,
             T::EVENT_NPC_TRADE => EVENT_NPC_TRADE,
             T::EVENT_BANK => EVENT_BANK,
+            T::ITEM_CONVERT => ITEM_CONVERT,
+            T::EVENT_ITEM_CONVERT => EVENT_ITEM_CONVERT,
+            T::REFINERY => REFINERY,
+            T::EVENT_REFINERY => EVENT_REFINERY,
             T::GUILD => GUILD,
             T::EVENT_GUILD => EVENT_GUILD,
+            T::UI_STATUS => UI_STATUS,
             T::EVENT_QUEST => EVENT_QUEST,
             T::QUEST => QUEST,
             T::PARTY => PARTY,
@@ -516,6 +571,14 @@ pub mod mini {
     // Objet au sol (statut 1) : position, un seul VEC3F (champ 6 d'AGPMITEM).
     schema!(pub ITEM_FIELD = "AGPMITEM_FIELD", 124, 1, [f!(Vec3F)]);
 
+    // TID de ce qui remplit les sockets d'un objet (AGPMITEMCONVERT champ 9), dans l'ordre — drapeaux 1.
+    schema!(pub ITEM_CONVERT_TIDS = "AGPMITEMCONVERT_TID", 141, 1, [
+        f!(Int32), f!(Int32), f!(Int32), f!(Int32), f!(Int32), f!(Int32), f!(Int32), f!(Int32),
+    ]);
+
+    // Options d'un objet (AGPMITEM champ 20) : TID de 5 options d'itemoptiontable.txt au plus — drapeaux 1.
+    schema!(pub ITEM_OPTION = "AGPMITEM_OPTION", 142, 1, [f!(UInt16), f!(UInt16), f!(UInt16), f!(UInt16), f!(UInt16)]);
+
     // Désignation d'un événement : type de la source (1 objet du décor, 3 personnage), identifiant (section
     // de l'objet, CID du PNJ), identifiant d'événement, fonction (8 portail, 21 dialogue, 9 boutique, 20 banque,
     // 25 compétences, 27 quêtes).
@@ -610,6 +673,9 @@ pub mod character_op {
     pub const LEVEL_UP: i8 = 5;
     /// Demande de résurrection au village (client → serveur).
     pub const RESURRECT_TOWN: i8 = 9;
+    /// Drapeaux d'options (refus d'échange, de groupe…) au champ 22 (client → serveur,
+    /// `FUN_14017ae50` d'Archonia).
+    pub const UPDATE_OPTION_FLAG: i8 = 0x11;
 }
 
 /// Opérations d'AgpmItem utiles au butin.

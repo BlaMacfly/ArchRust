@@ -40,6 +40,8 @@ const TYPE_EQUIP: i32 = 0;
 const TYPE_USABLE: i32 = 1;
 /// Parties du corps des mains (`Part` 9 gauche, 10 droite) : armes et boucliers.
 const HAND_PARTS: [i32; 2] = [9, 10];
+/// Partie du corps du casque (`Part` 3, colonne « Head » des options d'objets).
+const PART_HEAD: i32 = 3;
 
 /// Colonnes utiles d'un modèle d'objet.
 #[derive(Debug, Clone, Copy, Default)]
@@ -253,14 +255,16 @@ impl App {
     }
 
     /// L'équipement porté s'affiche sur le modèle du joueur : modèle rechargé quand il change. Les
-    /// armes et boucliers sont laissés de côté tant qu'ils ne suivent pas les os de la main.
+    /// armes et boucliers sont laissés de côté tant qu'ils ne suivent pas les os de la main ; le casque
+    /// aussi quand la case « Afficher le casque » des options est décochée.
     pub(super) fn items_frame(&mut self) {
         let (glue, assets) = (&mut self.item_ui, &self.assets);
+        let helmet = self.options.display.helmet;
         let mut worn: Vec<EquipmentView> = self
             .items
             .values()
             .filter(|i| i.status == Some(status::EQUIP))
-            .filter(|i| glue.template(assets, i.template_id).part.is_none_or(|p| !HAND_PARTS.contains(&p)))
+            .filter(|i| glue.template(assets, i.template_id).part.is_none_or(|p| !HAND_PARTS.contains(&p) && (helmet || p != PART_HEAD)))
             .filter_map(|i| Some(EquipmentView { item_id: i.id, template_id: i.template_id?, count: i.count.unwrap_or(1) as i16 }))
             .collect();
         worn.sort_by_key(|e| e.item_id);

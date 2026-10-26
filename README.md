@@ -222,7 +222,8 @@ Tous les sons passent par les patchs : un `[[files]]` sur `sound/bgm/htt_001.mp3
 sons fournis par les patchs sont joués, en silence sinon.
 
 Volumes (musique, ambiance, effets, coupure) : fenêtre **Options** (bouton ou touche Échap),
-enregistrés dans `saved-variables/options.toml`. Commandes : `/music <chemin>|off|auto`,
+enregistrés dans `saved-variables/options.toml`, avec les réglages des onglets GFX (distances),
+Affichage (noms, casque) et Fonction (refus ; voir `docs/FORMATS.md`). Commandes : `/music <chemin>|off|auto`,
 `/sound <chemin>` ; AddOns : `PlaySound`/`PlaySoundFile(chemin)`, `PlayMusic(chemin)`, `StopMusic()`.
 
 ## Données du client et ressources libres

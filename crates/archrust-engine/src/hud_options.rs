@@ -7,10 +7,18 @@
 //!   `OP_ESound_Slide` et `EnvSound` (piste `OP_Sound_Volume_a`, remplissage `_b`, curseur
 //!   `OP_Slide_Cursor`).
 //! - **Avancé** : la liste générique `OpAdv_List_Op` (catégories et cases à cocher, lignes de
-//!   20 px) porte ce qu'Archonia n'a pas : langue des textes du serveur (extension ArchCore) et
-//!   packs de ressources (activation ; l'ordre se règle dans `packs.toml`).
-//! - **Autres onglets** : dessinés d'après le fichier d'interface, avec leurs contrôles inactifs
-//!   (texture « d »), ArchRust n'ayant pas ces réglages.
+//!   20 px) porte ce qu'Archonia n'a pas : langue du jeu (textes du serveur, extension ArchCore, et du
+//!   client, dossier `ini_*` lu au démarrage) et
+//!   packs de ressources (activation ; l'ordre se règle dans `packs.toml`), AddOns (activation,
+//!   `AddOns.txt`, appliquée aussitôt en jeu par un rechargement de l'interface).
+//! - **GFX** : listes `OP_CharView` et `OP_MapView` (distances des personnages et de la carte,
+//!   « Proche » à « Global », un clic passe au choix suivant).
+//! - **Affichage** : noms au-dessus de soi, des monstres, des autres joueurs, ligne de guilde, cadre
+//!   des membres du groupe, casque (envoyé au serveur).
+//! - **Fonction** : refus d'échange, d'invitation de groupe et de guilde (drapeaux envoyés au
+//!   serveur ; les invitations reçues sont aussi déclinées par le client).
+//! - Les contrôles reliés le sont par leur rappel `Action=3:OP_…`. Les autres sont dessinés inactifs
+//!   (texture « d ») : ArchRust ne sait pas les honorer (liste dans `docs/FORMATS.md`).
 //!
 //! « Réinitialiser les positions de l'interface » remet les fenêtres déplaçables à leur place
 //! d'origine. « Fermer » et la croix ferment.
@@ -18,6 +26,7 @@
 use super::npc_ui::{button, window};
 use super::*;
 use crate::audio::AudioSettings;
+use crate::options::{DisplayOptions, RefuseOptions, VideoOptions};
 use crate::ui::PackAction;
 
 const TABS: [(&str, &str); 5] = [("GFX", "Option_Video"), ("Son", "Option_Sound"), ("Affichage", "Option_System"), ("Fonction", "Option_Option"), ("Avance", "Option_Advanced")];
@@ -33,13 +42,39 @@ pub struct OptionsEdit<'a> {
     pub languages: &'a [(&'static str, &'static str)],
     pub packs: &'a mut archrust_patch::PatchStack,
     pub packs_restart: bool,
+    /// AddOns : (nom, titre, activé).
+    pub addons: &'a [(String, String, bool)],
+    pub display: &'a mut DisplayOptions,
+    pub refuse: &'a mut RefuseOptions,
+    pub video: &'a mut VideoOptions,
 }
+
+/// Case des onglets Affichage et Fonction reliée à un réglage d'ArchRust, d'après son rappel.
+fn option_flag<'b>(action: &str, display: &'b mut DisplayOptions, refuse: &'b mut RefuseOptions) -> Option<&'b mut bool> {
+    Some(match action {
+        "OP_ViewNameMine" => &mut display.name_self,
+        "OP_ViewNameMonster" => &mut display.name_monster,
+        "OP_ViewNameGuild" => &mut display.name_guild,
+        "OP_ViewNameParty" => &mut display.name_party,
+        "OP_ViewNameOthers" => &mut display.name_others,
+        "OP_VisibleViewHelmet" => &mut display.helmet,
+        "OP_RefuseTrade" => &mut refuse.trade,
+        "OP_RefusePartyIn" => &mut refuse.party,
+        "OP_RefuseGuildIn" => &mut refuse.guild,
+        _ => return None,
+    })
+}
+
+/// Libellés des listes `OP_CharView` et `OP_MapView` (`uimessage.txt`).
+const VIEW_LABELS: [&str; 4] = ["Option_Msg_NEAR", "Option_Msg_NORMAL", "Option_Msg_FAR", "Option_Msg_ALL"];
 
 /// Résultat d'une image : réglage audio ou langue changé, action sur les packs, fermeture.
 #[derive(Debug, Default)]
 pub struct OptionsOut {
     pub changed: bool,
     pub pack_action: PackAction,
+    /// AddOn à activer (`true`) ou désactiver.
+    pub addon_toggle: Option<(String, bool)>,
     pub close: bool,
 }
 
@@ -54,6 +89,7 @@ enum AdvAction {
     Language(Option<String>),
     Pack(String, bool),
     PacksReset,
+    Addon(String, bool),
 }
 
 /// Options ; `None` si les fenêtres d'Archonia manquent (le moteur garde alors sa fenêtre egui).
@@ -68,7 +104,10 @@ pub fn draw_options(ctx: &egui::Context, hud: &mut HudState, assets: &Assets, ed
     let mut new_tab = None;
     let rows = if tab == 4 { advanced_rows(&edit) } else { Vec::new() };
     let mut adv_click: Option<AdvAction> = None;
-    let OptionsEdit { audio, language, packs, .. } = edit;
+    let OptionsEdit { audio, language, packs, display, refuse, video, .. } = edit;
+    // Listes déroulantes actives (rectangle, rappel) : leur flèche `Common_Button_PGDN` est un
+    // contrôle enfant sans nom posé dedans.
+    let mut combos: Vec<(Rect, &str)> = Vec::new();
     egui::Area::new(egui::Id::new("archonia-options"))
         .default_pos(layout.window_origin(&w))
         .movable(true)
@@ -135,6 +174,34 @@ pub fn draw_options(ctx: &egui::Context, hud: &mut HudState, assets: &Assets, ed
                             out.changed = true;
                         }
                     }
+                    // Onglets Affichage et Fonction : cases reliées aux réglages d'ArchRust.
+                    (3, _) if (tab == 2 || tab == 3) && c.action.as_deref().is_some_and(|a| option_flag(a, display, refuse).is_some()) => {
+                        if let Some(flag) = c.action.as_deref().and_then(|a| option_flag(a, display, refuse)) {
+                            if checkbox(ctx, ui, hud, assets, &painter, r, c, *flag, true, ("options-check", tab, c.pos[0] as i32, c.pos[1] as i32)).clicked() {
+                                *flag = !*flag;
+                                out.changed = true;
+                            }
+                        }
+                    }
+                    // Onglet GFX : distances des personnages et de la carte, un clic passe au choix suivant.
+                    (5, _) if tab == 0 && matches!(c.action.as_deref(), Some("OP_CharView" | "OP_MapView")) => {
+                        let action = if c.action.as_deref() == Some("OP_CharView") { "OP_CharView" } else { "OP_MapView" };
+                        let value = if action == "OP_CharView" { video.char_view } else { video.map_view };
+                        let text = ui_message(hud, assets, VIEW_LABELS[value.min(3) as usize]);
+                        if button(ctx, ui, hud, assets, &painter, r, c, "", font, true, ("options-combo", action)).clicked() {
+                            cycle_view(video, action);
+                            out.changed = true;
+                        }
+                        shadow_text(&painter, r.left_center() + Vec2::new(4.0 * s, 0.0), Align2::LEFT_CENTER, &text, font, Color32::WHITE);
+                        combos.push((r, action));
+                    }
+                    (3, _) if c.textures.iter().any(|(_, t)| t.starts_with("Common_Button_PGDN")) && combos.iter().any(|(cr, _)| cr.contains(r.center())) => {
+                        let action = combos.iter().find(|(cr, _)| cr.contains(r.center())).map_or("", |(_, a)| *a);
+                        if button(ctx, ui, hud, assets, &painter, r, c, "", font, true, ("options-combo-arrow", action)).clicked() {
+                            cycle_view(video, action);
+                            out.changed = true;
+                        }
+                    }
                     (15, _) => {}
                     // Liste générique de l'onglet Avancé.
                     (10, "OpAdv_List_Op") => {
@@ -181,6 +248,7 @@ pub fn draw_options(ctx: &egui::Context, hud: &mut HudState, assets: &Assets, ed
             out.pack_action = PackAction::Changed;
         }
         Some(AdvAction::PacksReset) => out.pack_action = PackAction::Reset,
+        Some(AdvAction::Addon(name, enabled)) => out.addon_toggle = Some((name, enabled)),
         None => {}
     }
     if let Some(t) = new_tab {
@@ -190,6 +258,12 @@ pub fn draw_options(ctx: &egui::Context, hud: &mut HudState, assets: &Assets, ed
         out.close = true;
     }
     Some(out)
+}
+
+/// Choix suivant d'une liste de distances (proche → moyen → loin → global → proche).
+fn cycle_view(video: &mut VideoOptions, action: &str) {
+    let v = if action == "OP_CharView" { &mut video.char_view } else { &mut video.map_view };
+    *v = (*v + 1) % 4;
 }
 
 /// Case `OP_Check` : « a » vide, « c » cochée, « b » survol, « d » inactive.
@@ -246,7 +320,7 @@ fn slider(ctx: &egui::Context, ui: &mut egui::Ui, hud: &mut HudState, assets: &A
 /// Lignes de l'onglet Avancé : langue, puis packs graphismes et sons.
 fn advanced_rows(edit: &OptionsEdit) -> Vec<AdvRow> {
     use archrust_patch::Category;
-    let mut rows = vec![AdvRow::Category("Langue des textes du serveur".into())];
+    let mut rows = vec![AdvRow::Category("Langue du jeu (textes du client au prochain démarrage)".into())];
     rows.push(AdvRow::Item { label: "Automatique".into(), checked: edit.language.is_none(), action: AdvAction::Language(None) });
     for (code, name) in edit.languages {
         rows.push(AdvRow::Item {
@@ -265,6 +339,11 @@ fn advanced_rows(edit: &OptionsEdit) -> Vec<AdvRow> {
         }
     }
     rows.push(AdvRow::Item { label: "Rétablir la configuration des packs par défaut".into(), checked: false, action: AdvAction::PacksReset });
+    rows.push(AdvRow::Category("AddOns".into()));
+    for (name, title, enabled) in edit.addons {
+        let label = if title.is_empty() || title == name { name.clone() } else { format!("{title} ({name})") };
+        rows.push(AdvRow::Item { label, checked: *enabled, action: AdvAction::Addon(name.clone(), !*enabled) });
+    }
     if edit.packs_restart {
         rows.push(AdvRow::Category("Redémarrez le client pour appliquer les changements.".into()));
     }

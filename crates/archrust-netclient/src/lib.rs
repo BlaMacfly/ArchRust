@@ -10,14 +10,17 @@
 
 pub mod combat;
 pub mod connection;
+pub mod convert;
 pub mod ext;
 pub mod guild;
 pub mod items;
 pub mod login;
 pub mod npc;
 pub mod party;
+pub mod refinery;
 pub mod skills;
 pub mod teleport;
+pub mod ui_status;
 pub mod world;
 
 pub use connection::{Connection, NetError};

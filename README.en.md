@@ -211,7 +211,8 @@ Every sound goes through the patches: a `[[files]]` rule on `sound/bgm/htt_001.m
 sounds provided by patches play; everything else is silent.
 
 Volumes (music, ambience, effects, mute): **Options** window (button or Escape key), saved in
-`saved-variables/options.toml`. Commands: `/music <path>|off|auto`, `/sound <path>`; AddOns:
+`saved-variables/options.toml` along with the GFX (view distances), Display (names, helmet) and
+Function (refusals) tabs; see `docs/FORMATS.md`. Commands: `/music <path>|off|auto`, `/sound <path>`; AddOns:
 `PlaySound`/`PlaySoundFile(path)`, `PlayMusic(path)`, `StopMusic()`.
 
 ## Client data and free assets

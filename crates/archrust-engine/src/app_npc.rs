@@ -110,7 +110,7 @@ pub struct NpcViews {
 
 /// Texte d'un fichier du client, version française d'abord (`ini_fr/`), déchiffré.
 pub(super) fn client_text(assets: &Assets, file: &str) -> String {
-    ["ini_fr", "ini"].iter().map(|d| client_text_in(assets, d, file)).find(|t| !t.is_empty()).unwrap_or_default()
+    crate::assets::text_dirs().iter().map(|d| client_text_in(assets, d, file)).find(|t| !t.is_empty()).unwrap_or_default()
 }
 
 /// Texte d'un fichier d'un dossier de tables (`ini`, `ini_fr`…), déchiffré s'il le faut.
@@ -379,6 +379,13 @@ fn start_function(glue: &mut NpcGlue, npc: i32, f: i32, net: Option<&NetLink>, u
             glue.dialog = None;
             if let Some(net) = net {
                 net.send(Command::Guild(archrust_netclient::guild::GuildCommand::TalkToManager(npc)));
+            }
+        }
+        // Forgeron : AGPMEVENTITEMCONVERT op 0, l'accord ouvre `UI_ConvertPhysics` (voir `app_convert.rs`).
+        archrust_netclient::convert::FUNCTION_ITEM_CONVERT => {
+            glue.dialog = None;
+            if let Some(net) = net {
+                net.send(Command::Convert(archrust_netclient::convert::ConvertCommand::Open(npc)));
             }
         }
         _ => {}
@@ -782,6 +789,7 @@ impl App {
                     function::QUEST => 331,
                     function::SKILL_MASTER => 14,
                     archrust_netclient::guild::FUNCTION_GUILD => 328,
+                    archrust_netclient::convert::FUNCTION_ITEM_CONVERT => 327,
                     _ => continue,
                 };
                 buttons.push((f.function, sysstr(&assets, id).unwrap_or_default()));
@@ -848,9 +856,10 @@ impl App {
                 }
             }
             // Fonction du PNJ le plus proche qui la propose, s'il est à portée.
-            "/boutique" | "/shop" | "/banque" | "/bank" | "/quetespnj" | "/npcquests" | "/instructeur" | "/trainer" | "/registraire" | "/registrar" => {
+            "/boutique" | "/shop" | "/banque" | "/bank" | "/quetespnj" | "/npcquests" | "/instructeur" | "/trainer" | "/registraire" | "/registrar" | "/forgeron" | "/smith" => {
                 let f = match cmd {
                     "/boutique" | "/shop" => function::TRADE,
+                    "/forgeron" | "/smith" => archrust_netclient::convert::FUNCTION_ITEM_CONVERT,
                     "/registraire" | "/registrar" => archrust_netclient::guild::FUNCTION_GUILD,
                     "/banque" | "/bank" => function::BANK,
                     "/instructeur" | "/trainer" => function::SKILL_MASTER,

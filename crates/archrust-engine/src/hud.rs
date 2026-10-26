@@ -60,6 +60,14 @@ mod login_ui;
 
 #[path = "hud_options.rs"]
 mod options_ui;
+
+#[path = "hud_convert.rs"]
+mod convert_ui;
+pub use convert_ui::{colored_text, draw_convert, draw_convert_confirm, item_tooltip, item_tooltip_at, ConvertTab, ConvertUi, ConvertView};
+
+#[path = "hud_refinery.rs"]
+mod refinery_ui;
+pub use refinery_ui::{draw_cooldown, draw_recipes, draw_refinery, RecipeUi, RecipeView, RefineryUi, RefineryView};
 pub use options_ui::{draw_options, OptionsEdit, OptionsOut};
 pub use login_ui::{draw_char_create, draw_char_select, CharSlotView, CreateUi, SelectUi};
 pub use menu_ui::{draw_main_menu, MenuUi};
@@ -103,6 +111,9 @@ pub struct UiControl {
     pub status_colors: Vec<u32>,
     /// `Button=repos:survol:appui:inactif:…` : indice de `Texture=` de chaque état (0 : aucune).
     pub button_states: Option<[u32; 4]>,
+    /// Premier rappel `Action=3:Nom` (ex. `OP_ViewNameMonster`) : certains noms de contrôle se
+    /// répètent dans une fenêtre, pas leurs rappels.
+    pub action: Option<String>,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -161,6 +172,7 @@ impl UiWindow {
                         ("Texture", Some(c)) => c.textures.extend(texture_entry(v)),
                         ("CtrlDisplay", Some(c)) => c.display = Some(v.trim().to_string()),
                         ("Bar", Some(c)) => c.bar = Some(v.trim().to_string()),
+                        ("Action", Some(c)) if c.action.is_none() => c.action = v.trim().strip_prefix("3:").map(|a| a.trim().to_string()),
                         ("CtrlFont", Some(c)) => {
                             let p: Vec<&str> = v.split(':').collect();
                             if let (Some(color), Some(align)) = (p.get(1).and_then(|x| x.trim().parse::<i64>().ok()), p.get(4).and_then(|x| x.trim().parse().ok())) {
@@ -264,6 +276,9 @@ pub struct HudState {
     /// liste « Avancé » (voir `hud_options.rs`).
     pub options_tab: u8,
     options_scroll: u16,
+    /// Infobulle de chaque objet du joueur (IID → lignes colorées), préparée par le moteur avant la
+    /// passe egui (voir `app_convert.rs`) ; sans entrée, le nom seul.
+    pub item_tips: HashMap<i32, Vec<(String, Color32)>>,
 }
 
 /// Cible du joueur affichée dans `UI_TargetInfo`.
@@ -368,12 +383,15 @@ impl HudState {
                 .chain(GUILD_WINDOWS.iter())
                 .chain(menu_ui::MENU_WINDOWS.iter())
                 .chain(options_ui::OPTION_WINDOWS.iter())
+                .chain(convert_ui::CONVERT_WINDOWS.iter())
+                .chain(refinery_ui::REFINERY_WINDOWS.iter())
                 .filter_map(|n| UiWindow::parse(&ui, pos.as_deref(), n))
                 .collect();
-            // Textes fixes du client français (`ini_fr/UI_1024X768.ini`, mêmes contrôles) pour les
-            // fenêtres qui les affichent tels quels.
-            if let Ok(fr) = assets.table("ini_fr", "UI_1024X768.ini") {
-                for w in list.iter_mut().filter(|w| ["UI_Teleport", "UI_BuyBank", "UI_Bank", "UI_SplitItem", "UI_NPCTrade_BuyStackCount", "UI_BankConfirm", "UI_Party", "UI_SelfCharacterMenu", "UI_TargetCharacterMenu", "UI_PartyOption", "UI_LG_CHARSELECT", "UI_ConfirmDeleteChar", "UI_LG_CHARCREATE"].contains(&w.name.as_str()) || GUILD_WINDOWS.contains(&w.name.as_str()) || menu_ui::MENU_WINDOWS.contains(&w.name.as_str()) || options_ui::OPTION_WINDOWS.contains(&w.name.as_str())) {
+            // Textes fixes du dossier de langue (`ini_fr/UI_1024X768.ini`…, mêmes contrôles) pour les
+            // fenêtres qui les affichent tels quels ; rien à remplacer en anglais (`ini`).
+            let lang = crate::assets::text_dir();
+            if let Some(fr) = (lang != "ini").then(|| assets.table(lang, "UI_1024X768.ini").ok()).flatten() {
+                for w in list.iter_mut().filter(|w| ["UI_Teleport", "UI_BuyBank", "UI_Bank", "UI_SplitItem", "UI_NPCTrade_BuyStackCount", "UI_BankConfirm", "UI_Party", "UI_SelfCharacterMenu", "UI_TargetCharacterMenu", "UI_PartyOption", "UI_LG_CHARSELECT", "UI_ConfirmDeleteChar", "UI_LG_CHARCREATE"].contains(&w.name.as_str()) || GUILD_WINDOWS.contains(&w.name.as_str()) || menu_ui::MENU_WINDOWS.contains(&w.name.as_str()) || options_ui::OPTION_WINDOWS.contains(&w.name.as_str()) || convert_ui::CONVERT_WINDOWS.contains(&w.name.as_str()) || refinery_ui::REFINERY_WINDOWS.contains(&w.name.as_str())) {
                     let Some(fw) = UiWindow::parse(&fr, None, &w.name) else { continue };
                     for c in &mut w.controls {
                         if let Some(d) = fw.control(&c.name).and_then(|x| x.display.clone()) {

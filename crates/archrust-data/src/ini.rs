@@ -11,12 +11,15 @@ use archrust_crypto::{capi_crypt, KEY_INI};
 use std::collections::HashMap;
 
 /// Page de code du texte des tables. Les tables d'origine (`ini/`) sont en CP949 ; les dossiers de
-/// langue occidentaux (`ini_fr`, `ini_de`, `ini_es`) sont en Windows-1252 (accents vérifiés en jeu).
+/// langue occidentaux (`ini_fr`, `ini_de`, `ini_es`) sont en Windows-1252 (accents vérifiés en jeu),
+/// `ini_ja` en Shift-JIS et `ini_zh` en GBK.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum CodePage {
     #[default]
     Cp949,
     Windows1252,
+    ShiftJis,
+    Gbk,
 }
 
 impl CodePage {
@@ -24,6 +27,8 @@ impl CodePage {
         match self {
             CodePage::Cp949 => encoding_rs::EUC_KR,
             CodePage::Windows1252 => encoding_rs::WINDOWS_1252,
+            CodePage::ShiftJis => encoding_rs::SHIFT_JIS,
+            CodePage::Gbk => encoding_rs::GBK,
         }
     }
     /// Page de code d'un dossier de tables d'après son nom (`ini`, `ini_fr`, `ini_ko`…).
@@ -32,6 +37,8 @@ impl CodePage {
             "ini_fr" | "ini_de" | "ini_es" | "ini_en" | "ini_it" | "ini_pt" => {
                 CodePage::Windows1252
             }
+            "ini_ja" => CodePage::ShiftJis,
+            "ini_zh" => CodePage::Gbk,
             _ => CodePage::Cp949,
         }
     }

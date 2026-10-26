@@ -130,6 +130,17 @@ impl App {
             _ => None,
         };
         let Some(notice) = notice else { return };
+        // Invitations de groupe bloquées (onglet Fonction des options) : déclinée aussitôt, sans
+        // fenêtre, en attendant que le serveur applique lui-même le drapeau 2 (comme pour Archonia).
+        if let PartyNotice::Invited(i) = &notice {
+            if self.options.refuse.party {
+                log::info!("[groupe] invitation de {} déclinée (invitations de groupe bloquées)", i.name);
+                let cid = i.cid;
+                send(self.net.as_ref(), &mut self.party, &mut self.ui, PartyCommand::Reject(cid));
+                self.party_addons_sync();
+                return;
+            }
+        }
         let line = match &notice {
             PartyNotice::LeaderChanged(c) if *c == me => "Vous êtes maintenant le chef du groupe.".to_string(),
             _ => notice.message(&self.party.state),

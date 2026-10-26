@@ -814,13 +814,38 @@ pub fn install(lua: &Lua, shared: Shared) -> mlua::Result<()> {
         };
         Ok(load_by_name(lua, &s, &n))
     });
-    for name in ["EnableAddOn", "DisableAddOn", "EnableAllAddOns", "DisableAllAddOns"] {
-        g.set(name, lua.create_function(|_, _: MultiValue| Ok(()))?)?;
+    // Activation des AddOns, enregistrée dans `AddOns.txt` et appliquée au prochain `/reload`.
+    for (name, enabled) in [("EnableAddOn", true), ("DisableAddOn", false)] {
+        func!(name, s, move |_, a: MultiValue| {
+            let n = a.into_iter().next().map(|v| unit_arg(&v)).unwrap_or_default();
+            if !n.is_empty() {
+                let dir = s.borrow().saved_dir.clone();
+                let _ = crate::manager::set_addon_enabled(&dir, &n, enabled);
+            }
+            Ok(())
+        });
     }
-    g.set(
-        "GetAddOnEnableState",
-        lua.create_function(|_, _: MultiValue| Ok(2))?,
-    )?;
+    for (name, enabled) in [("EnableAllAddOns", true), ("DisableAllAddOns", false)] {
+        func!(name, s, move |_, _: MultiValue| {
+            let (dir, names) = {
+                let st = s.borrow();
+                (st.saved_dir.clone(), st.manifests.iter().map(|m| m.name.clone()).collect::<Vec<_>>())
+            };
+            for n in names {
+                let _ = crate::manager::set_addon_enabled(&dir, &n, enabled);
+            }
+            Ok(())
+        });
+    }
+    // 0 : désactivé, 2 : activé (pour tous les personnages).
+    func!("GetAddOnEnableState", s, move |_, a: MultiValue| {
+        let mut args = a.into_iter();
+        let first = args.next().map(|v| unit_arg(&v)).unwrap_or_default();
+        // GetAddOnEnableState(personnage, nom) ou GetAddOnEnableState(nom)
+        let n = args.next().map(|v| unit_arg(&v)).filter(|x| !x.is_empty()).unwrap_or(first);
+        let off = crate::manager::disabled_addons(&s.borrow().saved_dir);
+        Ok(if off.contains(&n.to_ascii_lowercase()) { 0 } else { 2 })
+    });
     let c_addons = lua.create_table()?;
     for (k, v) in [
         ("GetNumAddOns", "GetNumAddOns"),

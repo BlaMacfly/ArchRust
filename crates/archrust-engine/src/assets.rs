@@ -998,3 +998,69 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 }
+
+/// Dossier des textes du client pour la langue choisie, comme Archonia (`ini` pour l'anglais, sinon
+/// `ini_de`, `ini_fr`, `ini_es`, `ini_zh`, `ini_ko`, `ini_ja`) ; sans choix, le français.
+static TEXT_DIR: std::sync::RwLock<&'static str> = std::sync::RwLock::new("ini_fr");
+
+/// Dossier de textes d'un code de langue (`ui::LANGUAGES`) ; `ini` sans dossier propre (portugais).
+pub fn text_dir_for(code: Option<&str>) -> &'static str {
+    match code.map(|c| c.to_ascii_lowercase()) {
+        None => "ini_fr",
+        Some(c) => match c.split('-').next().unwrap_or("") {
+            "fr" => "ini_fr",
+            "de" => "ini_de",
+            "es" => "ini_es",
+            "ko" => "ini_ko",
+            "ja" => "ini_ja",
+            "zh" => "ini_zh",
+            _ => "ini",
+        },
+    }
+}
+
+/// Fixe la langue des textes du client (au démarrage : les fenêtres et tables lues ensuite la suivent).
+pub fn set_text_language(code: Option<&str>) {
+    if let Ok(mut d) = TEXT_DIR.write() {
+        *d = text_dir_for(code);
+    }
+}
+
+/// Dossier de textes de la langue choisie.
+pub fn text_dir() -> &'static str {
+    TEXT_DIR.read().map(|d| *d).unwrap_or("ini_fr")
+}
+
+/// Langue des textes du client au format de WoW (`GetLocale()` des AddOns).
+pub fn wow_locale() -> &'static str {
+    match text_dir() {
+        "ini" => "enUS",
+        "ini_de" => "deDE",
+        "ini_es" => "esES",
+        "ini_ko" => "koKR",
+        "ini_ja" => "jaJP",
+        "ini_zh" => "zhCN",
+        _ => "frFR",
+    }
+}
+
+/// Dossiers où chercher un texte : celui de la langue, puis `ini` (anglais d'Archonia).
+pub fn text_dirs() -> Vec<&'static str> {
+    let d = text_dir();
+    if d == "ini" { vec!["ini"] } else { vec![d, "ini"] }
+}
+
+#[cfg(test)]
+mod langue_tests {
+    use super::*;
+
+    #[test]
+    fn dossier_de_textes_par_langue() {
+        assert_eq!(text_dir_for(Some("en")), "ini");
+        assert_eq!(text_dir_for(Some("fr")), "ini_fr");
+        assert_eq!(text_dir_for(Some("zh-CN")), "ini_zh");
+        assert_eq!(text_dir_for(Some("pt-BR")), "ini", "pas de dossier portugais");
+        assert_eq!(text_dir_for(None), "ini_fr");
+        assert_eq!(CodePage::for_dir("ini_ja"), CodePage::ShiftJis);
+    }
+}

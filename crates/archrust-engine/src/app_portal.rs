@@ -97,7 +97,7 @@ fn key_values(text: &str) -> HashMap<String, String> {
 
 /// `RegionGlossary.txt` du dossier de langue : clé en CP949, nom traduit dans la page du dossier.
 fn load_glossary(assets: &Assets) -> HashMap<String, String> {
-    for dir in ["ini_fr", "ini"] {
+    for dir in crate::assets::text_dirs() {
         let text = super::npc_glue::client_text_in(assets, dir, "regionglossary.txt");
         if text.is_empty() {
             continue;
@@ -116,7 +116,7 @@ fn load_glossary(assets: &Assets) -> HashMap<String, String> {
 /// (`UI_1024X768.ini` du dossier de langue).
 pub(super) fn ui_events(assets: &Assets) -> HashMap<String, String> {
     let mut events = HashMap::new();
-    for dir in ["ini_fr", "ini"] {
+    for dir in crate::assets::text_dirs() {
         let Ok(t) = assets.table(dir, "UI_1024X768.ini") else { continue };
         for s in &t.sections {
             let mut event: Option<&str> = None;

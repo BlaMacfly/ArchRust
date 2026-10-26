@@ -151,6 +151,12 @@ pub struct SkillsGlue {
     slots_owner: Option<String>,
     /// Demandes des fenêtres, traitées à l'image suivante (la passe egui tient le GPU emprunté).
     pending: Vec<SkillUi>,
+    /// Seuils de prise automatique des potions des cases 1 (vie) et 2 (mana), en % ; 0 : désactivé.
+    pub auto: [u8; 2],
+    /// Dernière prise automatique de chaque potion.
+    auto_at: [Option<Instant>; 2],
+    /// Potions de vie et de mana gardées par le serveur, à poser sur les cases 1 et 2 si elles sont vides.
+    server_potions: Option<(i32, i32)>,
 }
 
 impl SkillsGlue {
@@ -178,6 +184,9 @@ impl SkillsGlue {
         }
     }
 }
+
+/// Intervalle minimal entre deux prises automatiques de la même potion.
+const AUTO_POTION_GAP: Duration = Duration::from_secs(1);
 
 fn slots_path(dir: &Path, name: &str) -> PathBuf {
     let safe: String = name.chars().map(|c| if c.is_alphanumeric() || c == '-' || c == '_' { c } else { '_' }).collect();
@@ -226,12 +235,13 @@ pub struct SkillViews {
     trainer: Option<(String, Vec<TrainerEntry>)>,
     slots: [SlotView; 12],
     points: Option<i32>,
+    auto: [u8; 2],
 }
 
 /// Fenêtres et barre ; les demandes attendent `App::skills_frame`.
 pub fn panel(ctx: &egui::Context, glue: &mut SkillsGlue, views: &SkillViews, hud: &mut HudState, assets: &Assets) {
     let mut out = Vec::new();
-    crate::hud::draw_quickbar(ctx, hud, assets, &views.slots, &mut out);
+    crate::hud::draw_quickbar(ctx, hud, assets, &views.slots, views.auto, &mut out);
     if glue.show_book {
         crate::hud::draw_skill_book(ctx, hud, assets, BookView { entries: &views.book, points: views.points, first: &mut glue.book_first }, &mut out);
     }
@@ -349,6 +359,40 @@ impl App {
         }
     }
 
+    /// Statut d'interface reçu à l'entrée en jeu : seuils de prise automatique et potions de la barre.
+    pub(super) fn on_ui_status(&mut self, st: archrust_netclient::ui_status::UiStatus) {
+        self.skills.auto = [st.auto_hp.clamp(0, 100) as u8, st.auto_mp.clamp(0, 100) as u8];
+        self.skills.server_potions = Some((st.hp_potion_tid, st.mp_potion_tid));
+    }
+
+    /// Prise automatique des potions des cases 1 (vie) et 2 (mana) quand la jauge passe sous son seuil,
+    /// une fois par seconde au plus ; le serveur refuse la potion encore en recharge.
+    fn skills_auto_potions(&mut self) {
+        let st = &self.hud.stats;
+        let gauges = [(st.hp, st.max_hp), (st.mp, st.max_mp)];
+        // Mort : rien.
+        if st.hp.is_some_and(|hp| hp <= 0) {
+            return;
+        }
+        for (k, (cur, max)) in gauges.into_iter().enumerate() {
+            let threshold = self.skills.auto[k] as i64;
+            let (Some(cur), Some(max)) = (cur, max) else { continue };
+            if threshold == 0 || max <= 0 || cur as i64 * 100 >= threshold * max as i64 {
+                continue;
+            }
+            if self.skills.auto_at[k].is_some_and(|t| t.elapsed() < AUTO_POTION_GAP) {
+                continue;
+            }
+            let Some(Shortcut::Item(tid)) = self.skills.slots[k] else { continue };
+            // Sans potion dans le sac : rien (pas de message à chaque image).
+            if !self.items.values().any(|i| i.template_id == Some(tid) && i.status == Some(2)) {
+                continue;
+            }
+            self.skills.auto_at[k] = Some(Instant::now());
+            self.skills_use_slot(k);
+        }
+    }
+
     /// Touches 1 à = : cases de la barre (potions sur 1 et 2).
     pub(super) fn skills_key(&mut self, code: KeyCode) -> bool {
         let slot = match code {
@@ -392,6 +436,16 @@ impl App {
                 SkillUi::SlotSet { slot, shortcut } => {
                     self.skills.slots[slot] = Some(shortcut);
                     changed = true;
+                    // Potions des cases 1 et 2 : gardées aussi par le serveur (statut d'interface).
+                    if let (0 | 1, Shortcut::Item(tid), Some(net)) = (slot, shortcut, &self.net) {
+                        let mut u = archrust_netclient::ui_status::UiStatusUpdate::default();
+                        if slot == 0 {
+                            u.hp_potion_tid = Some(tid);
+                        } else {
+                            u.mp_potion_tid = Some(tid);
+                        }
+                        net.send(Command::UiStatus(u));
+                    }
                 }
                 SkillUi::SlotSwap(a, b) => {
                     self.skills.slots.swap(a, b);
@@ -402,6 +456,18 @@ impl App {
                     changed = true;
                 }
                 SkillUi::SlotUse(slot) => self.skills_use_slot(slot),
+                SkillUi::AutoGauge { hp, value } => {
+                    self.skills.auto[if hp { 0 } else { 1 }] = value.min(100);
+                    let mut u = archrust_netclient::ui_status::UiStatusUpdate::default();
+                    if hp {
+                        u.auto_hp = Some(value.min(100) as i8);
+                    } else {
+                        u.auto_mp = Some(value.min(100) as i8);
+                    }
+                    if let Some(net) = &self.net {
+                        net.send(Command::UiStatus(u));
+                    }
+                }
             }
         }
         if changed {
@@ -423,6 +489,20 @@ impl App {
             self.skills.slots = load_slots(&self.config.saved_dir, &name);
             self.skills.slots_owner = Some(name);
         }
+        // Potions gardées par le serveur : sur les cases 1 et 2 restées vides (autre poste, barre effacée).
+        if let Some((hp, mp)) = self.skills.server_potions.take() {
+            let mut changed = false;
+            for (slot, tid) in [(0, hp), (1, mp)] {
+                if tid > 0 && self.skills.slots[slot].is_none() {
+                    self.skills.slots[slot] = Some(Shortcut::Item(tid));
+                    changed = true;
+                }
+            }
+            if let (true, Some(owner)) = (changed, self.skills.slots_owner.clone()) {
+                save_slots(&self.config.saved_dir, &owner, &self.skills.slots);
+            }
+        }
+        self.skills_auto_potions();
         if let Some((npc, _)) = self.skills.trainer {
             let far = self.entities.iter().find(|e| e.cid == npc).is_none_or(|e| Vec3::new(e.position.x - me.x, 0.0, e.position.z - me.z).length() > CLOSE_RANGE);
             if far {
@@ -434,7 +514,7 @@ impl App {
     /// Données des fenêtres et de la barre.
     pub(super) fn skills_views(&mut self) -> SkillViews {
         let assets = self.assets.clone();
-        let mut v = SkillViews { points: self.hud.stats.skill_points, ..Default::default() };
+        let mut v = SkillViews { points: self.hud.stats.skill_points, auto: self.skills.auto, ..Default::default() };
         let known: Vec<(i32, (i32, i32))> = self.skills.known.iter().map(|(id, s)| (*id, *s)).collect();
         if self.skills.show_book {
             for (id, (tid, level)) in &known {
@@ -502,6 +582,21 @@ impl App {
     pub(super) fn skills_slash(&mut self, cmd: &str, arg: &str) -> bool {
         match cmd {
             "/competences" | "/compétences" | "/skills" => self.skills.show_book = !self.skills.show_book,
+            // Seuil de prise automatique d'une potion, comme le curseur posé sur la jauge (essais pilotés).
+            "/potionauto" | "/autopotion" => {
+                let mut a = arg.split_whitespace();
+                let hp = match a.next() {
+                    Some("vie" | "pv" | "hp") => true,
+                    Some("mana" | "pm" | "mp") => false,
+                    _ => {
+                        self.ui.push_chat("[potion] usage : /potionauto vie|mana 0-100");
+                        return true;
+                    }
+                };
+                let value = a.next().and_then(|v| v.parse::<u8>().ok()).unwrap_or(0).min(100);
+                self.skills.pending.push(SkillUi::AutoGauge { hp, value });
+                self.ui.push_chat(format!("[potion] prise automatique de la potion de {} sous {value} %", if hp { "vie" } else { "mana" }));
+            }
             "/lancer" | "/cast" => {
                 let wanted = arg.trim().to_lowercase();
                 let assets = self.assets.clone();
