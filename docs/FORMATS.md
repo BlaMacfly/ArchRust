@@ -890,6 +890,34 @@ Seuls les effets son sont décodés ; un bloc mêlé à d'autres types est balay
 noms `*.mp3` (un seul cas : le jeu 49 « WaterFall_Big »). Les autres types d'effets (particules,
 lumières, animations de `effect/clump/` et `effect/animation/`) restent à décoder.
 
+## Production (récolte, cuisine, alchimie)
+
+Tables TSV d'`ini/` (CP949, en-tête sur la première ligne), lues comme Archonia :
+
+| Fichier | Colonnes utiles |
+|---|---|
+| `productcategory.txt` | 0 catégorie (`Hunt` 0, `Cook` 1, `Alchemy` 2), 1 nom de la compétence (→ `SKILLTEMPLATE.ini`) : 663, 203, 285 |
+| `productcompose.txt` | 1 catégorie, 2 TID produit (= identifiant de la recette), 4 titre requis, 5 niveau de compétence, 6 prix d'achat de la recette, 8 objet recette, 11–22 quatre matériaux (TID, nom, quantité) |
+| `productexp.txt` | 0 compétence, 1 niveau (1 à 15), 5 expérience du niveau, 6 expérience cumulée à sa fin |
+| `productgather.txt` | 1 modèle de monstre, 2 classes `1;2;3;4`, 3 compétence de récolte |
+| `SKILL_SPEC.txt` | `attribute` 8 = compétence de production ; `requirement` 4 → outil `arg1` (654 couteau, 655 ustensiles, 1016 chaudron) |
+
+`productresultitem.txt` et `Skill_Product.txt` sont des tables du serveur (non lues par le client).
+
+Paquets : **AgpmProduct 0x17** (drapeaux 2 : I8 op, I32 CID, I32 compétence, I32 cible, I32 objet,
+I32 résultat, I32 expérience, bloc de recettes connues en INT32) — op 0 fabriquer, 1 recettes connues
+(entrée en jeu), 2 récolter un cadavre, 3 résultat (codes 0 réussite, 1 échec, 2 outil, 3 cible, 4 distance,
+5 sac plein, 6 matériaux, 7 plus rien à récolter) ; **AgpmEventProduct 0x3A** (drapeaux 1 : I8 op, EVENT_BASE,
+I32 CID, I32 a, I32 b) — op 0/1 ouverture du PNJ (fonction 24, donnée = catégorie), 2/3 apprendre une
+compétence, 4/5 acheter une recette. Niveau d'une compétence de production : « dirt » 4 ; expérience
+cumulée : « dirt » 6 d'AGPMSKILL.
+
+Dans ArchRust (`app_product.rs`, `hud_product.rs`) : bouton « Crafting » (`sysstr` 329) du dialogue ;
+`UI_PDSkillBuy` chez le PNJ ; `UI_PDSkill` (touche J, menu du personnage, `/production`) ; lancer la
+cuisine ou l'alchimie ouvre `UI_Compose` sans rien envoyer (barre de 3 s puis op 0 au bouton « Create ») ;
+lancer la récolte sur un cadavre contrôle outil, cible et distance (≤ 250), puis, à l'action de lancement
+renvoyée par le serveur, barre de 5,4 s et op 2. Messages : `sysstr` 41–51, 351, 517, 518, 522, 426–430.
+
 ## Inconnues
 
 * association des équipements `d%07x` aux objets portés ;

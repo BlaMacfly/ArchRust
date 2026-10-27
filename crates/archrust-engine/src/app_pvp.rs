@@ -78,7 +78,7 @@ fn zone_keys(safety: i64) -> &'static [&'static str] {
 }
 
 /// Remplace les `%s`, `%d` et `%I64d` dans l'ordre.
-fn fill(text: &str, args: &[String]) -> String {
+pub(super) fn fill(text: &str, args: &[String]) -> String {
     let mut out = String::new();
     let mut rest = text;
     let mut args = args.iter();

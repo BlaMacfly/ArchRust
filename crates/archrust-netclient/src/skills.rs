@@ -63,6 +63,8 @@ pub mod upgrade_result {
 /// Indices du sous-paquet « dirt » des facteurs : niveau d'une compétence, points du personnage.
 const DIRT_SKILL_LEVEL: usize = 4;
 pub const DIRT_SKILL_POINT: usize = 5;
+/// Expérience cumulée d'une compétence de production (SKILL_EXP, lue par Archonia `FUN_1402a8540`).
+const DIRT_SKILL_EXP: usize = 6;
 /// Sous-paquet « dirt » d'AGPMCHAR_FACTORS.
 const FACTORS_DIRT: usize = 11;
 
@@ -111,10 +113,13 @@ pub fn command_packet(cmd: &SkillCommand, me: i32) -> (&'static Schema, Vec<Opti
 /// Réponses liées aux compétences.
 #[derive(Debug, Clone, PartialEq)]
 pub enum SkillEvent {
-    /// Compétence connue (entrée en jeu ou apprise) : identifiant, TID, niveau.
-    Known { owner: i32, id: i32, tid: i32, level: i32 },
-    /// Niveau d'une compétence changé.
-    Level { id: i32, level: i32 },
+    /// Compétence connue (entrée en jeu ou apprise) : identifiant, TID, niveau, expérience de production
+    /// cumulée (« dirt » indice 6) si le serveur l'envoie.
+    Known { owner: i32, id: i32, tid: i32, level: i32, exp: Option<i32> },
+    /// Niveau d'une compétence changé (et son expérience de production, si elle est jointe).
+    Level { id: i32, level: i32, exp: Option<i32> },
+    /// Expérience de production seule changée (AGPMSKILL op 2 sans niveau).
+    Exp { id: i32, exp: i32 },
     /// Lancement commencé (op 7) : lanceur, compétence, cible, durées en ms.
     Cast { caster: i32, id: i32, tid: i32, target: i32, cast_ms: u32, recast_ms: u32 },
     /// Fenêtre d'un instructeur ouverte (0x3B op 5).
@@ -155,11 +160,16 @@ pub fn translate(t: u8, values: &[Option<Value>]) -> Option<WorldEvent> {
                 id: int(values, 1)? as i32,
                 tid: int(values, 4)? as i32,
                 level: bytes(values, 3).and_then(|f| factors_dirt(f, DIRT_SKILL_LEVEL)).unwrap_or(1),
+                exp: bytes(values, 3).and_then(|f| factors_dirt(f, DIRT_SKILL_EXP)),
             })),
-            op::UPDATE => Some(WorldEvent::Skill(SkillEvent::Level {
-                id: int(values, 1)? as i32,
-                level: bytes(values, 3).and_then(|f| factors_dirt(f, DIRT_SKILL_LEVEL))?,
-            })),
+            op::UPDATE => {
+                let id = int(values, 1)? as i32;
+                let exp = bytes(values, 3).and_then(|f| factors_dirt(f, DIRT_SKILL_EXP));
+                Some(WorldEvent::Skill(match bytes(values, 3).and_then(|f| factors_dirt(f, DIRT_SKILL_LEVEL)) {
+                    Some(level) => SkillEvent::Level { id, level, exp },
+                    None => SkillEvent::Exp { id, exp: exp? },
+                }))
+            }
             op::CAST => {
                 let (_, a) = decode_mini(mini::SKILL_ACTION, bytes(values, 6)?).ok()?;
                 Some(WorldEvent::Skill(SkillEvent::Cast {
@@ -250,8 +260,16 @@ mod tests {
         block.extend(add(2, 4, 3));
         let evs = decode_skill_block(&block);
         assert_eq!(evs.len(), 2);
-        let WorldEvent::Skill(SkillEvent::Known { owner, id, tid, level }) = &evs[1] else { panic!("{:?}", evs[1]) };
-        assert_eq!((*owner, *id, *tid, *level), (42, 2, 4, 3));
+        let WorldEvent::Skill(SkillEvent::Known { owner, id, tid, level, exp }) = &evs[1] else { panic!("{:?}", evs[1]) };
+        assert_eq!((*owner, *id, *tid, *level, *exp), (42, 2, 4, 3, None));
+        // Compétence de production : expérience cumulée au « dirt » indice 6.
+        let d = mini::FACTOR_DIRT;
+        let dirt = build_mini(d, &sparse(d, &[(4, Value::I32(3)), (6, Value::I32(960))])).unwrap();
+        let cf = mini::CHAR_FACTORS;
+        let f = Value::Packet(build_mini(cf, &sparse(cf, &[(11, Value::Packet(dirt))])).unwrap());
+        let p = build_packet(k, &sparse(k, &[(0, Value::I8(0)), (1, Value::I32(9)), (2, base(42)), (3, f), (4, Value::I32(663))])).unwrap();
+        let evs = decode_skill_block(&p);
+        assert!(matches!(evs.as_slice(), [WorldEvent::Skill(SkillEvent::Known { owner: 42, id: 9, tid: 663, level: 3, exp: Some(960) })]));
 
         let (s, v) = command_packet(&SkillCommand::Cast { id: 2, target: 77, forced: false }, 42);
         assert_eq!(s.id, packet_type::SKILL);

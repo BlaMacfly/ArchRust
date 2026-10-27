@@ -37,10 +37,10 @@ impl Session {
 
     fn track(&mut self, ev: &WorldEvent) {
         match ev {
-            WorldEvent::Skill(SkillEvent::Known { owner, id, tid, level }) if *owner == self.cid || *owner == 0 => {
+            WorldEvent::Skill(SkillEvent::Known { owner, id, tid, level, .. }) if *owner == self.cid || *owner == 0 => {
                 self.skills.insert(*id, (*tid, *level));
             }
-            WorldEvent::Skill(SkillEvent::Level { id, level }) => {
+            WorldEvent::Skill(SkillEvent::Level { id, level, .. }) => {
                 if let Some(s) = self.skills.get_mut(id) {
                     s.1 = *level;
                 }

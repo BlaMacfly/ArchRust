@@ -5,7 +5,7 @@
 //! « Inventaire » et « Groupe ».
 //!
 //! Écart : seules les entrées dont la fenêtre existe dans ArchRust sont affichées (quêtes,
-//! inventaire, personnage, compétences de combat, guilde, groupe, options, menu) ; un bouton
+//! inventaire, personnage, compétences de combat et de production, guilde, groupe, options, menu) ; un bouton
 //! sans entrée gérée (monde, Chantra) reste inactif.
 
 use super::npc_ui::{button, window};
@@ -18,6 +18,8 @@ pub enum MenuUi {
     Inventory,
     Character,
     Skills,
+    /// Compétences de production (`UI_PDSkill`, `MenuBtnProductSkill`).
+    ProductSkills,
     Guild,
     Party,
     Options,
@@ -29,7 +31,7 @@ const MENUS: [(&str, &str, &[(&str, MenuUi)]); 5] = [
     (
         "MainBtnCharacter",
         "UI_MainMenuCharacter",
-        &[("MenuBtnQuest", MenuUi::Quests), ("MenuBtnInventory", MenuUi::Inventory), ("MenuBtnEquip", MenuUi::Character), ("MenuBtnCombatSkill", MenuUi::Skills)],
+        &[("MenuBtnQuest", MenuUi::Quests), ("MenuBtnInventory", MenuUi::Inventory), ("MenuBtnEquip", MenuUi::Character), ("MenuBtnCombatSkill", MenuUi::Skills), ("MenuBtnProductSkill", MenuUi::ProductSkills)],
     ),
     ("MainBtnCommunity", "UI_MainMenuCommunity", &[("MenuBtnGuild", MenuUi::Guild), ("CONTROL_15350", MenuUi::Party)]),
     ("MainBtnWorld", "UI_MainMenuWorld", &[]),

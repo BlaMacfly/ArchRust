@@ -108,6 +108,8 @@ pub mod packet_type {
     pub const RECONNECT: u8 = 0x63;
     pub const PVP: u8 = 0x4a;
     pub const REMISSION: u8 = 0x2a;
+    pub const PRODUCT: u8 = 0x17;
+    pub const EVENT_PRODUCT: u8 = 0x3a;
 }
 
 /// Schémas des paquets principaux.
@@ -352,6 +354,27 @@ pub mod main {
     // AgpmRemission (0x2A) — drapeaux 1 : opération, CID, mini-paquet (EVENT_BASE ou REMISSION).
     schema!(pub REMISSION = "AGPMREMISSION", T::REMISSION, 1, [f!(Int8), f!(Int32), f!(Packet)]);
 
+    // AgpmProduct (0x17, constructeur d'Archonia FUN_1402a5d10) — drapeaux 2 : production (récolte, fabrication).
+    schema!(pub PRODUCT = "AGPMPRODUCT", T::PRODUCT, 2, [
+        f!(Int8),           // 0 opération (0 fabriquer, 1 recettes connues, 2 récolter, 3 résultat)
+        f!(Int32),          // 1 CID
+        f!(Int32),          // 2 identifiant (instance) de la compétence
+        f!(Int32),          // 3 recette (op 0), cadavre (op 2), TID obtenu (op 3)
+        f!(Int32),          // 4 IID de l'objet recette (op 0), quantité obtenue (op 3)
+        f!(Int32),          // 5 code de résultat (op 3)
+        f!(Int32),          // 6 expérience de production gagnée (op 3)
+        f!(MemoryBlock),    // 7 recettes connues, INT32 mis bout à bout (op 1)
+    ]);
+
+    // AgpmEventProduct (0x3A, FUN_1402d0180) — drapeaux 1 : PNJ de production (fonction 24).
+    schema!(pub EVENT_PRODUCT = "AGPMEVENTPRODUCT", T::EVENT_PRODUCT, 1, [
+        f!(Int8),           // 0 opération (0 → 1 ouverture, 2 → 3 compétence, 4 → 5 recette)
+        f!(Packet),         // 1 événement (EVENT_BASE)
+        f!(Int32),          // 2 CID du joueur
+        f!(Int32),          // 3 TID de la compétence ou identifiant de la recette
+        f!(Int32),          // 4 code de résultat
+    ]);
+
     // AgpmUIStatus (0x14) — drapeaux 2 : barre de raccourcis, potions et seuils de leur prise automatique.
     schema!(pub UI_STATUS = "AGPMUISTATUS", T::UI_STATUS, 2, [
         f!(Int8),        // 0 opération (0 envoi complet, 1 changement, 2 barre encodée, 3 casque)
@@ -482,6 +505,8 @@ pub mod main {
             T::UI_STATUS => UI_STATUS,
             T::PVP => PVP,
             T::REMISSION => REMISSION,
+            T::PRODUCT => PRODUCT,
+            T::EVENT_PRODUCT => EVENT_PRODUCT,
             T::EVENT_QUEST => EVENT_QUEST,
             T::QUEST => QUEST,
             T::PARTY => PARTY,

@@ -56,7 +56,7 @@ pub struct BuyBankView {
 }
 
 /// Texte fixe d'un contrôle (`CtrlDisplay=1:texte`).
-fn static_text(c: &UiControl) -> &str {
+pub(super) fn static_text(c: &UiControl) -> &str {
     c.display.as_deref().and_then(|d| d.strip_prefix("1:")).unwrap_or("")
 }
 
@@ -65,7 +65,7 @@ pub(super) fn argb(c: u32) -> Color32 {
 }
 
 /// Texte placé selon l'alignement de `CtrlFont` (16 à gauche, 17 centré, 18 à droite).
-fn control_text(p: &egui::Painter, r: Rect, c: &UiControl, text: &str, size: f32, color: Option<Color32>) {
+pub(super) fn control_text(p: &egui::Painter, r: Rect, c: &UiControl, text: &str, size: f32, color: Option<Color32>) {
     let (font_color, align) = c.font.unwrap_or((u32::MAX, 16));
     let color = color.unwrap_or(argb(font_color));
     let (pos, a) = match align {
@@ -80,7 +80,7 @@ fn control_text(p: &egui::Painter, r: Rect, c: &UiControl, text: &str, size: f32
 /// l'indice 0 (les lignes de la liste n'ont `PORTAL_BAR.png` qu'au survol et à l'appui) ; sans
 /// `Button=`, le bouton commun.
 #[allow(clippy::too_many_arguments)]
-fn state_button(ctx: &egui::Context, ui: &mut egui::Ui, hud: &mut HudState, assets: &Assets, painter: &egui::Painter, r: Rect, c: &UiControl, label: &str, font: f32, enabled: bool, id: impl std::hash::Hash) -> egui::Response {
+pub(super) fn state_button(ctx: &egui::Context, ui: &mut egui::Ui, hud: &mut HudState, assets: &Assets, painter: &egui::Painter, r: Rect, c: &UiControl, label: &str, font: f32, enabled: bool, id: impl std::hash::Hash) -> egui::Response {
     let Some(states) = c.button_states else { return button(ctx, ui, hud, assets, painter, r, c, label, font, enabled, id) };
     let resp = ui.interact(r, egui::Id::new(id), if enabled { egui::Sense::click() } else { egui::Sense::hover() });
     let state = if !enabled {

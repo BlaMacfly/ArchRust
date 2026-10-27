@@ -264,12 +264,12 @@ impl App {
         let assets = self.assets.clone();
         let me = self.player.as_ref().map(|p| p.cid).unwrap_or(0);
         match ev {
-            SkillEvent::Known { owner, id, tid, level } => {
+            SkillEvent::Known { owner, id, tid, level, .. } => {
                 if owner == 0 || owner == me || me == 0 {
                     self.skills.known.insert(id, (tid, level));
                 }
             }
-            SkillEvent::Level { id, level } => {
+            SkillEvent::Level { id, level, .. } => {
                 if let Some(tid) = self.skills.known.get_mut(&id).map(|s| {
                     s.1 = level;
                     s.0
@@ -285,6 +285,8 @@ impl App {
                 self.ui.push_chat(format!("[compétence] {name}."));
             }
             SkillEvent::Cast { .. } => {}
+            // Expérience de production : relevée par `product_observe` (voir `app_product.rs`).
+            SkillEvent::Exp { .. } => {}
             SkillEvent::MasterOpened { npc } => {
                 let teach = self.npc_teach(npc);
                 match teach {
@@ -349,6 +351,11 @@ impl App {
         }
         let Some(me) = self.player.as_ref().map(|p| p.cid) else { return };
         let target = self.addons.target_cid().unwrap_or(me);
+        // Compétences de production (AgcmProductMed) : contrôles de la récolte, ou fenêtre de fabrication
+        // sans envoi pour la cuisine et l'alchimie (voir `app_product.rs`).
+        if !self.product_before_cast(tid, id, target) {
+            return;
+        }
         // Le serveur mène la marche jusqu'à portée : pas d'arrêt du client, qui interromprait.
         self.walking = false;
         // Ctrl : attaque forcée sur un joueur (combat entre joueurs, voir `app_pvp.rs`).

@@ -17,6 +17,7 @@ pub mod items;
 pub mod login;
 pub mod npc;
 pub mod party;
+pub mod product;
 pub mod pvp;
 pub mod reconnect;
 pub mod refinery;

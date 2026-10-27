@@ -267,6 +267,8 @@ pub enum WorldEvent {
     Pvp(crate::pvp::PvpEvent),
     /// Rémission (AgpmRemission, voir `remission`).
     Remission(crate::remission::RemissionEvent),
+    /// Production : recettes connues, résultat, PNJ de production (voir `product`).
+    Product(crate::product::ProductEvent),
     /// Métamorphose d'un personnage (AGPMCHARACTER champ 18) : les portails la refusent
     /// (`Teleport_TransformChar`).
     Transformed { cid: i32, transformed: bool },
@@ -327,6 +329,8 @@ pub enum Command {
     UiStatus(crate::ui_status::UiStatusUpdate),
     /// Rémission auprès d'un pardonneur (voir `remission`).
     Remission(crate::remission::RemissionCommand),
+    /// Récolte, fabrication, PNJ de production (voir `product`).
+    Product(crate::product::ProductCommand),
     /// Casque visible ou non (AgpmUIStatus op 3, champ 8).
     ViewHelmet(bool),
     /// Drapeaux de refus du personnage (AgpmCharacter op 0x11, champ 22).
@@ -561,6 +565,10 @@ pub fn translate(p: &Incoming) -> WorldEvent {
     }
     if let Some(ev) = p.packet.as_ref().and_then(|packet| crate::remission::translate(p.packet_type, &packet.values)) {
         return WorldEvent::Remission(ev);
+    }
+    // Production (voir `product`).
+    if let Some(ev) = p.packet.as_ref().and_then(|packet| crate::product::translate(p.packet_type, &packet.values)) {
+        return WorldEvent::Product(ev);
     }
     // Combat entre joueurs (voir `pvp`).
     if let Some(ev) = p.packet.as_ref().and_then(|packet| crate::pvp::translate(p.packet_type, &packet.values)) {
@@ -1241,6 +1249,10 @@ impl WorldClient {
                         Some(Command::Whisper { to, message }) => self.send_whisper(&to, &message).await,
                         Some(Command::Remission(c)) => {
                             let (schema, values) = crate::remission::command_packet(&c, self.cid);
+                            self.conn.send(schema, &values).await
+                        }
+                        Some(Command::Product(c)) => {
+                            let (schema, values) = crate::product::command_packet(&c, self.cid);
                             self.conn.send(schema, &values).await
                         }
                         Some(Command::UiStatus(u)) => {

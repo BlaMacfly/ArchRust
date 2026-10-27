@@ -394,6 +394,13 @@ fn start_function(glue: &mut NpcGlue, npc: i32, f: i32, net: Option<&NetLink>, u
                 net.send(Command::Remission(archrust_netclient::remission::RemissionCommand::Request(npc)));
             }
         }
+        // PNJ de production : AGPMEVENTPRODUCT op 0, l'accord ouvre `UI_PDSkillBuy` (voir `app_product.rs`).
+        archrust_netclient::product::FUNCTION => {
+            glue.dialog = None;
+            if let Some(net) = net {
+                net.send(Command::Product(archrust_netclient::product::ProductCommand::Open(npc)));
+            }
+        }
         function::QUEST => {
             glue.dialog = None;
             send(net, NpcCommand::QuestWindow(npc));
@@ -831,6 +838,8 @@ impl App {
                     archrust_netclient::convert::FUNCTION_ITEM_CONVERT => 327,
                     // Pardonneur (fonction 0x1F) : « Pardon ».
                     archrust_netclient::remission::FUNCTION => 335,
+                    // Production (fonction 0x18) : « Crafting ».
+                    archrust_netclient::product::FUNCTION => 329,
                     _ => continue,
                 };
                 buttons.push((f.function, sysstr(&assets, id).unwrap_or_default()));

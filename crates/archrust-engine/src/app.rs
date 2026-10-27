@@ -71,6 +71,9 @@ mod convert_glue;
 #[path = "app_refinery.rs"]
 mod refinery_glue;
 
+#[path = "app_product.rs"]
+mod product_glue;
+
 #[path = "app_options.rs"]
 mod options_glue;
 
@@ -223,6 +226,8 @@ pub struct App {
     convert: convert_glue::ConvertGlue,
     /// Sphère d'alchimie : grille, recettes, prix et barre d'attente, voir `app_refinery.rs`.
     refinery: refinery_glue::RefineryGlue,
+    /// Production : récolte, cuisine, alchimie, PNJ de production, voir `app_product.rs`.
+    product: product_glue::ProductGlue,
 }
 
 impl App {
@@ -331,6 +336,7 @@ impl App {
             boards: Default::default(),
             convert: Default::default(),
             refinery: Default::default(),
+            product: Default::default(),
         })
     }
 
@@ -1151,6 +1157,8 @@ impl App {
         self.portal_observe(&ev);
         // Fonctions des PNJ en vue (voir `app_npc.rs`).
         self.npc_observe(&ev);
+        // Compétences de production et lancement d'une récolte (voir `app_product.rs`).
+        self.product_observe(&ev);
         match ev {
             WorldEvent::Connected => {
                 // Nouvelle connexion au monde : les instantanés d'objets qui suivent repartent de zéro.
@@ -1481,6 +1489,7 @@ impl App {
             WorldEvent::Remission(ev) => self.on_remission(ev),
             WorldEvent::Convert(ev) => self.on_convert_event(ev),
             WorldEvent::Refinery(ev) => self.on_refinery_event(ev),
+            WorldEvent::Product(ev) => self.on_product_event(ev),
             // Messages système réduits à un code (banque agrandie…, voir `app_npc.rs`).
             WorldEvent::SystemCode(code) => self.npc_system_code(code),
             WorldEvent::Chat {
@@ -1813,6 +1822,8 @@ impl App {
             _ if self.reconnect_slash(cmd) => {}
             // Sphère d'alchimie : /sphere, /grille, /raffiner, /repeter, /recette (voir `app_refinery.rs`).
             _ if self.refinery_slash(cmd, arg) => {}
+            // Production : /production, /recettes (voir `app_product.rs`).
+            _ if self.product_slash(cmd) => {}
             // Compétences : /competences, /lancer (voir `app_skills.rs`).
             _ if self.skills_slash(cmd, arg) => {}
             // Groupes : /inviter, /accepter, /refuser, /quittergroupe, /exclure, /chef, /groupe.
@@ -1991,6 +2002,7 @@ impl App {
         }
         if self.phase == Phase::InWorld {
             let mut closed = self.npc.close_windows();
+            closed |= self.product.close_windows();
             for open in [&mut self.ui.show_inventory, &mut self.item_ui.show_character, &mut self.skills.show_book] {
                 closed |= std::mem::take(open);
             }
@@ -2011,6 +2023,7 @@ impl App {
                 crate::hud::MenuUi::Inventory => self.ui.show_inventory = !self.ui.show_inventory,
                 crate::hud::MenuUi::Character => self.item_ui.show_character = !self.item_ui.show_character,
                 crate::hud::MenuUi::Skills => self.skills.show_book = !self.skills.show_book,
+                crate::hud::MenuUi::ProductSkills => self.product.show_skills = !self.product.show_skills,
                 crate::hud::MenuUi::Guild => self.guild_toggle(),
                 crate::hud::MenuUi::Party => self.party.frames_ui.options = !self.party.frames_ui.options,
                 crate::hud::MenuUi::Options | crate::hud::MenuUi::Exit => self.ui.show_options = !self.ui.show_options,
@@ -2161,6 +2174,8 @@ impl App {
         // Portails des tuiles proches, liste fermée en s'éloignant (voir `app_portal.rs`).
         self.portal_frame();
         self.refinery_frame();
+        // Compétences lancées depuis `UI_PDSkill`, PNJ de production (voir `app_product.rs`).
+        self.product_frame();
         self.guild_frame();
         // Demandes des fenêtres de compétences, barre du personnage (voir `app_skills.rs`).
         self.skills_frame();
@@ -2366,6 +2381,8 @@ impl App {
                 convert_glue::panel(ctx, &mut self.convert, &mut item_requests, &self.items, &mut self.hud, &self.assets, self.net.as_ref(), &mut self.ui);
                 // Sphère d'alchimie : clic droit sur un objet du sac pour le poser dans la grille.
                 refinery_glue::panel(ctx, &mut self.refinery, &mut item_requests, &self.items, &mut self.hud, &self.assets, self.net.as_ref(), &mut self.ui);
+                // Fabrication, PNJ et compétences de production, barre de la récolte.
+                product_glue::panel(ctx, &mut self.product, &self.items, &mut self.hud, &self.assets, self.net.as_ref(), &mut self.ui);
                 items_glue::panel(ctx, &mut self.item_ui, std::mem::take(&mut item_requests), &self.items, &mut self.hud, &self.assets, self.net.as_ref(), &mut self.ui);
                 // Groupe : bouton, fenêtre des membres, invitations reçues.
                 party_glue::panel(ctx, &mut self.party, &party_view, self.net.as_ref(), &mut self.ui, &mut self.hud, &self.assets);
@@ -2732,6 +2749,10 @@ impl ApplicationHandler for App {
                     // K : livre des compétences ; 1 à = : barre de raccourcis (voir `app_skills.rs`).
                     // G : guilde (`Hotkey=0:34` « Guild » d'Archonia, voir `app_guild.rs`).
                     PhysicalKey::Code(KeyCode::KeyG) if down && !event.repeat && self.phase == Phase::InWorld => self.guild_toggle(),
+                    // J : compétences de production (`Hotkey=0:36` « Craft skill » d'Archonia, voir `app_product.rs`).
+                    PhysicalKey::Code(KeyCode::KeyJ) if down && !event.repeat && self.phase == Phase::InWorld => {
+                        self.product.show_skills = !self.product.show_skills
+                    }
                     PhysicalKey::Code(KeyCode::KeyK) if down && !event.repeat && self.phase == Phase::InWorld => {
                         self.skills.show_book = !self.skills.show_book
                     }
