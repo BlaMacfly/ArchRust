@@ -11,7 +11,13 @@
 //!   « MurdererGetPoint », « BecomeMurdererLv1-3 » et « FreeMurdererLv1-3 » (`FUN_1404fc5e0`).
 use super::App;
 use crate::assets::Assets;
+use crate::hud::{HudState, RemissionUi, RemissionView};
+use crate::net::NetLink;
+use crate::ui::UiState;
 use archrust_netclient::pvp::{op, PvpEvent};
+use archrust_netclient::remission::{RemissionCommand, RemissionEvent, LETTERS, LETTER_TIDS};
+use archrust_netclient::world::ItemRecord;
+use archrust_netclient::Command;
 use archrust_netclient::world::{CharacterStats, WorldEvent};
 use std::collections::{HashMap, HashSet};
 
@@ -122,6 +128,9 @@ pub struct PvpGlue {
     safety: Option<i64>,
     /// Couleurs des noms (format des polices `0xAABBGGRR`) : premier attaquant, paliers 1 à 3.
     colors: Option<[u32; 4]>,
+    /// Fenêtre de rémission (`UI_Remission`) ouverte, confirmation en cours.
+    remission_open: bool,
+    remission_confirm: bool,
 }
 
 impl PvpGlue {
@@ -133,7 +142,73 @@ impl PvpGlue {
     }
 }
 
+/// Points de meurtrier retirés par une rémission, comme le client d'Archonia l'annonce (`REMIT_MSG_RM_PO`).
+const REMISSION_POINTS: i64 = 2;
+
+/// Fenêtre de rémission (après l'accord du pardonneur) : « Use » demande confirmation (`REMIT_MSG_CNF_IND`) puis
+/// envoie la rémission (op 2, type 4).
+#[allow(clippy::too_many_arguments)]
+pub fn remission_panel(ctx: &egui::Context, glue: &mut PvpGlue, items: &std::collections::HashMap<i32, ItemRecord>, me: i32, hud: &mut HudState, assets: &Assets, net: Option<&NetLink>, _ui: &mut UiState) {
+    if !glue.remission_open {
+        return;
+    }
+    let letters: i64 = items
+        .values()
+        .filter(|i| i.status == Some(2) && i.template_id.is_some_and(|t| LETTER_TIDS.contains(&t)))
+        .map(|i| i.count.unwrap_or(1).max(1) as i64)
+        .sum();
+    let points = glue.marks.get(&me).map_or(0, |m| m.1);
+    let view = RemissionView {
+        desc: glue.text(assets, "REMIT_MSG_DESC"),
+        current: fill(&glue.text(assets, "REMIT_MSG_CUR_PO"), &[points.to_string()]),
+        removable: fill(&glue.text(assets, "REMIT_MSG_RM_PO"), &[REMISSION_POINTS.to_string()]),
+        letters: fill(&glue.text(assets, "REMIT_MSG_IND_CNT"), &[letters.to_string()]),
+        need: fill(&glue.text(assets, "REMIT_MSG_NEED_INDUL"), &[LETTERS.to_string()]),
+    };
+    let mut out = Vec::new();
+    crate::hud::draw_remission(ctx, hud, assets, &view, &mut out);
+    for a in out {
+        match a {
+            RemissionUi::Use => glue.remission_confirm = true,
+            RemissionUi::Close => {
+                glue.remission_open = false;
+                glue.remission_confirm = false;
+            }
+        }
+    }
+    if glue.remission_confirm {
+        let text = fill(&glue.text(assets, "REMIT_MSG_CNF_IND"), &[REMISSION_POINTS.to_string(), LETTERS.to_string()]);
+        if let Some(yes) = crate::hud::confirm_box(ctx, hud, assets, "remission-confirm", &text) {
+            glue.remission_confirm = false;
+            if let (true, Some(net)) = (yes, net) {
+                net.send(Command::Remission(RemissionCommand::Remit));
+            }
+        }
+    }
+}
+
 impl App {
+    /// Paquet AgpmRemission : accord du pardonneur, résultat de la rémission.
+    pub(super) fn on_remission(&mut self, ev: RemissionEvent) {
+        let assets = self.assets.clone();
+        match ev {
+            RemissionEvent::Granted => self.pvp.remission_open = true,
+            RemissionEvent::Result { kind: 4, result: 1 } => {
+                let line = fill(&self.pvp.text(&assets, "REMIT_MSG_SUCCESS"), &[REMISSION_POINTS.to_string()]);
+                self.ui.push_chat(line);
+            }
+            RemissionEvent::Result { kind: 1, .. } => {
+                let line = self.pvp.text(&assets, "REMIT_MSG_NOT_TP");
+                self.ui.push_chat(line);
+            }
+            RemissionEvent::Result { result: 7, .. } => {
+                let line = fill(&self.pvp.text(&assets, "REMIT_MSG_NEED_INDUL"), &[LETTERS.to_string()]);
+                self.ui.push_chat(line);
+            }
+            RemissionEvent::Result { .. } => {}
+        }
+    }
+
     /// Relevé du statut criminel et des points de meurtrier dans les paquets personnage.
     pub(super) fn pvp_observe(&mut self, ev: &WorldEvent) {
         let (cid, stats): (i32, Option<&CharacterStats>) = match ev {

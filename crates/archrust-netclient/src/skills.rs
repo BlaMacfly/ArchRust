@@ -73,7 +73,9 @@ const SKILL_MASTER_FUNCTION: i32 = 25;
 #[derive(Debug, Clone, PartialEq)]
 pub enum SkillCommand {
     /// Lancer une compétence (identifiant) sur une cible (CID ; le joueur pour lui-même).
-    Cast { id: i32, target: i32 },
+    /// `forced` : attaque forcée (Ctrl, champ 4 du mini SKILL_ACTION), nécessaire contre un joueur qui n'est pas
+    /// un ennemi déclaré.
+    Cast { id: i32, target: i32, forced: bool },
     /// Ouvrir la fenêtre d'un instructeur.
     MasterOpen(i32),
     /// Apprendre une compétence (TID) auprès d'un instructeur.
@@ -95,9 +97,9 @@ pub fn command_packet(cmd: &SkillCommand, me: i32) -> (&'static Schema, Vec<Opti
         (main::EVENT_SKILL_MASTER, sparse(main::EVENT_SKILL_MASTER, &v))
     };
     match cmd {
-        SkillCommand::Cast { id, target } => {
+        SkillCommand::Cast { id, target, forced } => {
             let a = mini::SKILL_ACTION;
-            let action = Value::Packet(build_mini(a, &sparse(a, &[(0, Value::I8(0)), (1, base(*target))])).unwrap_or_default());
+            let action = Value::Packet(build_mini(a, &sparse(a, &[(0, Value::I8(0)), (1, base(*target)), (4, Value::I8(*forced as i8))])).unwrap_or_default());
             (main::SKILL, sparse(main::SKILL, &[(0, Value::I8(op::CAST as i8)), (1, Value::I32(*id)), (2, base(me)), (6, action)]))
         }
         SkillCommand::MasterOpen(npc) => master(master_op::OPEN, *npc, &[]),
@@ -251,7 +253,7 @@ mod tests {
         let WorldEvent::Skill(SkillEvent::Known { owner, id, tid, level }) = &evs[1] else { panic!("{:?}", evs[1]) };
         assert_eq!((*owner, *id, *tid, *level), (42, 2, 4, 3));
 
-        let (s, v) = command_packet(&SkillCommand::Cast { id: 2, target: 77 }, 42);
+        let (s, v) = command_packet(&SkillCommand::Cast { id: 2, target: 77, forced: false }, 42);
         assert_eq!(s.id, packet_type::SKILL);
         let (_, a) = decode_mini(mini::SKILL_ACTION, bytes(&v, 6).unwrap()).unwrap();
         assert_eq!((int(&v, 0), int(&v, 1), base_cid(bytes(&a, 1))), (Some(7), Some(2), Some(77)));

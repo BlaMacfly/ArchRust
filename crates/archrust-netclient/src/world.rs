@@ -265,6 +265,8 @@ pub enum WorldEvent {
     UiStatus(crate::ui_status::UiStatus),
     /// Combat entre joueurs (AgpmPvP, voir `pvp`).
     Pvp(crate::pvp::PvpEvent),
+    /// Rémission (AgpmRemission, voir `remission`).
+    Remission(crate::remission::RemissionEvent),
     /// Métamorphose d'un personnage (AGPMCHARACTER champ 18) : les portails la refusent
     /// (`Teleport_TransformChar`).
     Transformed { cid: i32, transformed: bool },
@@ -323,6 +325,8 @@ pub enum Command {
     Guild(crate::guild::GuildCommand),
     /// Potions de la barre ou seuils de leur prise automatique changés.
     UiStatus(crate::ui_status::UiStatusUpdate),
+    /// Rémission auprès d'un pardonneur (voir `remission`).
+    Remission(crate::remission::RemissionCommand),
     /// Casque visible ou non (AgpmUIStatus op 3, champ 8).
     ViewHelmet(bool),
     /// Drapeaux de refus du personnage (AgpmCharacter op 0x11, champ 22).
@@ -554,6 +558,9 @@ pub fn translate(p: &Incoming) -> WorldEvent {
     // Sphère d'alchimie (voir `refinery`).
     if let Some(ev) = p.packet.as_ref().and_then(|packet| crate::refinery::translate(p.packet_type, &packet.values)) {
         return WorldEvent::Refinery(ev);
+    }
+    if let Some(ev) = p.packet.as_ref().and_then(|packet| crate::remission::translate(p.packet_type, &packet.values)) {
+        return WorldEvent::Remission(ev);
     }
     // Combat entre joueurs (voir `pvp`).
     if let Some(ev) = p.packet.as_ref().and_then(|packet| crate::pvp::translate(p.packet_type, &packet.values)) {
@@ -1232,6 +1239,10 @@ impl WorldClient {
                         Some(Command::Say(m)) => self.send_say(&m).await,
                         Some(Command::Chat { kind, message }) => self.send_chat(kind, &message).await,
                         Some(Command::Whisper { to, message }) => self.send_whisper(&to, &message).await,
+                        Some(Command::Remission(c)) => {
+                            let (schema, values) = crate::remission::command_packet(&c, self.cid);
+                            self.conn.send(schema, &values).await
+                        }
                         Some(Command::UiStatus(u)) => {
                             let (schema, values) = crate::ui_status::update_packet(&u, self.cid);
                             self.conn.send(schema, &values).await

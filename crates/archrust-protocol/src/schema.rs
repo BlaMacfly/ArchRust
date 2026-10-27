@@ -107,6 +107,7 @@ pub mod packet_type {
     pub const TITLE: u8 = 0x60;
     pub const RECONNECT: u8 = 0x63;
     pub const PVP: u8 = 0x4a;
+    pub const REMISSION: u8 = 0x2a;
 }
 
 /// Schémas des paquets principaux.
@@ -348,6 +349,9 @@ pub mod main {
         f!(Char, 49),
     ]);
 
+    // AgpmRemission (0x2A) — drapeaux 1 : opération, CID, mini-paquet (EVENT_BASE ou REMISSION).
+    schema!(pub REMISSION = "AGPMREMISSION", T::REMISSION, 1, [f!(Int8), f!(Int32), f!(Packet)]);
+
     // AgpmUIStatus (0x14) — drapeaux 2 : barre de raccourcis, potions et seuils de leur prise automatique.
     schema!(pub UI_STATUS = "AGPMUISTATUS", T::UI_STATUS, 2, [
         f!(Int8),        // 0 opération (0 envoi complet, 1 changement, 2 barre encodée, 3 casque)
@@ -477,6 +481,7 @@ pub mod main {
             T::GUILD_WAREHOUSE => GUILD_WAREHOUSE,
             T::UI_STATUS => UI_STATUS,
             T::PVP => PVP,
+            T::REMISSION => REMISSION,
             T::EVENT_QUEST => EVENT_QUEST,
             T::QUEST => QUEST,
             T::PARTY => PARTY,
@@ -510,6 +515,8 @@ pub mod mini {
 
     // Désignation dans AGPMSKILL (type d'objet, identifiant) — drapeaux 1.
     schema!(pub SKILL_BASE = "AGPMSKILL_BASE", 150, 1, [f!(Int8), f!(Int32)]);
+    // Rémission (AgpmRemission op 2) — drapeaux 1 : type (4 lettres de pardon), résultat.
+    schema!(pub REMISSION = "AGPMREMISSION_MINI", 190, 1, [f!(Int8), f!(Int32)]);
     // Action d'une compétence — drapeaux 2 : type (0 demande, 1 lancement, 2 résultat), cible
     // (SKILL_BASE), facteurs du résultat, position visée, attaque forcée, incantation, durée et relance
     // (ms), niveau, facteurs à mettre en file, effet supplémentaire, CID des cibles.

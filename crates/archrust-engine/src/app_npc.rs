@@ -388,6 +388,12 @@ fn start_function(glue: &mut NpcGlue, npc: i32, f: i32, net: Option<&NetLink>, u
             glue.dialog = None;
             send(net, NpcCommand::BankOpen(npc));
         }
+        archrust_netclient::remission::FUNCTION => {
+            glue.dialog = None;
+            if let Some(net) = net {
+                net.send(Command::Remission(archrust_netclient::remission::RemissionCommand::Request(npc)));
+            }
+        }
         function::QUEST => {
             glue.dialog = None;
             send(net, NpcCommand::QuestWindow(npc));
@@ -823,6 +829,8 @@ impl App {
                     // Entrepôt de guilde chez les gardiens de banque (FUN_1406ca6a0 : fonction 0x23).
                     archrust_netclient::guild::FUNCTION_GUILD_WAREHOUSE => 611,
                     archrust_netclient::convert::FUNCTION_ITEM_CONVERT => 327,
+                    // Pardonneur (fonction 0x1F) : « Pardon ».
+                    archrust_netclient::remission::FUNCTION => 335,
                     _ => continue,
                 };
                 buttons.push((f.function, sysstr(&assets, id).unwrap_or_default()));

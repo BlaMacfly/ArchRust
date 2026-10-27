@@ -351,7 +351,9 @@ impl App {
         let target = self.addons.target_cid().unwrap_or(me);
         // Le serveur mène la marche jusqu'à portée : pas d'arrêt du client, qui interromprait.
         self.walking = false;
-        send(self.net.as_ref(), SkillCommand::Cast { id, target });
+        // Ctrl : attaque forcée sur un joueur (combat entre joueurs, voir `app_pvp.rs`).
+        let forced = self.addon_glue.modifiers.control_key();
+        send(self.net.as_ref(), SkillCommand::Cast { id, target, forced });
     }
 
     fn skills_use_slot(&mut self, slot: usize) {

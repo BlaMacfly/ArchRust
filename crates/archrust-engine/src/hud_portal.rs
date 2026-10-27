@@ -206,3 +206,48 @@ pub fn draw_buy_bank(ctx: &egui::Context, hud: &mut HudState, assets: &Assets, v
         }
     });
 }
+
+/// Fenêtre `UI_Remission` (pardonneur) : description, points de meurtrier actuels et retirés, lettres de pardon
+/// portées et exigées.
+pub struct RemissionView {
+    pub desc: String,
+    pub current: String,
+    pub removable: String,
+    pub letters: String,
+    pub need: String,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RemissionUi {
+    Use,
+    Close,
+}
+
+pub fn draw_remission(ctx: &egui::Context, hud: &mut HudState, assets: &Assets, view: &RemissionView, out: &mut Vec<RemissionUi>) {
+    let Some(w) = window(hud, assets, "UI_Remission") else { return };
+    frame(ctx, hud, assets, &w, "archonia-remission", |ui, hud, layout, origin, painter| {
+        let s = layout.scale;
+        let font = (11.0 * s).max(9.0);
+        for c in &w.controls {
+            let r = layout.rect(origin, c.pos, c.size);
+            match c.name.as_str() {
+                "CTL_ST_CAPTION" | "CONTROL_6895" | "CONTROL_23886" | "CONTROL_6785" => control_text(painter, r, c, static_text(c), font, None),
+                "CTL_ST_CUR_P" => control_text(painter, r, c, &view.current, font, None),
+                "CTL_ST_REM_P" => control_text(painter, r, c, &view.removable, font, None),
+                "CONTROL_8824" => control_text(painter, r, c, &view.letters, font, None),
+                "CTL_ED_DESC" | "CTL_ED_NEED_INDUL" => {
+                    let text = if c.name == "CTL_ED_DESC" { &view.desc } else { &view.need };
+                    let galley = painter.layout(text.clone(), FontId::proportional(font), Color32::WHITE, r.width());
+                    painter.galley(r.min, galley, Color32::WHITE);
+                }
+                "CTL_BTN_INDUL" | "CTL_BTN_CLOSE" | "CTL_BTN_SYSCLOSE" => {
+                    let label = if c.name == "CTL_BTN_SYSCLOSE" { "" } else { static_text(c) };
+                    if state_button(ctx, ui, hud, assets, painter, r, c, label, font, true, ("remission", c.name.as_str())).clicked() {
+                        out.push(if c.name == "CTL_BTN_INDUL" { RemissionUi::Use } else { RemissionUi::Close });
+                    }
+                }
+                _ => {}
+            }
+        }
+    });
+}

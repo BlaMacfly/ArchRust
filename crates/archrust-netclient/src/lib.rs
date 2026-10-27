@@ -20,6 +20,7 @@ pub mod party;
 pub mod pvp;
 pub mod reconnect;
 pub mod refinery;
+pub mod remission;
 pub mod skills;
 pub mod teleport;
 pub mod ui_status;

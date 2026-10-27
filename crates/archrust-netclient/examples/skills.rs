@@ -149,7 +149,7 @@ async fn main() -> anyhow::Result<()> {
     }
 
     println!("\n▶ lancer Speed Attack sur soi");
-    s.send(Command::Skill(SkillCommand::Cast { id, target: cid })).await;
+    s.send(Command::Skill(SkillCommand::Cast { id, target: cid, forced: false })).await;
     let ev = s.expect("lancement", 6, |e| matches!(e, WorldEvent::Skill(SkillEvent::Cast { .. }))).await?;
     println!("  ✓ lancement : {ev:?}");
     s.expect("effet sur soi", 6, |e| matches!(e, WorldEvent::BuffAdded(b) if b.owner == cid)).await?;

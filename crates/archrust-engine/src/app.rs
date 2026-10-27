@@ -1478,6 +1478,7 @@ impl App {
             WorldEvent::Guild(ev) => self.on_guild_event(ev),
             WorldEvent::UiStatus(st) => self.on_ui_status(st),
             WorldEvent::Pvp(ev) => self.on_pvp(ev),
+            WorldEvent::Remission(ev) => self.on_remission(ev),
             WorldEvent::Convert(ev) => self.on_convert_event(ev),
             WorldEvent::Refinery(ev) => self.on_refinery_event(ev),
             // Messages système réduits à un code (banque agrandie…, voir `app_npc.rs`).
@@ -2358,6 +2359,9 @@ impl App {
                 // Entrepôt de guilde avant la banque : un objet de l'entrepôt lâché dans le sac y est repris.
                 guild_glue::item_requests(&self.guild, &mut item_requests, self.net.as_ref());
                 npc_glue::panel(ctx, &mut self.npc, &npc_views, &mut item_requests, &self.items, &mut self.hud, &self.assets, self.net.as_ref(), &mut self.ui);
+                // Fenêtre de rémission du pardonneur (voir `app_pvp.rs`).
+                let me = self.player.as_ref().map_or(0, |p| p.cid);
+                pvp_glue::remission_panel(ctx, &mut self.pvp, &self.items, me, &mut self.hud, &self.assets, self.net.as_ref(), &mut self.ui);
                 // Forgeron et pierre d'esprit lâchée sur un objet du sac.
                 convert_glue::panel(ctx, &mut self.convert, &mut item_requests, &self.items, &mut self.hud, &self.assets, self.net.as_ref(), &mut self.ui);
                 // Sphère d'alchimie : clic droit sur un objet du sac pour le poser dans la grille.
