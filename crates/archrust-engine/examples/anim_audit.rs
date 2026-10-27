@@ -14,7 +14,7 @@ fn main() -> anyhow::Result<()> {
     let args: Vec<String> = std::env::args().skip(1).collect();
     let assets = Assets::new(Some(PathBuf::from(&args[0])), &[]);
     for tid in args[1..].iter().filter_map(|t| t.parse::<i32>().ok()) {
-        let set = AnimationSet::for_tid(&assets, tid);
+        let set = AnimationSet::for_tid(&assets, tid, 0);
         let models = models_for_tid(&assets, tid);
         println!("== TID {tid} : modèles {models:?}, {} type(s) d'animation", set.by_type.len());
         for model in &models {

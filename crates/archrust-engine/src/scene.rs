@@ -495,6 +495,27 @@ pub fn item_part_for_tid(assets: &Assets, tid: i32) -> Option<i64> {
     table.section(&tid.to_string())?.get(column)?.trim().parse().ok()
 }
 
+/// Type d'arme d'un objet (colonne `WeaponType` d'ItemTemplateAll.ini) ; `None` si ce n'est pas une
+/// arme (`Kind` 2).
+pub fn item_weapon_type(assets: &Assets, tid: i32) -> Option<i64> {
+    let table = assets.table("ini", "ItemTemplateAll.ini").ok()?;
+    let header = table.section("")?;
+    let column = |n: &str| header.entries.iter().find(|(_, name)| name.eq_ignore_ascii_case(n)).map(|(index, _)| index.clone());
+    let item = table.section(&tid.to_string())?;
+    let num = |c: Option<String>| c.and_then(|c| item.get(&c)?.trim().parse::<i64>().ok());
+    (num(column("Kind")) == Some(2)).then(|| num(column("WeaponType"))).flatten()
+}
+
+/// Arme portée parmi l'équipement : main droite (`Part` 10), sinon main gauche (9, les arcs).
+pub fn equipped_weapon_type(assets: &Assets, equipment: &[EquipmentView]) -> Option<i64> {
+    [10, 9].into_iter().find_map(|part| {
+        equipment
+            .iter()
+            .filter(|e| item_part_for_tid(assets, e.template_id) == Some(part))
+            .find_map(|e| item_weapon_type(assets, e.template_id))
+    })
+}
+
 pub fn item_model_for_tid(assets: &Assets, tid: i32) -> Option<String> {
     if tid <= 0 {
         return None;

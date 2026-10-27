@@ -175,6 +175,8 @@ impl App {
             .map(|p| (p.cid, p.tid, p.name.clone(), p.position, p.turn_y, true))
             .chain(self.entities.iter().map(|e| (e.cid, e.tid, e.name.clone(), e.position, e.turn_y, e.is_player)))
             .collect();
+        // Couleur des joueurs premiers attaquants ou meurtriers (voir `app_pvp.rs`).
+        let pvp_colors: HashMap<i32, u32> = chars.iter().filter(|c| c.5).filter_map(|c| Some((c.0, self.pvp_name_color(c.0)?))).collect();
         let mut feet: HashMap<i32, (Vec3, f32)> = HashMap::new();
         let state = &self.guild.state;
         let my_guild = state.info.as_ref().map(|i| i.name.clone());
@@ -214,7 +216,7 @@ impl App {
             if !shown || (cid != me && char_distance.is_some_and(|d| pos.distance(eye) > d)) {
                 continue;
             }
-            let color = boards::name_color(kind, None);
+            let color = pvp_colors.get(&cid).copied().unwrap_or_else(|| boards::name_color(kind, None));
             let guild = guilds.get(&cid).filter(|g| !g.is_empty() && display.name_guild).map(|g| {
                 let gv = GuildView { my_guild: my_guild.as_deref(), rank_in_mine: ranks.get(&name.to_lowercase()).copied(), allies: &[] };
                 (boards::guild_text(g), boards::guild_color(color, g, &gv))

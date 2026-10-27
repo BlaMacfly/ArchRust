@@ -96,6 +96,56 @@ impl ItemInfo {
     }
 }
 
+/// Personnage qui regarde l'infobulle : niveau, race et classe (`CharacterTemplatePublic.ini`).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash)]
+pub(super) struct Wearer {
+    pub level: i64,
+    pub race: i64,
+    pub class: i64,
+}
+
+impl Wearer {
+    pub(super) fn of(assets: &Assets, tid: i32, level: i64) -> Wearer {
+        let read = || -> Option<(i64, i64)> {
+            let table = assets.table("ini", "CharacterTemplatePublic.ini").ok()?;
+            let header = table.section("")?;
+            let column = |n: &str| header.entries.iter().find(|(_, v)| v.eq_ignore_ascii_case(n)).map(|(k, _)| k.clone());
+            let section = table.section(&tid.to_string())?;
+            let num = |c: Option<String>| c.and_then(|c| section.get(&c)?.trim().parse::<i64>().ok()).unwrap_or(0);
+            Some((num(column("Race")), num(column("Class"))))
+        };
+        let (race, class) = read().unwrap_or_default();
+        Wearer { level, race, class }
+    }
+}
+
+/// Conditions d'équipement d'un objet (bloc `RestrictFactor` d'ItemTemplateAll.ini : la seconde
+/// colonne `Level`, puis `Race` et `Class`, masques de bits, 0 pour tous), `Type` et `Kind`.
+#[derive(Debug, Clone, Copy, Default)]
+struct Restrict {
+    item_type: i64,
+    kind: i64,
+    level: i64,
+    race: i64,
+    class: i64,
+}
+
+fn restrict_of(assets: &Assets, tid: i32) -> Option<Restrict> {
+    let table = assets.table("ini", "ItemTemplateAll.ini").ok()?;
+    let header = table.section("")?;
+    let column = |n: &str| header.entries.iter().find(|(_, v)| v.eq_ignore_ascii_case(n)).map(|(k, _)| k.clone());
+    let item = table.section(&tid.to_string())?;
+    let num = |v: Option<&str>| v.and_then(|v| v.trim().parse::<i64>().ok()).unwrap_or(0);
+    let first = |n: &str| num(column(n).and_then(|c| item.get(&c)));
+    let level = column("Level").map(|c| num(item.get_all(&c).nth(1))).unwrap_or(0);
+    Some(Restrict { item_type: first("Type"), kind: first("Kind"), level, race: first("Race"), class: first("Class") })
+}
+
+/// Bit d'une race ou d'une classe (1 à 4) dans un masque de conditions ; un masque nul admet tout.
+fn admits(mask: i64, value: i64) -> bool {
+    mask == 0 || (1..=4).contains(&value) && mask & (1 << (value - 1)) != 0
+}
+
 /// Ligne de la première section d'ItemConvertTable.txt.
 #[derive(Debug, Clone, Default)]
 struct Level {
@@ -352,15 +402,68 @@ impl ConvertGlue {
     }
 
     /// Lignes de l'infobulle d'un objet.
-    fn tooltip(&mut self, assets: &Assets, item: &ItemRecord) -> Vec<(String, Color32)> {
+    fn tooltip(&mut self, assets: &Assets, item: &ItemRecord, who: Wearer, labels: &[String; 4]) -> Vec<(String, Color32)> {
         let st = self.state_of(assets, item);
         let name = self.name_line(assets, item);
         let item_options = self.options.get(&item.id).cloned().unwrap_or_default();
+        let restrict = item.template_id.and_then(|t| restrict_of(assets, t));
         let d = self.data(assets);
         let info = d.info(item.template_id);
         let normal = d.color("ITEM_TOOLTIP_COLOR_NORMAL");
         let spirit = d.color("ITEM_TOOLTIP_COLOR_SPIRIT");
         let mut lines = vec![(name, if st.filled.is_empty() { normal } else { spirit })];
+        // Conditions d'équipement, en LACK_ABILITY quand le personnage ne les remplit pas :
+        // « Required Level : %3d Level » (FUN_14054bb20), races (FUN_14054bd60), classes selon les
+        // races admises (FUN_14054b370) ; rien pour un objet de genre 0x40.
+        if let Some(r) = restrict.filter(|r| r.item_type == 0) {
+            let lack = d.color("ITEM_TOOLTIP_COLOR_LACK_ABILITY");
+            if r.level >= 1 {
+                let text = format!("{} : {:3}{}", labels[0], r.level, labels[1]);
+                lines.push((text, if who.level >= r.level { normal } else { lack }));
+            }
+            if r.kind != 0x40 {
+                let race_ok = admits(r.race, who.race);
+                let has = |bit: i64| r.race == 0 || r.race & bit != 0;
+                let mut races = labels[2].clone();
+                if r.race == 0 {
+                    races += &format!(" {}", d.msg("Item_Restrict_RaceAll"));
+                } else {
+                    let mut first = true;
+                    for (bit, key) in [(1, "Item_Restrict_RaceHuman"), (2, "Item_Restrict_RaceOrc"), (4, "Item_Restrict_RaceMoonElf")] {
+                        if has(bit) {
+                            races += &format!("{}{}", if first { " " } else { " / " }, d.msg(key));
+                            first = false;
+                        }
+                    }
+                    if has(8) {
+                        races += &format!(" {}", d.msg("DragonScion"));
+                    }
+                }
+                lines.push((races, if race_ok { normal } else { lack }));
+                let mut classes = labels[3].clone();
+                if r.class == 0 {
+                    classes += &format!(" {}", d.msg("Item_Restrict_ClassAll"));
+                } else {
+                    let groups: [(i64, [&str; 4]); 4] = [
+                        (1, ["Knight", "Berserker", "SwashBuckler", "Slayer"]),
+                        (2, ["Archer", "Hunter", "Ranger", "Obiter"]),
+                        (8, ["Mage", "Sorcerer", "Elementalist", "Summerner"]),
+                        (4, ["", "", "", "Scion"]),
+                    ];
+                    for (bit, names) in groups {
+                        if r.class & bit == 0 {
+                            continue;
+                        }
+                        let mut group = String::new();
+                        for (_, key) in names.iter().enumerate().filter(|(i, k)| !k.is_empty() && has(1 << i)) {
+                            group += &format!("{}{}", if group.is_empty() { " " } else { " / " }, d.msg(key));
+                        }
+                        classes += &format!(" {group}");
+                    }
+                }
+                lines.push((classes, if race_ok && admits(r.class, who.class) { normal } else { lack }));
+            }
+        }
         let in_bag = item.status == Some(STATUS_INVENTORY);
         // « Rank » : rang de renforcement possible et ce que l'objet accepte.
         if (1..=16).contains(&info.physical_rank) {
@@ -730,10 +833,14 @@ impl App {
             sig = sig.wrapping_add((i.id as u64).wrapping_mul(31) ^ ((i.template_id.unwrap_or(0) as u64) << 20) ^ ((i.status.unwrap_or(0) as u64) << 52));
         }
         sig ^= self.items.len() as u64;
+        let who = Wearer::of(&assets, self.player.as_ref().map(|p| p.tid).unwrap_or(0), self.hud.stats.level.unwrap_or(1) as i64);
+        sig = sig.wrapping_add(((who.level as u64) << 8 | (who.race as u64) << 4 | who.class as u64).wrapping_mul(0x1000_0000_01b3));
         if sig != self.convert.tips_for {
             self.convert.tips_for = sig;
             let items: Vec<ItemRecord> = self.items.values().cloned().collect();
-            self.hud.item_tips = items.iter().map(|i| (i.id, self.convert.tooltip(&assets, i))).collect();
+            // Libellés de sysstr.txt : « Required Level », « Level », « Race », « Class ».
+            let labels = [378, 262, 379, 380].map(|id| super::npc_glue::sysstr(&assets, id).unwrap_or_default());
+            self.hud.item_tips = items.iter().map(|i| (i.id, self.convert.tooltip(&assets, i, who, &labels))).collect();
         }
         if let Some(npc) = self.convert.npc {
             let me = self.player.as_ref().map(|p| p.position);
@@ -831,6 +938,24 @@ fn strip_codes(text: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Avec les données du client (`ARCHRUST_GAME_DIR`) : la Fighter Cuirass (172) est réservée aux
+    /// orcs chevaliers de niveau 2, le Lunatic Rune Kilt (158) aux orcs mages de niveau 7 ; le
+    /// chevalier humain (TID 96) ne remplit ni la race ni, pour le kilt, la classe.
+    #[test]
+    fn conditions_d_equipement() {
+        let Some(dir) = std::env::var_os("ARCHRUST_GAME_DIR") else { return };
+        let assets = Assets::new(Some(dir.into()), &[]);
+        let cuirass = restrict_of(&assets, 172).unwrap();
+        assert_eq!((cuirass.item_type, cuirass.level, cuirass.race, cuirass.class), (0, 2, 2, 1));
+        let kilt = restrict_of(&assets, 158).unwrap();
+        assert_eq!((kilt.level, kilt.race, kilt.class), (7, 2, 8));
+        let knight = Wearer::of(&assets, 96, 2);
+        assert_eq!((knight.race, knight.class), (1, 1));
+        assert!(!admits(cuirass.race, knight.race) && admits(cuirass.class, knight.class));
+        assert!(!admits(kilt.class, knight.class));
+        assert!(admits(0, 3), "masque nul : tout le monde");
+    }
 
     #[test]
     fn phrases_d_archonia() {

@@ -59,6 +59,9 @@ mod reconnect_glue;
 #[path = "app_guild.rs"]
 mod guild_glue;
 
+#[path = "app_pvp.rs"]
+mod pvp_glue;
+
 #[path = "app_boards.rs"]
 mod boards_glue;
 
@@ -212,6 +215,8 @@ pub struct App {
     reconnect: reconnect_glue::ReconnectGlue,
     /// Guilde : fenêtres d'Archonia, invitations, discussion de guilde, voir `app_guild.rs`.
     guild: guild_glue::GuildGlue,
+    /// Combat entre joueurs : ennemis, messages, statut criminel et de meurtrier, voir `app_pvp.rs`.
+    pvp: pvp_glue::PvpGlue,
     /// Panneaux au-dessus des personnages : noms, guildes, dégâts, voir `app_boards.rs`.
     boards: boards_glue::BoardsGlue,
     /// Forgeron et état des objets convertis (renforcement, sockets, pierres), voir `app_convert.rs`.
@@ -322,6 +327,7 @@ impl App {
             portal: Default::default(),
             reconnect: Default::default(),
             guild: Default::default(),
+            pvp: Default::default(),
             boards: Default::default(),
             convert: Default::default(),
             refinery: Default::default(),
@@ -357,6 +363,10 @@ impl App {
                             }
                         );
                     }
+                }
+                // Zone sûre, libre ou de combat annoncée au changement de région (voir `app_pvp.rs`).
+                if let Some(region) = found.as_ref().map(|z| z.region) {
+                    self.pvp_region(region as u32);
                 }
                 self.zone_region = found;
             }
@@ -1136,6 +1146,8 @@ impl App {
         self.party_observe(&ev);
         // Morts, vues des monstres, objets retirés du sol (voir `app_combat.rs`).
         self.combat_observe(&ev);
+        // Statut criminel et points de meurtrier (voir `app_pvp.rs`).
+        self.pvp_observe(&ev);
         self.portal_observe(&ev);
         // Fonctions des PNJ en vue (voir `app_npc.rs`).
         self.npc_observe(&ev);
@@ -1465,6 +1477,7 @@ impl App {
             // Guildes (0x15 / 0x39), voir `app_guild.rs`.
             WorldEvent::Guild(ev) => self.on_guild_event(ev),
             WorldEvent::UiStatus(st) => self.on_ui_status(st),
+            WorldEvent::Pvp(ev) => self.on_pvp(ev),
             WorldEvent::Convert(ev) => self.on_convert_event(ev),
             WorldEvent::Refinery(ev) => self.on_refinery_event(ev),
             // Messages système réduits à un code (banque agrandie…, voir `app_npc.rs`).
@@ -1930,8 +1943,10 @@ impl App {
         let seed = |cid: i32| (cid as u32).wrapping_mul(0x9e37_79b9) | 1;
         if let Some(p) = &self.player {
             let sig = animation::signature(&p.meshes);
-            if self.player_animator.as_ref().map(|(s, _)| *s) != Some(sig) {
-                let a = Animator::new(&self.assets, p.tid, &p.meshes, seed(p.cid));
+            let equip = self.item_ui.weapon_equip;
+            let current = self.player_animator.as_ref().map(|(s, a)| (*s, a.as_ref().map(|a| a.equip)));
+            if current.is_none_or(|(s, e)| s != sig || e.is_some_and(|e| e != equip)) {
+                let a = Animator::new(&self.assets, p.tid, &p.meshes, seed(p.cid), equip);
                 if let Some(a) = &a {
                     log::info!("joueur TID {} animé ({:?})", p.tid, a.clip_name());
                 }
@@ -1949,7 +1964,7 @@ impl App {
             if slot.0 != sig {
                 *slot = (
                     sig,
-                    Animator::new(&self.assets, e.tid, &e.meshes, seed(e.cid)),
+                    Animator::new(&self.assets, e.tid, &e.meshes, seed(e.cid), animation::weapon_anim_equip(crate::scene::equipped_weapon_type(&self.assets, &e.equipment))),
                 );
             }
             let near = (e.position - focus).length() < Self::ANIMATION_RANGE;

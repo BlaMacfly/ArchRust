@@ -55,6 +55,9 @@ pub struct ItemsGlue {
     templates: Option<HashMap<i32, ItemTemplate>>,
     /// Fenêtre du personnage (`Character_Status`) ouverte.
     pub show_character: bool,
+    /// Ensemble d'animations de l'arme portée par le joueur (`animation::weapon_anim_equip`) : les
+    /// armes ne font pas partie de `player.equipment` (pas encore dessinées en main).
+    pub weapon_equip: u32,
     /// Objet dont la destruction attend l'accord du joueur.
     destroy: Option<i32>,
     /// Pile à séparer et quantité choisie.
@@ -268,6 +271,14 @@ impl App {
             .filter_map(|i| Some(EquipmentView { item_id: i.id, template_id: i.template_id?, count: i.count.unwrap_or(1) as i16 }))
             .collect();
         worn.sort_by_key(|e| e.item_id);
+        let hands: Vec<EquipmentView> = self
+            .items
+            .values()
+            .filter(|i| i.status == Some(status::EQUIP))
+            .filter(|i| glue.template(assets, i.template_id).part.is_some_and(|p| HAND_PARTS.contains(&p)))
+            .filter_map(|i| Some(EquipmentView { item_id: i.id, template_id: i.template_id?, count: 1 }))
+            .collect();
+        glue.weapon_equip = crate::animation::weapon_anim_equip(crate::scene::equipped_weapon_type(assets, &hands));
         let Some(player) = self.player.as_ref() else { return };
         if player.cid == 0 || player.equipment == worn {
             return;

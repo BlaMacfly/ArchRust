@@ -337,6 +337,14 @@ impl App {
             }
         }
         // L'attaquant se tourne vers sa cible et joue son attaque ; la cible touchée accuse le coup.
+        // Comme Archonia, un monstre ou un autre personnage s'arrête au début de son coup : le
+        // serveur n'envoie pas d'arrêt, et sans cela un monstre surpris en promenade poursuivrait sa
+        // ronde à l'écran (et sa marche couperait l'animation d'attaque).
+        if !by_me {
+            if let Some(e) = self.entities.iter_mut().find(|e| e.cid == cid) {
+                e.destination = e.position;
+            }
+        }
         let target_pos = if on_me {
             self.player.as_ref().map(|p| p.position)
         } else {
@@ -463,12 +471,15 @@ impl App {
             return false;
         }
         // Joueur de la guilde adverse, pendant un combat de guildes.
-        if !self.combat_attackable(tid) && !self.guild.state.is_enemy(cid) {
+        if !self.combat_attackable(tid) && !self.guild.state.is_enemy(cid) && !self.pvp_target(cid) {
             self.ui.push_chat(format!("[combat] {name} ne peut pas être attaqué."));
             return false;
         }
         let Some(net) = &self.net else { return false };
-        net.send(Command::Combat(CombatCommand::Attack { target: cid, forced: true }));
+        // Attaque forcée (champ 6) : Ctrl enfoncé, comme Archonia (`FUN_1404e35d0`) ; nécessaire contre un joueur
+        // qui n'est pas déjà un ennemi.
+        let forced = self.addon_glue.modifiers.control_key();
+        net.send(Command::Combat(CombatCommand::Attack { target: cid, forced }));
         self.addons.set_target(Some(cid));
         if self.combat.attacking != Some(cid) {
             self.ui.push_chat(format!("[combat] Vous attaquez {name}."));
@@ -594,7 +605,7 @@ impl App {
         match self.entity_under_cursor() {
             Some(cid) if self.addons.target_cid() == Some(cid) => {
                 let tid = self.entities.iter().find(|e| e.cid == cid).map(|e| e.tid);
-                if tid.is_some_and(|t| self.combat_attackable(t)) || self.guild.state.is_enemy(cid) {
+                if tid.is_some_and(|t| self.combat_attackable(t)) || self.guild.state.is_enemy(cid) || self.pvp_target(cid) {
                     self.combat_attack(cid);
                     return true;
                 }
@@ -619,7 +630,7 @@ impl App {
         }
         if let Some(cid) = self.entity_under_cursor() {
             let tid = self.entities.iter().find(|e| e.cid == cid).map(|e| e.tid);
-            if tid.is_some_and(|t| self.combat_attackable(t)) || self.guild.state.is_enemy(cid) {
+            if tid.is_some_and(|t| self.combat_attackable(t)) || self.guild.state.is_enemy(cid) || self.pvp_target(cid) {
                 self.combat_attack(cid);
             } else if !self.npc_talk(cid) {
                 // PNJ : dialogue (voir `app_npc.rs`) ; autre personnage : il devient la cible.

@@ -102,6 +102,13 @@ pub struct CharacterStats {
     /// Vitesses de marche et de course (facteurs de statut 8 et 9), en dixièmes d'unité par seconde.
     pub walk_speed: Option<i32>,
     pub run_speed: Option<i32>,
+    /// Points de meurtrier (facteur de statut 11).
+    pub murderer: Option<i32>,
+    /// Statut criminel (champ 12 : 1 premier attaquant) et secondes restantes de ce statut (champ 25) et du délai
+    /// de meurtrier (champ 26).
+    pub criminal: Option<i8>,
+    pub criminal_left: Option<i64>,
+    pub murderer_left: Option<i64>,
 }
 
 /// Effet actif d'une compétence sur un personnage (AGPMSKILL op 4).
@@ -256,6 +263,8 @@ pub enum WorldEvent {
     Guild(crate::guild::GuildEvent),
     /// Potions de la barre et seuils de leur prise automatique, reçus à l'entrée en jeu.
     UiStatus(crate::ui_status::UiStatus),
+    /// Combat entre joueurs (AgpmPvP, voir `pvp`).
+    Pvp(crate::pvp::PvpEvent),
     /// Métamorphose d'un personnage (AGPMCHARACTER champ 18) : les portails la refusent
     /// (`Teleport_TransformChar`).
     Transformed { cid: i32, transformed: bool },
@@ -397,6 +406,7 @@ pub fn decode_character_stats(bytes: &[u8]) -> Option<CharacterStats> {
         skill_points: crate::skills::factors_dirt(bytes, crate::skills::DIRT_SKILL_POINT),
         walk_speed: int(&status, 8).map(|v| v as i32),
         run_speed: int(&status, 9).map(|v| v as i32),
+        murderer: int(&status, 11).map(|v| v as i32),
         ..Default::default()
     })
 }
@@ -415,6 +425,15 @@ fn character_stats(p: &Incoming) -> Option<CharacterStats> {
     }
     if let Some(pages) = p.get(23).and_then(Value::as_i64) {
         stats.get_or_insert_with(CharacterStats::default).bank_pages = Some(pages as i8);
+    }
+    if let Some(c) = p.get(12).and_then(Value::as_i64) {
+        stats.get_or_insert_with(CharacterStats::default).criminal = Some(c as i8);
+    }
+    if let Some(s) = p.get(25).and_then(Value::as_i64) {
+        stats.get_or_insert_with(CharacterStats::default).criminal_left = Some(s);
+    }
+    if let Some(s) = p.get(26).and_then(Value::as_i64) {
+        stats.get_or_insert_with(CharacterStats::default).murderer_left = Some(s);
     }
     stats
 }
@@ -535,6 +554,10 @@ pub fn translate(p: &Incoming) -> WorldEvent {
     // Sphère d'alchimie (voir `refinery`).
     if let Some(ev) = p.packet.as_ref().and_then(|packet| crate::refinery::translate(p.packet_type, &packet.values)) {
         return WorldEvent::Refinery(ev);
+    }
+    // Combat entre joueurs (voir `pvp`).
+    if let Some(ev) = p.packet.as_ref().and_then(|packet| crate::pvp::translate(p.packet_type, &packet.values)) {
+        return WorldEvent::Pvp(ev);
     }
     // Statut d'interface (voir `ui_status`).
     if let Some(st) = p.packet.as_ref().and_then(|packet| crate::ui_status::translate(p.packet_type, &packet.values)) {

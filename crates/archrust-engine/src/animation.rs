@@ -136,15 +136,54 @@ pub struct Variant {
     pub rate: u32,
 }
 
-/// Animations d'un TID, sans arme, par type.
+/// Ensemble d'animations (`équipement` de `ANIMATION_NAME`) d'une arme, d'après son `WeaponType`
+/// (ordre d'Archonia : 0 OneHand_Sword, 1 OneHand_Axe, 2 OneHand_Mace, 3 OneHand_Hammer, 4 à 7 les
+/// mêmes à deux mains, 8 TwoHand_Polearm, 9 TwoHand_Scythe, 10 Bow, 11 Crossbow, 14 Staff, 16 Wand,
+/// 17 Lance, 18 Katariya, 19 Chakram, 20 Standard, 21 Rapier, 22 Dagger, 23 RapierDagger, 24-25
+/// Chanon, 26-27 Zenon).
+///
+/// **Déduit des données**, la fonction d'Archonia qui fait cette conversion en jeu n'étant pas
+/// relevée : ensembles présents par classe (chevalier 1-5 et 8, archer et mage 1, 2 et 5, elfes 1,
+/// 5 et 6, swashbuckler 1, 4 et 8, scion 8 et 10) et armes de départ de chaque classe. Sans arme ou
+/// sans l'ensemble choisi : 0.
+pub fn weapon_anim_equip(weapon_type: Option<i64>) -> u32 {
+    match weapon_type {
+        Some(0 | 1) => 1,
+        Some(2 | 3) => 2,
+        Some(4 | 5) => 3,
+        Some(6 | 7) => 4,
+        Some(8 | 9) => 8,
+        Some(10 | 14 | 17 | 18 | 19 | 21) => 1,
+        Some(11 | 16) => 2,
+        Some(20) => 5,
+        Some(22) => 4,
+        Some(23 | 24 | 25) => 8,
+        Some(26 | 27) => 10,
+        _ => 0,
+    }
+}
+
+/// Animations d'un TID pour un ensemble d'arme, par type (celles de l'ensemble 0 pour un type que
+/// l'ensemble n'a pas).
 #[derive(Debug, Clone, Default)]
 pub struct AnimationSet {
     pub by_type: HashMap<u32, Vec<Variant>>,
 }
 
 impl AnimationSet {
-    /// Lit la section `[tid]` de `charactertemplateanimation.ini` (équipement 0 uniquement).
-    pub fn for_tid(assets: &Assets, tid: i32) -> AnimationSet {
+    /// Lit la section `[tid]` de `charactertemplateanimation.ini` pour l'ensemble `equip`, complété
+    /// par l'ensemble 0.
+    pub fn for_tid(assets: &Assets, tid: i32, equip: u32) -> AnimationSet {
+        let mut set = Self::for_equip(assets, tid, equip);
+        if equip != 0 {
+            for (t, v) in Self::for_equip(assets, tid, 0).by_type {
+                set.by_type.entry(t).or_insert(v);
+            }
+        }
+        set
+    }
+
+    fn for_equip(assets: &Assets, tid: i32, equip: u32) -> AnimationSet {
         let mut set = AnimationSet::default();
         let Ok(table) = assets.table("ini", "charactertemplateanimation.ini") else {
             return set;
@@ -171,7 +210,7 @@ impl AnimationSet {
             ) else {
                 continue;
             };
-            if e != 0 {
+            if e != equip {
                 continue;
             }
             if col.starts_with("ANIMATION_NAME") {
@@ -260,15 +299,19 @@ pub struct Animator {
     dead: bool,
     /// Identité des maillages animés, pour reconstruire l'animateur s'ils changent.
     pub signature: usize,
+    /// Ensemble d'animations de l'arme (voir [`weapon_anim_equip`]).
+    pub equip: u32,
 }
 
 impl Animator {
-    /// Animateur d'une entité, ou `None` si aucun de ses maillages n'est skinné.
+    /// Animateur d'une entité, ou `None` si aucun de ses maillages n'est skinné ; `equip` est
+    /// l'ensemble de l'arme portée (`weapon_anim_equip`).
     pub fn new(
         assets: &Assets,
         tid: i32,
         meshes: &[(Arc<Mesh>, glam::Mat4)],
         seed: u32,
+        equip: u32,
     ) -> Option<Animator> {
         let parts: Vec<_> = meshes
             .iter()
@@ -277,7 +320,7 @@ impl Animator {
         if parts.is_empty() {
             return None;
         }
-        let set = AnimationSet::for_tid(assets, tid);
+        let set = AnimationSet::for_tid(assets, tid, equip);
         if set.by_type.is_empty() {
             return None;
         }
@@ -293,6 +336,7 @@ impl Animator {
             action: false,
             dead: false,
             signature,
+            equip,
         };
         a.switch(assets, AnimType::Wait as u32);
         Some(a)
@@ -510,6 +554,20 @@ pub fn deform(binding: &SkinBinding, pose: &[HAnimSample]) -> Option<Vec<Vertex>
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Avec les données du client (`ARCHRUST_GAME_DIR`) : le chevalier (TID 96) à l'épée courte
+    /// (WeaponType 0) frappe avec l'ensemble 1, à mains nues avec l'ensemble 0 ; l'attente manquante
+    /// d'un ensemble vient de l'ensemble 0.
+    #[test]
+    fn animations_selon_l_arme() {
+        let Some(dir) = std::env::var_os("ARCHRUST_GAME_DIR") else { return };
+        let assets = Assets::new(Some(dir.into()), &[]);
+        assert_eq!(weapon_anim_equip(Some(0)), 1);
+        let attack = |e| AnimationSet::for_tid(&assets, 96, e).pick(AnimType::Attack as u32, 0.0).map(|v| v.file.clone());
+        assert_eq!(attack(0).as_deref(), Some("a0060300.ean"));
+        assert_eq!(attack(1).as_deref(), Some("a0060310.ean"));
+        assert!(AnimationSet::for_tid(&assets, 96, 1).by_type.contains_key(&(AnimType::Death as u32)));
+    }
 
     #[test]
     fn variants_are_weighted_by_rate() {

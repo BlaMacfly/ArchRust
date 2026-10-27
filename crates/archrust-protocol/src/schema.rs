@@ -106,6 +106,7 @@ pub mod packet_type {
     pub const STARTUP_ENCRYPTION: u8 = 0x48;
     pub const TITLE: u8 = 0x60;
     pub const RECONNECT: u8 = 0x63;
+    pub const PVP: u8 = 0x4a;
 }
 
 /// Schémas des paquets principaux.
@@ -332,6 +333,21 @@ pub mod main {
         f!(Int32),
         f!(Int32),
     ]);
+    // AgpmPvP (0x4A) — drapeaux 2, du serveur au client : opération, CID (code du message à l'op 18), cible,
+    // victoires (entier du message), défaites, mode, statut, octet de l'op 0, guilde (chaîne 1), nom (chaîne 2).
+    schema!(pub PVP = "AGPMPVP", T::PVP, 2, [
+        f!(Int8),
+        f!(Int32),
+        f!(Int32),
+        f!(Int32),
+        f!(Int32),
+        f!(Int8),
+        f!(Int8),
+        f!(Int8),
+        f!(Char, 33),
+        f!(Char, 49),
+    ]);
+
     // AgpmUIStatus (0x14) — drapeaux 2 : barre de raccourcis, potions et seuils de leur prise automatique.
     schema!(pub UI_STATUS = "AGPMUISTATUS", T::UI_STATUS, 2, [
         f!(Int8),        // 0 opération (0 envoi complet, 1 changement, 2 barre encodée, 3 casque)
@@ -460,6 +476,7 @@ pub mod main {
             T::EVENT_GUILD => EVENT_GUILD,
             T::GUILD_WAREHOUSE => GUILD_WAREHOUSE,
             T::UI_STATUS => UI_STATUS,
+            T::PVP => PVP,
             T::EVENT_QUEST => EVENT_QUEST,
             T::QUEST => QUEST,
             T::PARTY => PARTY,
