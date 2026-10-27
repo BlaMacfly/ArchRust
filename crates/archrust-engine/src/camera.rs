@@ -99,6 +99,16 @@ impl OrbitCamera {
         self.projection(aspect) * self.view()
     }
 
+    /// Matrice du rendu GPU, en profondeur inversée (près → 1, loin → 0) : avec un tampon
+    /// flottant, la précision reste fine jusqu'au loin. Avec la profondeur classique et `near` à
+    /// 10, deux surfaces d'une même pièce distantes de quelques centièmes d'unité (haut du
+    /// pantalon texturé en noir sous l'ourlet de la chemise, `b0000060.ecl`) n'étaient plus
+    /// départagées à quelques centaines d'unités : le noir clignotait. Le code CPU (clics,
+    /// projections à l'écran, AddOns) garde [`OrbitCamera::view_proj`].
+    pub fn render_view_proj(&self, aspect: f32) -> Mat4 {
+        Mat4::perspective_rh(self.fov_y, aspect.max(0.01), self.far, self.near) * self.view()
+    }
+
     pub fn rotate(&mut self, dx: f32, dy: f32) {
         self.yaw += dx * 0.005;
         self.pitch = (self.pitch + dy * 0.005).clamp(-1.2, 1.5);
@@ -145,5 +155,19 @@ mod tests {
         }
         assert!(cam.collision.is_infinite());
         assert!((cam.eye() - cam.target).length() > 1499.0);
+    }
+
+    #[test]
+    fn render_depth_is_reversed() {
+        let cam = OrbitCamera::default();
+        let dir = (cam.target - cam.eye()).normalize();
+        let depth = |m: Mat4, d: f32| m.project_point3(cam.eye() + dir * d).z;
+        let (gpu, cpu) = (cam.render_view_proj(1.5), cam.view_proj(1.5));
+        assert!((depth(gpu, cam.near) - 1.0).abs() < 1e-4);
+        assert!(depth(gpu, cam.far).abs() < 1e-4);
+        // Deux surfaces à 0,05 unité l'une de l'autre, à 1600 : distinctes en profondeur inversée.
+        assert!(depth(gpu, 1600.0) > depth(gpu, 1600.05));
+        // Le code CPU garde la convention classique (près → 0).
+        assert!(depth(cpu, cam.near).abs() < 1e-4);
     }
 }

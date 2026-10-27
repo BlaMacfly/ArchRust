@@ -33,7 +33,7 @@ pub mod outcome {
     pub const BLOCK: i8 = 9;
 }
 
-/// Bits du type de modèle (`CharacterType` de `CharacterTemplatePublic.ini`) qui rendent un
+/// Bits du type de personnage (`Type` de `CharacterDataTable.txt`) qui rendent un
 /// personnage attaquable (0x10000) et ciblable (0x20000) ; les deux sont exigés.
 pub const ATTACKABLE_TYPE: u32 = 0x10000 | 0x20000;
 

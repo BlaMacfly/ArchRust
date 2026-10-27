@@ -270,6 +270,30 @@ fn load_data(assets: &Assets) -> NpcData {
 }
 
 impl NpcGlue {
+    /// Échap : ferme les fenêtres des PNJ (dialogue, boutique, banque, quêtes, journal, saisies) ;
+    /// rend `true` si l'une était ouverte.
+    pub(super) fn close_windows(&mut self) -> bool {
+        let open = self.dialog.is_some()
+            || self.shop.is_some()
+            || self.bank.is_some()
+            || self.quest_npc.is_some()
+            || self.show_journal
+            || self.buy.is_some()
+            || self.sell.is_some()
+            || self.money.is_some()
+            || self.buy_bank;
+        self.dialog = None;
+        self.shop = None;
+        self.bank = None;
+        self.quest_npc = None;
+        self.show_journal = false;
+        self.buy = None;
+        self.sell = None;
+        self.money = None;
+        self.buy_bank = false;
+        open
+    }
+
     fn data(&mut self, assets: &Assets) -> &NpcData {
         self.data.get_or_insert_with(|| load_data(assets))
     }

@@ -59,6 +59,57 @@ pub fn build_clump_meshes(
     assets: &Assets,
     clump: &Arc<Clump>,
 ) -> Vec<(Arc<Mesh>, Mat4)> {
+    build_clump_pieces(renderer, assets, clump)
+        .into_iter()
+        .map(|(mesh, model, _)| (mesh, model))
+        .collect()
+}
+
+/// Partie du corps d'une pièce skinnée d'après les os qui la portent (`Part` d'ItemTemplateAll :
+/// 2 corps, 5 mains, 6 jambes, 7 pieds) : les atomics ne portent pas leur partie, et leur ordre
+/// change d'un modèle à l'autre. Mains : os 101/102 et doigts (1004–1018, 1058–1072) ; pieds :
+/// 103/104 et 1024/1078 ; jambes : plus de poids sur les cuisses (41/51) que sur les bras (21, 22,
+/// 31, 32) ; corps : le reste. `None` pour une pièce sans peau.
+pub fn atomic_part(clump: &Clump, geometry: usize) -> Option<i64> {
+    let skin = clump.geometries.get(geometry)?.skin.as_ref()?;
+    let nodes: Vec<u32> = clump
+        .frames
+        .iter()
+        .find_map(|f| f.hanim.as_ref().filter(|h| !h.nodes.is_empty()))
+        .map(|h| h.nodes.iter().map(|n| n.id).collect())?;
+    let (mut hands, mut feet, mut thighs, mut arms) = (0.0f32, 0.0f32, 0.0f32, 0.0f32);
+    for (ix, ws) in skin.indices.iter().zip(&skin.weights) {
+        for lane in 0..4 {
+            let w = ws[lane];
+            if w <= 0.0 {
+                continue;
+            }
+            match nodes.get(ix[lane] as usize).copied().unwrap_or(0) {
+                101 | 102 | 1004..=1018 | 1058..=1072 => hands += w,
+                103 | 104 | 1024 | 1078 => feet += w,
+                41 | 51 => thighs += w,
+                21 | 22 | 31 | 32 => arms += w,
+                _ => {}
+            }
+        }
+    }
+    Some(if hands > 0.0 {
+        5
+    } else if feet > 0.0 {
+        7
+    } else if thighs > arms {
+        6
+    } else {
+        2
+    })
+}
+
+/// Comme `build_clump_meshes`, avec la partie du corps de chaque pièce (`atomic_part`).
+pub fn build_clump_pieces(
+    renderer: &mut Renderer,
+    assets: &Assets,
+    clump: &Arc<Clump>,
+) -> Vec<(Arc<Mesh>, Mat4, Option<i64>)> {
     let world = clump.world_matrices();
     let has_hierarchy = clump
         .frames
@@ -84,9 +135,19 @@ pub fn build_clump_meshes(
             .get(atomic.frame as usize)
             .copied()
             .unwrap_or(Mat4::IDENTITY);
-        out.push((Arc::new(mesh), model));
+        out.push((Arc::new(mesh), model, atomic_part(clump, atomic.geometry as usize)));
     }
     out
+}
+
+/// Pièces d'un modèle avec leur partie du corps ; un modèle remplacé par un patch glTF n'en a pas.
+fn model_pieces(renderer: &mut Renderer, assets: &Assets, rel_dir: &str, file: &str) -> Result<Vec<(Arc<Mesh>, Mat4, Option<i64>)>> {
+    let key = format!("{rel_dir}/{file}");
+    if let Some(meshes) = patched_model_meshes(renderer, assets, &key) {
+        return Ok(meshes.into_iter().map(|(m, t)| (m, t, None)).collect());
+    }
+    let clump = assets.clump(rel_dir, file)?;
+    Ok(build_clump_pieces(renderer, assets, &clump))
 }
 
 /// Maillage d'une géométrie : les triangles sont regroupés par matériau.
@@ -426,6 +487,14 @@ impl Speeds {
 }
 
 /// Nom du clump de modèle associé à un TID d'objet (colonne `BASE_DFF` de ItemTemplateAll.ini).
+/// Partie du corps d'un objet (colonne `Part` d'ItemTemplateAll.ini).
+pub fn item_part_for_tid(assets: &Assets, tid: i32) -> Option<i64> {
+    let table = assets.table("ini", "ItemTemplateAll.ini").ok()?;
+    let header = table.section("")?;
+    let column = header.entries.iter().find(|(_, name)| name.eq_ignore_ascii_case("Part")).map(|(index, _)| index.as_str())?;
+    table.section(&tid.to_string())?.get(column)?.trim().parse().ok()
+}
+
 pub fn item_model_for_tid(assets: &Assets, tid: i32) -> Option<String> {
     if tid <= 0 {
         return None;
@@ -469,17 +538,34 @@ pub fn entity_meshes_with_equipment(
     equipment: &[EquipmentView],
     fallback: &Arc<Mesh>,
 ) -> Result<Vec<(Arc<Mesh>, Mat4)>> {
-    let mut meshes = entity_meshes(renderer, assets, tid, head, fallback)?;
+    let mut meshes = entity_pieces(renderer, assets, tid, head, fallback)?;
     for item in equipment {
         let Some(file) = item_model_for_tid(assets, item.template_id) else {
             continue;
         };
-        match model_meshes(renderer, assets, "character", &file) {
-            Ok(part) => meshes.extend(part),
-            Err(error) => log::debug!("objet TID {} (modèle {file}) : {error:#}", item.template_id),
+        let pieces = match model_pieces(renderer, assets, "character", &file) {
+            Ok(p) => p,
+            Err(error) => {
+                log::debug!("objet TID {} (modèle {file}) : {error:#}", item.template_id);
+                continue;
+            }
+        };
+        // Une armure (corps, mains, jambes, pieds) partage son modèle avec toute sa panoplie : comme
+        // Archonia, seule la pièce de sa partie est gardée, et elle remplace la pièce de cette partie
+        // (vêtement par défaut ou autre objet). Tout ajouter superposait les pièces, qui clignotaient.
+        let part = item_part_for_tid(assets, item.template_id).filter(|p| matches!(p, 2 | 5 | 6 | 7));
+        let kept: Vec<_> = match part {
+            Some(p) => pieces.iter().filter(|(_, _, q)| *q == Some(p)).cloned().collect(),
+            None => Vec::new(),
+        };
+        if let (Some(p), false) = (part, kept.is_empty()) {
+            meshes.retain(|(_, _, q)| *q != Some(p));
+            meshes.extend(kept);
+        } else {
+            meshes.extend(pieces);
         }
     }
-    Ok(meshes)
+    Ok(meshes.into_iter().map(|(m, t, _)| (m, t)).collect())
 }
 
 /// Angle (degrés) qui tourne un personnage de `from` vers `to`, comme `FUN_14016bf60`
@@ -633,13 +719,24 @@ pub fn entity_meshes(
     head: Head,
     fallback: &Arc<Mesh>,
 ) -> Result<Vec<(Arc<Mesh>, Mat4)>> {
+    Ok(entity_pieces(renderer, assets, tid, head, fallback)?.into_iter().map(|(m, t, _)| (m, t)).collect())
+}
+
+/// Comme `entity_meshes`, avec la partie du corps de chaque pièce (vêtements par défaut).
+fn entity_pieces(
+    renderer: &mut Renderer,
+    assets: &Assets,
+    tid: i32,
+    head: Head,
+    fallback: &Arc<Mesh>,
+) -> Result<Vec<(Arc<Mesh>, Mat4, Option<i64>)>> {
     let files = models_for_tid(assets, tid);
     if files.is_empty() {
         log::warn!("TID {tid} : aucun modèle dans charactertemplateclient.ini");
     }
     let mut meshes = Vec::new();
     for file in &files {
-        match model_meshes(renderer, assets, "character", file) {
+        match model_pieces(renderer, assets, "character", file) {
             Ok(part) => {
                 if part.is_empty() {
                     log::debug!("TID {tid} : {file} sans géométrie");
@@ -653,13 +750,13 @@ pub fn entity_meshes(
     if !meshes.is_empty() {
         for (dir, file) in default_head_files(assets, tid, head) {
             match model_meshes(renderer, assets, dir, &file) {
-                Ok(part) => meshes.extend(part),
+                Ok(part) => meshes.extend(part.into_iter().map(|(m, t)| (m, t, None))),
                 Err(e) => log::warn!("TID {tid} : tête {dir}/{file} : {e:#}"),
             }
         }
     }
     if meshes.is_empty() {
-        meshes.push((fallback.clone(), Mat4::IDENTITY));
+        meshes.push((fallback.clone(), Mat4::IDENTITY, None));
     }
     Ok(meshes)
 }

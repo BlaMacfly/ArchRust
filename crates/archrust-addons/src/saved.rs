@@ -18,16 +18,17 @@ pub fn serialize_value(v: &Value, indent: usize, out: &mut String) -> mlua::Resu
             }
         }
         Value::String(s) => {
+            // Texte UTF-8 recopié tel quel ; sinon les octets ≥ 128 en échappement décimal. Les
+            // pousser un à un comme `char` les réencodait à chaque sauvegarde (é → Ã© → ÃƒÂ©…) :
+            // la chaîne doublait à chaque sortie du jeu.
+            let bytes = s.as_bytes();
             out.push('"');
-            for b in s.as_bytes().iter() {
-                match *b {
-                    b'"' => out.push_str("\\\""),
-                    b'\\' => out.push_str("\\\\"),
-                    b'\n' => out.push_str("\\n"),
-                    b'\r' => out.push_str("\\r"),
-                    0..=31 | 127 => write!(out, "\\{b:03}").unwrap(),
-                    c => out.push(c as char),
-                }
+            match std::str::from_utf8(&bytes) {
+                Ok(text) => text.chars().for_each(|c| push_escaped(c, out)),
+                Err(_) => bytes.iter().for_each(|&b| match b {
+                    128.. => write!(out, "\\{b}").unwrap(),
+                    _ => push_escaped(b as char, out),
+                }),
             }
             out.push('"');
         }
@@ -35,6 +36,18 @@ pub fn serialize_value(v: &Value, indent: usize, out: &mut String) -> mlua::Resu
         _ => return Ok(false),
     }
     Ok(true)
+}
+
+/// Un caractère dans un littéral Lua entre guillemets.
+fn push_escaped(c: char, out: &mut String) {
+    match c {
+        '"' => out.push_str("\\\""),
+        '\\' => out.push_str("\\\\"),
+        '\n' => out.push_str("\\n"),
+        '\r' => out.push_str("\\r"),
+        '\0'..='\x1f' | '\x7f' => write!(out, "\\{:03}", c as u32).unwrap(),
+        c => out.push(c),
+    }
 }
 
 fn serialize_table(t: &Table, indent: usize, out: &mut String) -> mlua::Result<()> {
@@ -145,5 +158,25 @@ mod tests {
         assert_eq!(list.get::<f64>(2).unwrap(), 2.5);
         let ky: Table = v.get("k y").unwrap();
         assert_eq!(ky.get::<String>("nested").unwrap(), "x");
+    }
+
+    #[test]
+    fn accents_stables() {
+        // Sauvegarder puis relire plusieurs fois ne doit pas réencoder les accents.
+        let lua = Lua::new();
+        lua.load("DB = { s = \"Vitesse de déplacement\", b = \"\\200\\255x\" }").exec().unwrap();
+        let first = dump_globals(&lua, &["DB".into()]).unwrap();
+        assert!(first.contains("\"Vitesse de déplacement\""), "{first}");
+        let mut src = first.clone();
+        for _ in 0..3 {
+            let next = Lua::new();
+            next.load(&src).exec().unwrap();
+            src = dump_globals(&next, &["DB".into()]).unwrap();
+        }
+        assert_eq!(src, first);
+        let last = Lua::new();
+        last.load(&src).exec().unwrap();
+        let db: Table = last.globals().get("DB").unwrap();
+        assert_eq!(db.get::<mlua::String>("b").unwrap().as_bytes().to_vec(), vec![200, 255, b'x']);
     }
 }

@@ -375,6 +375,7 @@ impl WorldObjects {
                     mesh: mesh.clone(),
                     model: *model,
                     tint: [1.0; 4],
+                    character: false,
                 });
             }
         }

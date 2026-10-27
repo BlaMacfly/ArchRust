@@ -118,6 +118,9 @@ pub struct DrawItem {
     pub mesh: Arc<Mesh>,
     pub model: Mat4,
     pub tint: [f32; 4],
+    /// Pièce d'un personnage ou d'une créature : faces arrière cachées (voir `pipeline_culled`), qu'elle
+    /// soit skinnée ou rigide (chapeau, arme, ailes accrochés à un os).
+    pub character: bool,
 }
 
 pub struct Renderer {
@@ -285,7 +288,7 @@ impl Renderer {
             depth_stencil: Some(wgpu::DepthStencilState {
                 format: wgpu::TextureFormat::Depth32Float,
                 depth_write_enabled: true,
-                depth_compare: wgpu::CompareFunction::Less,
+                depth_compare: wgpu::CompareFunction::Greater,
                 stencil: Default::default(),
                 bias: Default::default(),
             }),
@@ -354,7 +357,7 @@ impl Renderer {
             depth_stencil: Some(wgpu::DepthStencilState {
                 format: wgpu::TextureFormat::Depth32Float,
                 depth_write_enabled: true,
-                depth_compare: wgpu::CompareFunction::Less,
+                depth_compare: wgpu::CompareFunction::Greater,
                 stencil: Default::default(),
                 bias: Default::default(),
             }),
@@ -716,8 +719,9 @@ impl Renderer {
                 })],
                 depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
                     view: &self.depth,
+                    // Profondeur inversée (`OrbitCamera::render_view_proj`) : 0 = le plus loin.
                     depth_ops: Some(wgpu::Operations {
-                        load: wgpu::LoadOp::Clear(1.0),
+                        load: wgpu::LoadOp::Clear(0.0),
                         store: wgpu::StoreOp::Store,
                     }),
                     stencil_ops: None,
@@ -744,8 +748,10 @@ impl Renderer {
             let mut culled = false;
             pass.set_pipeline(&self.pipeline);
             for (i, item) in items.iter().enumerate() {
-                // Maillages skinnés : faces arrière cachées ; le reste reste recto-verso.
-                let want = item.mesh.skin.is_some();
+                // Personnages et créatures (pièces skinnées ou rigides) : faces arrière cachées ; le décor
+                // reste recto-verso. Les pièces rigides accrochées aux os (chapeau, manteau, ailes)
+                // clignotaient en noir comme les pièces skinnées avant elles.
+                let want = item.character || item.mesh.skin.is_some();
                 if want != culled {
                     culled = want;
                     pass.set_pipeline(if culled { &self.pipeline_culled } else { &self.pipeline });

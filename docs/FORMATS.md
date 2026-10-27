@@ -689,16 +689,38 @@ Les vérifications :
   sur des zones noires de la texture, se disputait la profondeur avec les faces avant.
 
 Corrections :
-- **Culling** : pipeline `lit-culled` (faces arrière cachées, ordre trigonométrique) pour les
-  maillages skinnés. Les objets du monde restent recto-verso, leur mode d'Archonia n'étant pas
-  relevé.
+- **Culling** : pipeline `lit-culled` (faces arrière cachées, ordre trigonométrique) pour toutes les
+  pièces des personnages et des créatures (`DrawItem::character`), skinnées ou rigides : chapeau,
+  manteau, armes ou ailes accrochés à un os clignotaient encore en noir (2026-10-26, signalé sur
+  le personnage du joueur et sur un PNJ ailé ; Thorn vérifié complet sous quatre angles). Les
+  objets du monde restent recto-verso, leur mode d'Archonia n'étant pas relevé.
+- **Superposition des pièces d'armure** (2026-10-26, cause principale du clignotement restant) : les
+  pièces d'une panoplie partagent un même modèle (`BASE_DFF`, ex. `d0000150.ecl` pour la cuirasse,
+  les jambières et les bottes Reinforced Alloy), qui contient toutes les pièces (corps, jambes,
+  mains, pieds) ; seuls `Part` et `TEXTURE` changent. ArchRust ajoutait le modèle entier par objet,
+  par-dessus les vêtements par défaut (`DEFAULT_ARMOUR_DFF`) : plusieurs surfaces au même endroit se
+  disputaient la profondeur. Désormais (`scene::entity_meshes_with_equipment`), une armure de partie
+  2, 5, 6 ou 7 ne garde que sa pièce et remplace la pièce de cette partie. Les atomics ne portant pas
+  leur partie (extensions : 0x112 LOD, 0x1f pipeline, 0xfffff001), elle est déduite des os de la
+  peau (`scene::atomic_part`) : mains 101/102 et doigts, pieds 103/104 et 1024/1078, jambes si les
+  cuisses 41/51 pèsent plus que les bras 21/22/31/32, corps sinon. Reste à faire : la texture propre
+  à chaque pièce (`TEXTURE` ≠ `BASE_DFF`).
 - **Poids** renormalisés dans `animation::deform`.
 - **Normale dégénérée** : `deform` garde la normale de bind, et le shader remplace une normale
   nulle ou NaN (`safe_normal`), qui noircissait toute la couleur.
-
-Après correction, il n'y a plus de taches en escalier. Il reste parfois une encoche sombre au
-milieu de la ceinture quand l'ourlet se soulève (1 image sur 8). Elle n'a pas pu être comparée
-avec Archonia, qui demande les droits administrateur (aucune saisie simulée possible).
+- **Profondeur inversée** (2026-10-27, encoche noire de la ceinture) : dans `b0000060.ecl`
+  (vêtements par défaut, TID 96), le haut du pantalon est plaqué sur une zone noire opaque de
+  `b00060aa` (DXT3, aucun texel transparent) et passe juste sous l'ourlet kaki et la ceinture de
+  la même pièce. `examples/gap.rs` mesure l'écart sur le cycle de course : 0,3 à 1,3 unité en pose
+  de bind, jusqu'à 0,03 en mouvement. Avec `near` = 10 et une profondeur classique, ces couches
+  n'étaient plus départagées à quelques centaines d'unités : un triangle noir surgissait dans le
+  dos à certaines poses (filmé à 60 images/s : environ une image sur trois pendant la course,
+  aussi de près, en tournant la caméra). Le rendu utilise désormais `render_view_proj` (near et
+  far échangés), un tampon vidé à 0 et le test `Greater`. Le code CPU (clics, cadres, AddOns)
+  garde `view_proj` et sa convention classique. Même film après correction : plus aucun
+  triangle noir sur 48 images de course consécutives ni sur le plan rapproché. Deux triangles
+  passent réellement devant l'ourlet (-0,9 unité) sur quelques poses : c'est la géométrie
+  d'origine, non vue à l'écran.
 
 **Rendu** — les géométries skinnées gardent leur liaison au squelette ; le moteur rejoue
 l'attente (variantes tirées selon les taux à chaque fin de cycle) ou la course quand l'entité se

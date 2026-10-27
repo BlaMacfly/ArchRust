@@ -335,6 +335,7 @@ impl Terrain {
                 mesh: m.clone(),
                 model: *model,
                 tint: [1.0; 4],
+                character: false,
             })
             .collect()
     }

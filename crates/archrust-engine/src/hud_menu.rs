@@ -40,6 +40,17 @@ const MENUS: [(&str, &str, &[(&str, MenuUi)]); 5] = [
 /// Noms des fenêtres de liste à charger avec le reste de l'interface.
 pub(super) const MENU_WINDOWS: [&str; 5] = ["UI_MainMenuCharacter", "UI_MainMenuCommunity", "UI_MainMenuWorld", "UI_MainMenuChantra", "UI_MainMenuOptions"];
 
+/// Échap sans fenêtre ouverte : liste du bouton `MainBtnOption` (`UI_MainMenuOptions`), ou la ferme.
+pub fn toggle_options_menu(hud: &mut HudState) {
+    const LIST: &str = "UI_MainMenuOptions";
+    hud.main_menu = if hud.main_menu.as_deref() == Some(LIST) { None } else { Some(LIST.to_string()) };
+}
+
+/// Vrai si une liste de menu principal est ouverte.
+pub fn main_menu_open(hud: &HudState) -> bool {
+    hud.main_menu.is_some()
+}
+
 /// Boutons principaux (cliquables, survol et appui) et liste ouverte ; les choix s'ajoutent à
 /// `hud.menu_requests`, que le moteur traite à l'image suivante.
 pub fn draw_main_menu(ctx: &egui::Context, hud: &mut HudState, assets: &Assets) {

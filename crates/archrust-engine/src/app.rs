@@ -420,12 +420,22 @@ impl App {
         let mut attrs = Window::default_attributes()
             .with_title(&self.config.title)
             .with_inner_size(winit::dpi::LogicalSize::new(1280.0, 720.0));
-        // Icône de fenêtre : le logo officiel d'ArchRust (64×64), intégré à l'exécutable.
+        // Icône de fenêtre : le logo officiel d'ArchRust (64×64), intégré à l'exécutable. Sous
+        // Windows, winit n'en fait que la petite icône (titre) : la barre des tâches et Alt+Tab
+        // lisent la grande, posée à part.
         const WINDOW_ICON_PNG: &[u8] = include_bytes!("../assets/window-icon.png");
         if let Ok(img) = image::load_from_memory(WINDOW_ICON_PNG) {
             let img = img.to_rgba8();
             let (w, h) = img.dimensions();
-            if let Ok(icon) = winit::window::Icon::from_rgba(img.into_raw(), w, h) {
+            let rgba = img.into_raw();
+            #[cfg(windows)]
+            {
+                use winit::platform::windows::WindowAttributesExtWindows;
+                if let Ok(icon) = winit::window::Icon::from_rgba(rgba.clone(), w, h) {
+                    attrs = attrs.with_taskbar_icon(Some(icon));
+                }
+            }
+            if let Ok(icon) = winit::window::Icon::from_rgba(rgba, w, h) {
                 attrs = attrs.with_window_icon(Some(icon));
             }
         }
@@ -1911,7 +1921,7 @@ impl App {
         (e.destination.x - e.position.x).abs() > 1.0 || (e.destination.z - e.position.z).abs() > 1.0
     }
 
-    /// Animation des personnages : attente ou course selon le déplacement, sommets réécrits à
+    /// Animation des personnages : attente, marche ou course selon le déplacement, sommets réécrits à
     /// 30 Hz au plus, seulement près de la caméra. Les animateurs sont reconstruits quand les
     /// maillages d'une entité changent (équipement, modèle).
     fn animate(&mut self, dt: f32) {
@@ -1928,7 +1938,7 @@ impl App {
                 self.player_animator = Some((sig, a));
             }
             if let Some((_, Some(a))) = &mut self.player_animator {
-                a.update(&self.assets, &gpu.renderer, dt, Self::is_moving(p), 30.0);
+                a.update(&self.assets, &gpu.renderer, dt, Self::is_moving(p), p.speeds.fast, 30.0);
             }
         }
         self.animators
@@ -1944,7 +1954,7 @@ impl App {
             }
             let near = (e.position - focus).length() < Self::ANIMATION_RANGE;
             if let (Some(a), true) = (&mut slot.1, near) {
-                a.update(&self.assets, &gpu.renderer, dt, Self::is_moving(e), 30.0);
+                a.update(&self.assets, &gpu.renderer, dt, Self::is_moving(e), e.speeds.fast, 30.0);
             }
         }
     }
@@ -1952,6 +1962,29 @@ impl App {
     /// Clic gauche au sol : rayon caméra → terrain, destination du joueur et paquet 0x40.
     /// Personnage sous le curseur (le plus proche de la caméra), d'après sa silhouette projetée :
     /// des pieds à environ 1,8 m au-dessus, sur une largeur de la moitié de cette hauteur.
+    /// Échap : ferme la console, puis les fenêtres ouvertes ; sans rien à fermer, ouvre le menu
+    /// Options d'Archonia (`UI_MainMenuOptions`) en jeu, la fenêtre des options ailleurs. Les
+    /// options, les menus et les boîtes egui se ferment d'eux-mêmes sur la touche.
+    fn escape_key(&mut self) {
+        if self.ui.console_open {
+            self.ui.console_open = false;
+            return;
+        }
+        if self.ui.show_options || crate::hud::main_menu_open(&self.hud) {
+            return;
+        }
+        if self.phase == Phase::InWorld {
+            let mut closed = self.npc.close_windows();
+            for open in [&mut self.ui.show_inventory, &mut self.item_ui.show_character, &mut self.skills.show_book] {
+                closed |= std::mem::take(open);
+            }
+            if closed {
+                return;
+            }
+        }
+        self.ui.escape_open = true;
+    }
+
     /// Choix des menus principaux d'Archonia (`hud_menu.rs`) : mêmes effets que les raccourcis.
     fn main_menu_frame(&mut self) {
         for m in std::mem::take(&mut self.hud.menu_requests) {
@@ -2379,6 +2412,14 @@ impl App {
                     );
                 }
             }
+            // Échap sans fenêtre à fermer (voir `escape_key`).
+            if std::mem::take(&mut self.ui.escape_open) {
+                if phase == Phase::InWorld {
+                    crate::hud::toggle_options_menu(&mut self.hud);
+                } else {
+                    self.ui.show_options = true;
+                }
+            }
             // AddOn activé ou désactivé dans les Options : enregistré, puis interface rechargée en jeu.
             if let Some((name, on)) = self.ui.addon_toggle.take() {
                 match archrust_addons::manager::set_addon_enabled(&self.config.saved_dir, &name, on) {
@@ -2448,6 +2489,7 @@ impl App {
                     self.camera.target.z,
                 )),
                 tint: [1.0; 4],
+                character: false,
             });
         }
         // L'aperçu (`--preview`) est posé à l'origine, comme le personnage local du mode sans client.
@@ -2456,6 +2498,7 @@ impl App {
                 mesh: mesh.clone(),
                 model: *local,
                 tint: [1.0; 4],
+                character: true,
             });
         }
         if let Some(p) = &self.player {
@@ -2464,6 +2507,7 @@ impl App {
                     mesh: mesh.clone(),
                     model: p.model_matrix() * *local,
                     tint: self.addons.unit_tint(p.cid).unwrap_or([1.0; 4]),
+                    character: true,
                 });
             }
         }
@@ -2479,11 +2523,12 @@ impl App {
                     mesh: mesh.clone(),
                     model: e.model_matrix() * *local,
                     tint: self.addons.unit_tint(e.cid).unwrap_or([1.0; 4]),
+                    character: true,
                 });
             }
         }
         items.extend(loot_items);
-        let view_proj = self.camera.view_proj(gpu.renderer.aspect());
+        let view_proj = self.camera.render_view_proj(gpu.renderer.aspect());
         let eye = self.camera.eye();
         if let Some((_, after)) = &self.config.screenshot {
             if !self.screenshot_done && self.started.elapsed().as_secs_f32() >= *after {
@@ -2705,20 +2750,13 @@ impl ApplicationHandler for App {
                     PhysicalKey::Code(KeyCode::Backquote) if down && event.repeat == false => {
                         self.ui.console_open = !self.ui.console_open
                     }
-                    // Échap : ferme la console ou les options, sinon ouvre les options.
                     // F : attaquer la cible ; Espace : ramasser (« Collect item », DIK 57) — `app_combat.rs`.
                     PhysicalKey::Code(code @ (KeyCode::KeyF | KeyCode::Space))
                         if down && !event.repeat && self.phase == Phase::InWorld =>
                     {
                         self.combat_key(code);
                     }
-                    PhysicalKey::Code(KeyCode::Escape) if down && !event.repeat => {
-                        if self.ui.console_open {
-                            self.ui.console_open = false;
-                        } else {
-                            self.ui.show_options = !self.ui.show_options;
-                        }
-                    }
+                    PhysicalKey::Code(KeyCode::Escape) if down && !event.repeat => self.escape_key(),
                     _ => {}
                 }
             }

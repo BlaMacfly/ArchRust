@@ -43,6 +43,9 @@ pub struct UiState {
     /// Dernier joueur qui nous a chuchoté (`/r`).
     pub last_whisper: Option<String>,
     pub console_open: bool,
+    /// Échap pressé sans fenêtre à fermer : menu (en jeu) ou options, ouverts après la passe egui
+    /// qui voit la touche (sinon la fenêtre se refermerait aussitôt sur ce même Échap).
+    pub escape_open: bool,
     pub console_input: String,
     pub show_addons: bool,
     pub show_entities: bool,
@@ -116,6 +119,7 @@ impl Default for UiState {
             alert: None,
             chat_scroll: 0,
             chat_focus: false,
+            escape_open: false,
             whisper_target: None,
             last_whisper: None,
             console_open: false,

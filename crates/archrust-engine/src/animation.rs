@@ -333,19 +333,21 @@ impl Animator {
     }
 
     /// Avance l'animation de `dt` et réécrit les sommets si nécessaire (au plus `max_hz` fois par
-    /// seconde). `moving` choisit la course, sinon l'attente.
+    /// seconde). `moving` choisit le déplacement (la course si `fast`, drapeau 0x10, sinon la marche),
+    /// sinon l'attente.
     pub fn update(
         &mut self,
         assets: &Assets,
         renderer: &Renderer,
         dt: f32,
         moving: bool,
+        fast: bool,
         max_hz: f32,
     ) {
-        let wanted = if moving {
-            AnimType::Run
-        } else {
-            AnimType::Wait
+        let wanted = match (moving, fast) {
+            (true, true) => AnimType::Run,
+            (true, false) => AnimType::Walk,
+            (false, _) => AnimType::Wait,
         } as u32;
         // Un clip ponctuel se termine à sa fin, ou dès que le personnage se remet en marche.
         if self.action

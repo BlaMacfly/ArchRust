@@ -21,6 +21,9 @@ use crate::render::{DrawItem, Mesh};
 use crate::scene::{box_mesh, build_clump_meshes, item_name_for_tid, patched_model_meshes, turn_towards};
 use crate::ui::UiState;
 use archrust_netclient::combat::{outcome, CombatCommand, GroundItem, ATTACKABLE_TYPE};
+
+/// Bit « joueur » du type de personnage.
+const TYPE_PC: u32 = 0x1;
 use archrust_netclient::{Command, WorldEvent};
 use archrust_protocol::schema::action_status;
 use egui::{Align2, Color32, FontId, Pos2, Vec2};
@@ -64,8 +67,8 @@ pub struct CombatGlue {
     requested: HashMap<i32, Instant>,
     /// Position du curseur à l'appui du bouton droit (un clic sans glisser attaque).
     right_press: Option<(f64, f64)>,
-    /// `CharacterType` par TID (`CharacterTemplatePublic.ini`).
-    types: HashMap<i32, u32>,
+    /// Type de personnage par TID (`CharacterDataTable.txt`), lu au premier besoin.
+    types: Option<HashMap<i32, u32>>,
 }
 
 /// Ce que la fenêtre egui dessine : textes projetés à l'écran (points egui).
@@ -77,19 +80,22 @@ pub struct CombatView {
 }
 
 /// Type de modèle d'un TID (`CharacterType`), 0 s'il est inconnu.
-fn character_type(assets: &Assets, tid: i32) -> u32 {
-    let Ok(table) = assets.table("ini", "CharacterTemplatePublic.ini") else {
-        return 0;
+/// Types de personnage par TID : colonne `Type` de `ini/CharacterDataTable.txt`, que charge Archonia
+/// (`CharacterType` de `CharacterTemplatePublic.ini` vaut 0x30000 pour tous les modèles). 0x1 joueur,
+/// 0x2 PNJ, 0x4 monstre, 0x8 créature d'ambiance, plus les bits de `ATTACKABLE_TYPE`.
+fn character_types(assets: &Assets) -> HashMap<i32, u32> {
+    let text = super::npc_glue::client_text_in(assets, "ini", "CharacterDataTable.txt");
+    let mut lines = text.lines();
+    let header: Vec<&str> = lines.next().unwrap_or_default().split('\t').map(str::trim).collect();
+    let (Some(tid), Some(ty)) = (header.iter().position(|h| h.eq_ignore_ascii_case("TID")), header.iter().position(|h| h.eq_ignore_ascii_case("Type"))) else {
+        return HashMap::new();
     };
-    let column = table.section("").and_then(|h| {
-        h.entries
-            .iter()
-            .find(|(_, v)| v.eq_ignore_ascii_case("CharacterType"))
-            .map(|(k, _)| k.clone())
-    });
-    column
-        .and_then(|c| table.section(&tid.to_string())?.get(&c)?.trim().parse::<i64>().ok())
-        .unwrap_or(0) as u32
+    lines
+        .filter_map(|l| {
+            let cols: Vec<&str> = l.split('\t').collect();
+            Some((cols.get(tid)?.trim().parse().ok()?, cols.get(ty)?.trim().parse::<i64>().ok()? as u32))
+        })
+        .collect()
 }
 
 /// Modèle posé au sol d'un objet : colonne `FIELD_DFF` (sinon `BASE_DFF`), clump `d%07x.ecl`.
@@ -181,11 +187,12 @@ impl App {
         self.animators.get_mut(&cid).and_then(|(_, a)| a.as_mut())
     }
 
-    /// Vrai si le modèle porte les bits « attaquable » et « ciblable ».
+    /// Vrai si le modèle porte les bits « attaquable » et « ciblable » et n'est pas un joueur (un
+    /// joueur ne s'attaque qu'en combat de guildes, voir `guild.state.is_enemy`).
     fn combat_attackable(&mut self, tid: i32) -> bool {
         let assets = &self.assets;
-        let t = *self.combat.types.entry(tid).or_insert_with(|| character_type(assets, tid));
-        t & ATTACKABLE_TYPE == ATTACKABLE_TYPE
+        let t = self.combat.types.get_or_insert_with(|| character_types(assets)).get(&tid).copied().unwrap_or(0);
+        t & ATTACKABLE_TYPE == ATTACKABLE_TYPE && t & TYPE_PC == 0
     }
 
     /// Relevé des événements avant leur traitement par `on_world_event` (statuts de mort, vues,
@@ -745,7 +752,7 @@ impl App {
         for l in self.combat.ground.values() {
             let pos = Vec3::new(l.item.position.x, l.ground_y.unwrap_or(l.item.position.y), l.item.position.z);
             for (mesh, local) in &l.meshes {
-                out.push(DrawItem { mesh: mesh.clone(), model: Mat4::from_translation(pos) * *local, tint: [1.0; 4] });
+                out.push(DrawItem { mesh: mesh.clone(), model: Mat4::from_translation(pos) * *local, tint: [1.0; 4], character: false });
             }
         }
         out
@@ -835,4 +842,14 @@ mod tests {
         assert_eq!(hit_line(false, false, "A", "B", Some(outcome::SUCCESS), Some(3), Some(1)), None);
     }
 
+    /// Avec les données du client (`ARCHRUST_GAME_DIR`) : un PNJ (Quig, 426) ne s'attaque pas, un
+    /// monstre (Green Worm, 450) si, un joueur (Archer, 1) seulement en combat de guildes.
+    #[test]
+    fn types_de_personnage_d_archonia() {
+        let Some(dir) = std::env::var_os("ARCHRUST_GAME_DIR") else { return };
+        let types = character_types(&Assets::new(Some(dir.into()), &[]));
+        assert_eq!(types.get(&426), Some(&0x2));
+        assert_eq!(types.get(&450), Some(&0x30004));
+        assert_eq!(types.get(&1), Some(&0x30001));
+    }
 }

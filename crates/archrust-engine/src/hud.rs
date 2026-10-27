@@ -70,7 +70,7 @@ mod refinery_ui;
 pub use refinery_ui::{draw_cooldown, draw_recipes, draw_refinery, RecipeUi, RecipeView, RefineryUi, RefineryView};
 pub use options_ui::{draw_options, OptionsEdit, OptionsOut};
 pub use login_ui::{draw_char_create, draw_char_select, CharSlotView, CreateUi, SelectUi};
-pub use menu_ui::{draw_main_menu, MenuUi};
+pub use menu_ui::{draw_main_menu, main_menu_open, toggle_options_menu, MenuUi};
 pub use party_ui::{draw_party, party_face, PartyFrame, PartyFrames, PartyUi, PartyUiState};
 pub use dialogs_ui::{info_box, confirm_box, draw_bank_money, draw_buy_count, draw_split, ui_message};
 pub use guild_ui::{draw_battle_texts, draw_guild_warehouse, draw_guild_window, draw_gware_money, draw_message_box, GridCell, GuildEdit, GuildRow, GuildUi, GuildView, GwareItem, GwareView, ListSpec, PageColors};
