@@ -2,6 +2,8 @@
 //!
 //! ```text
 //! cargo run -p archrust-data --example export -- <Game> table <fichier.ini> <clé1,clé2,…>
+//! cargo run -p archrust-data --example export -- <Game> ini <fichier.ini> <sortie.ini>
+//! cargo run -p archrust-data --example export -- <Game> tif <pack> <nom.tif> <sortie.png>
 //! cargo run -p archrust-data --example export -- <Game> model <pack> <nom.ecl> <sortie.obj>
 //! cargo run -p archrust-data --example export -- <Game> texture <nom> <sortie.png>
 //! cargo run -p archrust-data --example export -- <Game> file <pack> <nom> <sortie>
@@ -250,6 +252,17 @@ fn main() -> anyhow::Result<()> {
                     .collect();
                 println!("[{}] {}", s.name, line.join(" "));
             }
+        }
+        Some("tif") => {
+            let t = archrust_data::tiff::decode(&packs.read(&args[3], &args[4])?)?;
+            let (w, h) = (t.width, t.height);
+            save_png(Path::new(&args[5]), w, h, t.rgba)?;
+            println!("{}/{} → {} ({w}x{h})", args[3], args[4], args[5]);
+        }
+        Some("ini") => {
+            let text = archrust_data::ini::decrypt_ini(&fs::read(game.join("ini").join(&args[3]))?);
+            fs::write(&args[4], text.as_bytes())?;
+            println!("ini/{} → {}", args[3], args[4]);
         }
         Some("model") => export_obj(&mut packs, &args[3], &args[4], Path::new(&args[5]))?,
         Some("texture") => {

@@ -8,13 +8,20 @@
 //!
 //! Le moteur graphique consomme les [`world::WorldEvent`] et envoie des [`world::Command`].
 
+pub mod auction;
+pub mod buddy;
+pub mod chat;
 pub mod combat;
 pub mod connection;
 pub mod convert;
+pub mod customize;
 pub mod ext;
 pub mod guild;
 pub mod items;
+pub mod itemset;
 pub mod login;
+pub mod mail;
+pub mod nature;
 pub mod npc;
 pub mod party;
 pub mod product;
@@ -22,9 +29,13 @@ pub mod pvp;
 pub mod reconnect;
 pub mod refinery;
 pub mod remission;
+pub mod repair;
+pub mod ride;
 pub mod skills;
+pub mod summons;
 pub mod teleport;
 pub mod ui_status;
+pub mod wanted;
 pub mod world;
 
 pub use connection::{Connection, NetError};

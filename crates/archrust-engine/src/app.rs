@@ -77,6 +77,39 @@ mod product_glue;
 #[path = "app_options.rs"]
 mod options_glue;
 
+#[path = "app_buddy.rs"]
+mod buddy_glue;
+
+#[path = "app_mail.rs"]
+mod mail_glue;
+
+#[path = "app_repair.rs"]
+mod repair_glue;
+
+#[path = "app_ride.rs"]
+mod ride_glue;
+
+#[path = "app_auction.rs"]
+mod auction_glue;
+
+#[path = "app_itemset.rs"]
+mod itemset_glue;
+
+#[path = "app_nature.rs"]
+mod nature_glue;
+
+#[path = "app_chat.rs"]
+mod chat_glue;
+
+#[path = "app_customize.rs"]
+mod customize_glue;
+
+#[path = "app_wanted.rs"]
+mod wanted_glue;
+
+#[path = "app_summons.rs"]
+mod summons_glue;
+
 /// Configuration du client.
 #[derive(Debug, Clone)]
 pub struct Config {
@@ -200,8 +233,10 @@ pub struct App {
     /// (musique et ambiance de l'heure courante).
     zone_check_at: Option<Instant>,
     zone_region: Option<ZoneAudio>,
-    /// Heure du jeu reçue du serveur (`AGPMTIMER`), heure locale sinon.
+    /// Heure du jeu reçue du serveur (`AGPMTIMER`), 12 h ×6 d'Archonia sinon.
     game_clock: GameClock,
+    /// Ciel, météo et musique du gabarit, voir `app_nature.rs`.
+    nature: nature_glue::NatureGlue,
     /// Groupe du joueur (paquets 0x08 / 0x09), voir `app_party.rs`.
     party: party_glue::PartyGlue,
     /// Combat, mort, résurrection et butin, voir `app_combat.rs`.
@@ -228,6 +263,26 @@ pub struct App {
     refinery: refinery_glue::RefineryGlue,
     /// Production : récolte, cuisine, alchimie, PNJ de production, voir `app_product.rs`.
     product: product_glue::ProductGlue,
+    /// Amis et ignorés : listes, fenêtres, `IgnoreList.txt`, voir `app_buddy.rs`.
+    buddy: buddy_glue::BuddyGlue,
+    /// Courrier : boîte aux lettres, lecture, écriture, voir `app_mail.rs`.
+    mail: mail_glue::MailGlue,
+    /// Usure et réparation chez les forgerons, voir `app_repair.rs`.
+    repair: repair_glue::RepairGlue,
+    /// Montures : modèles, cavaliers, refus à cheval, voir `app_ride.rs`.
+    ride: ride_glue::RideGlue,
+    /// Maison des ventes : planche, boîte de ventes, mise en vente, voir `app_auction.rs`.
+    auction: auction_glue::AuctionGlue,
+    /// Commutateur d'équipement (`UI_SwitchEditor`, `ItemSwitch_*.dat`), voir `app_itemset.rs`.
+    itemset: itemset_glue::ItemSetGlue,
+    /// Discussion d'Archonia et salons (`UI_ChatRoom*`), voir `app_chat.rs`.
+    chat: chat_glue::ChatGlue,
+    /// Coiffeur (`UI_Customizing`) et apparence des personnages, voir `app_customize.rs`.
+    customize: customize_glue::CustomizeGlue,
+    /// Avis de recherche (`UI_WantedCriminal`, `UI_CriminalArrange*`), voir `app_wanted.rs`.
+    wanted: wanted_glue::WantedGlue,
+    /// Invocations : registre, menus `UI_TargetSummonsMenu*`, familiers, voir `app_summons.rs`.
+    summons: summons_glue::SummonsGlue,
 }
 
 impl App {
@@ -324,6 +379,7 @@ impl App {
             zone_check_at: None,
             zone_region: None,
             game_clock: GameClock::default(),
+            nature: Default::default(),
             party: Default::default(),
             combat: Default::default(),
             item_ui: Default::default(),
@@ -337,6 +393,16 @@ impl App {
             convert: Default::default(),
             refinery: Default::default(),
             product: Default::default(),
+            buddy: Default::default(),
+            mail: Default::default(),
+            repair: Default::default(),
+            ride: Default::default(),
+            auction: Default::default(),
+            itemset: Default::default(),
+            chat: Default::default(),
+            customize: Default::default(),
+            wanted: Default::default(),
+            summons: Default::default(),
         })
     }
 
@@ -357,11 +423,11 @@ impl App {
                 if found != self.zone_region {
                     if let Some(z) = &found {
                         log::info!(
-                            "région {} ({}) à {hour} h ({}) : musique {} ; ambiance {}",
+                            "région {} ({}) à {hour} h ({}) : musiques {} ; ambiance {}",
                             z.region,
                             Zones::region_name(&self.assets, z.region).unwrap_or_default(),
-                            if self.game_clock.is_set() { "heure du serveur" } else { "heure locale" },
-                            z.music.as_deref().unwrap_or("aucune dans skyset.ini"),
+                            if self.game_clock.is_set() { "heure du serveur" } else { "heure d'Archonia par défaut" },
+                            if z.music.is_empty() { "aucune dans skyset.ini".to_string() } else { z.music.join(", ") },
                             if z.ambience.is_empty() {
                                 "aucune dans skyset.ini".to_string()
                             } else {
@@ -379,8 +445,13 @@ impl App {
         } else {
             self.zone_check_at = None;
             self.zone_region = None;
-            self.game_clock.clear();
         }
+        // En jeu, la liste de lecture du ciel (`app_nature.rs`) : morceau tiré dans le gabarit, joué
+        // une fois, le suivant 10 s après la fin ; sinon la CVar `worldMusic` en boucle.
+        let playlist = match &self.music_override {
+            None if in_world => self.nature_music(),
+            _ => None,
+        };
         let cvar = |name: &str| {
             self.addons
                 .cvar(name)
@@ -389,11 +460,7 @@ impl App {
         };
         let music = match &self.music_override {
             Some(forced) => forced.clone(),
-            None if in_world => self
-                .zone_region
-                .as_ref()
-                .and_then(|z| z.music.clone())
-                .or_else(|| cvar("worldMusic")),
+            None if in_world => cvar("worldMusic"),
             None => cvar("loginMusic"),
         };
         // Ambiance : la première de la région (Archonia joue toutes celles des `EffectIndex`),
@@ -406,7 +473,12 @@ impl App {
         } else {
             None
         };
-        self.audio.play_music(music.as_deref());
+        match playlist {
+            Some(Some((path, generation))) => self.audio.play_music_once(Some(&path), generation),
+            // Silence entre deux morceaux du ciel.
+            Some(None) => self.audio.play_music(None),
+            None => self.audio.play_music(music.as_deref()),
+        }
         self.audio.play_ambience(ambience.as_deref());
         self.audio.update(dt);
     }
@@ -1148,6 +1220,10 @@ impl App {
     }
 
     fn on_world_event(&mut self, ev: WorldEvent) {
+        // Discussion d'un ignoré à « Block Chat » : écartée (voir `app_buddy.rs`).
+        if self.buddy_blocks(&ev) {
+            return;
+        }
         // Noms et PV des membres de groupe possibles (voir `app_party.rs`).
         self.party_observe(&ev);
         // Morts, vues des monstres, objets retirés du sol (voir `app_combat.rs`).
@@ -1159,11 +1235,24 @@ impl App {
         self.npc_observe(&ev);
         // Compétences de production et lancement d'une récolte (voir `app_product.rs`).
         self.product_observe(&ev);
+        // Métamorphose, refus du serveur, sorties de vue pour les montures (voir `app_ride.rs`).
+        self.ride_observe(&ev);
+        // Salons, coiffeur, avis : remis à zéro à chaque connexion (métamorphose pour le coiffeur).
+        self.chat_observe(&ev);
+        self.customize_observe(&ev);
+        self.wanted_observe(&ev);
+        // Invocations : remises à zéro, attaches des personnages sortis de la vue (voir `app_summons.rs`).
+        self.summons_observe(&ev);
         match ev {
             WorldEvent::Connected => {
                 // Nouvelle connexion au monde : les instantanés d'objets qui suivent repartent de zéro.
                 self.items.clear();
                 self.hud.buffs.clear();
+                // Amis, ignorés et courriers renvoyés par le serveur.
+                self.buddy_reset();
+                self.mail_reset();
+                self.auction_reset();
+                self.itemset_reset();
             }
             WorldEvent::SelfCharacter {
                 cid,
@@ -1362,16 +1451,8 @@ impl App {
                 }
                 self.camera.target = p + Vec3::new(0.0, 100.0, 0.0);
             }
-            WorldEvent::GameTime(t) => {
-                self.game_clock.set(t);
-                log::info!(
-                    "heure du jeu : {t} ms du serveur, soit {} h (tranche skyset « {} »)",
-                    crate::zones::hour_of_ms(t),
-                    crate::zones::SKY_SLOTS[crate::zones::sky_slot(crate::zones::hour_of_ms(t))]
-                );
-                // Musique et ambiance à revoir tout de suite avec l'heure du serveur.
-                self.zone_check_at = None;
-            }
+            // Heure du monde, météo et effets de nature (voir `app_nature.rs`).
+            WorldEvent::Nature(ev) => self.nature_event(ev),
             WorldEvent::CharacterSeen(c) => {
                 if let Some(index) = self.entities.iter().position(|e| e.cid == c.cid) {
                     if self.entities[index].equipment != c.equipment {
@@ -1490,8 +1571,30 @@ impl App {
             WorldEvent::Convert(ev) => self.on_convert_event(ev),
             WorldEvent::Refinery(ev) => self.on_refinery_event(ev),
             WorldEvent::Product(ev) => self.on_product_event(ev),
-            // Messages système réduits à un code (banque agrandie…, voir `app_npc.rs`).
-            WorldEvent::SystemCode(code) => self.npc_system_code(code),
+            // Amis et ignorés (0x2B), courrier (0x2D) : voir `app_buddy.rs`, `app_mail.rs`.
+            WorldEvent::Buddy(ev) => self.on_buddy_event(ev),
+            WorldEvent::Mail(ev) => self.on_mail_event(ev),
+            // Réparation et durabilité (0x34, AGPMITEM champ 10), montures (0x4D) : voir `app_repair.rs`,
+            // `app_ride.rs`.
+            WorldEvent::Repair(ev) => self.on_repair_event(ev),
+            WorldEvent::Ride(ev) => self.on_ride_event(ev),
+            // Maison des ventes (0x0B), commutateur d'équipement (0x6A) : voir `app_auction.rs`, `app_itemset.rs`.
+            WorldEvent::Auction(ev) => self.on_auction_event(ev),
+            WorldEvent::ItemSet(ev) => self.on_itemset_event(ev),
+            // Salons (0x2C), coiffeur (0x43), avis de recherche (0x46) : voir `app_chat.rs`, `app_customize.rs`,
+            // `app_wanted.rs`.
+            WorldEvent::Channel(ev) => self.on_channel_event(ev),
+            WorldEvent::Customize(ev) => self.on_customize_event(ev),
+            WorldEvent::Wanted(ev) => self.on_wanted_event(ev),
+            // Invocations (0x4F) et état spécial des personnages : voir `app_summons.rs`.
+            WorldEvent::Summons(ev) => self.on_summons_event(ev),
+            // Messages système réduits à un code (invocations : `app_summons.rs` ; banque agrandie… :
+            // `app_npc.rs`).
+            WorldEvent::SystemCode(code) => {
+                if !self.summons_system_code(code) {
+                    self.npc_system_code(code);
+                }
+            }
             WorldEvent::Chat {
                 from,
                 to,
@@ -1514,15 +1617,9 @@ impl App {
                 channel,
                 ..
             } => {
-                // Types AGPMCHATTING : 3 guilde, 4 groupe, 5 et 6 chuchotement (FUN_140511e20).
-                let event = match channel {
-                    3 => "CHAT_MSG_GUILD",
-                    4 => "CHAT_MSG_PARTY",
-                    5 | 6 => "CHAT_MSG_WHISPER",
-                    _ => "CHAT_MSG_SAY",
-                };
-                // Filtres des AddOns, fenêtre de discussion, puis événement CHAT_MSG_*.
-                self.addon_chat_received(event, &message, &from);
+                // Types AGPMCHATTING et cris de zone (0x4C) : classe, couleur et format d'Archonia
+                // (FUN_140511e20), filtres des AddOns, événement CHAT_MSG_* (voir `app_chat.rs`).
+                self.chat_received(channel, &from, &message);
             }
             WorldEvent::SystemMessage(m) => {
                 self.hud.push_system(&m);
@@ -1536,6 +1633,8 @@ impl App {
                 self.enter_world_addons();
                 // Refus et casque d'`options.toml` (onglets Fonction et Affichage des options).
                 self.options_enter_world();
+                // Courrier non lu déjà reçu : `YouHaveMail` (voir `app_mail.rs`).
+                self.mail_enter_world();
                 self.ui
                     .push_chat(format!("[système] {} entités en vue", self.entities.len()));
                 if let Some(cmds) = &self.config.exec_on_enter {
@@ -1570,6 +1669,10 @@ impl App {
                 let why = self.reconnect_failed().unwrap_or(why);
                 self.party_reset();
                 self.guild_reset();
+                self.buddy_reset();
+                self.mail_reset();
+                self.auction_reset();
+                self.itemset_reset();
                 self.ui.push_chat(format!("[système] déconnecté : {why}"));
                 self.ui.status = format!("déconnecté : {why}");
                 self.phase = Phase::Login;
@@ -1820,20 +1923,34 @@ impl App {
             _ if self.portal_slash(cmd, arg) => {}
             // Essai de la reconnexion : /coupure (voir `app_reconnect.rs`).
             _ if self.reconnect_slash(cmd) => {}
+            // Réparation : /reparation, /areparer, /reparer, /durabilite (voir `app_repair.rs`) ; montures :
+            // /monture (voir `app_ride.rs`).
+            _ if self.repair_slash(cmd, arg) => {}
+            _ if self.ride_slash(cmd) => {}
             // Sphère d'alchimie : /sphere, /grille, /raffiner, /repeter, /recette (voir `app_refinery.rs`).
             _ if self.refinery_slash(cmd, arg) => {}
             // Production : /production, /recettes (voir `app_product.rs`).
             _ if self.product_slash(cmd) => {}
+            // Amis, ignorés, courrier : /amis, /ignores, /courrier (voir `app_buddy.rs`, `app_mail.rs`).
+            _ if self.buddy_slash(cmd) => {}
+            _ if self.mail_slash(cmd) => {}
+            // Maison des ventes : /ventes ; commutateur : /commutateur, /switch N, /saveset N.
+            _ if self.auction_slash(cmd) => {}
+            _ if self.itemset_slash(cmd, arg) => {}
             // Compétences : /competences, /lancer (voir `app_skills.rs`).
             _ if self.skills_slash(cmd, arg) => {}
             // Groupes : /inviter, /accepter, /refuser, /quittergroupe, /exclure, /chef, /groupe.
             _ if self.party_slash(cmd, arg) => {}
             // Discussion /G, /P, /N et guilde : /guilde, /ginviter, /gquitter… (voir `app_guild.rs`).
             _ if self.guild_slash(cmd, arg) => {}
+            // Salons : /join, /leave ; /trouver (voir `app_chat.rs`).
+            _ if self.chat_slash(cmd, arg) => {}
             // Panneaux au-dessus des personnages : /panneau (coup simulé, voir `app_boards.rs`).
             _ if self.boards_slash(cmd, arg) => {}
             // Forgeron : /ameliorer, /catalyseur, /onglet, /convertir, /infobulle (voir `app_convert.rs`).
             _ if self.convert_slash(cmd, arg) => {}
+            // Ciel et météo : /ciel (état), /effetnature <id|-1> (local, voir `app_nature.rs`).
+            _ if self.nature_slash(cmd, arg) => {}
             // Comme Archonia : une commande inconnue du client part au serveur dans la discussion,
             // qui traite les commandes MJ (`/create`, `/money`, `/move`… d'ArchCore) ou répond.
             _ if self.net.is_some() => {
@@ -1950,12 +2067,15 @@ impl App {
     /// 30 Hz au plus, seulement près de la caméra. Les animateurs sont reconstruits quand les
     /// maillages d'une entité changent (équipement, modèle).
     fn animate(&mut self, dt: f32) {
+        // Cavaliers : animations « à cheval » et course (voir `app_ride.rs`).
+        let riders: Vec<(i32, i32)> = self.entities.iter().chain(self.player.as_ref()).filter(|e| self.ride.riding(e.cid)).map(|e| (e.cid, e.tid)).collect();
+        let ride_equip: HashMap<i32, u32> = riders.into_iter().filter_map(|(cid, tid)| Some((cid, self.ride_anim_equip(cid, tid)?))).collect();
         let Some(gpu) = &self.gpu else { return };
         let focus = self.camera.target;
         let seed = |cid: i32| (cid as u32).wrapping_mul(0x9e37_79b9) | 1;
         if let Some(p) = &self.player {
             let sig = animation::signature(&p.meshes);
-            let equip = self.item_ui.weapon_equip;
+            let equip = ride_equip.get(&p.cid).copied().unwrap_or(self.item_ui.weapon_equip);
             let current = self.player_animator.as_ref().map(|(s, a)| (*s, a.as_ref().map(|a| a.equip)));
             if current.is_none_or(|(s, e)| s != sig || e.is_some_and(|e| e != equip)) {
                 let a = Animator::new(&self.assets, p.tid, &p.meshes, seed(p.cid), equip);
@@ -1965,23 +2085,21 @@ impl App {
                 self.player_animator = Some((sig, a));
             }
             if let Some((_, Some(a))) = &mut self.player_animator {
-                a.update(&self.assets, &gpu.renderer, dt, Self::is_moving(p), p.speeds.fast, 30.0);
+                a.update(&self.assets, &gpu.renderer, dt, Self::is_moving(p), p.speeds.fast || p.speeds.riding, 30.0);
             }
         }
         self.animators
             .retain(|cid, _| self.entities.iter().any(|e| e.cid == *cid));
         for e in &self.entities {
             let sig = animation::signature(&e.meshes);
+            let equip = ride_equip.get(&e.cid).copied().unwrap_or_else(|| animation::weapon_anim_equip(crate::scene::equipped_weapon_type(&self.assets, &e.equipment)));
             let slot = self.animators.entry(e.cid).or_insert((usize::MAX, None));
-            if slot.0 != sig {
-                *slot = (
-                    sig,
-                    Animator::new(&self.assets, e.tid, &e.meshes, seed(e.cid), animation::weapon_anim_equip(crate::scene::equipped_weapon_type(&self.assets, &e.equipment))),
-                );
+            if slot.0 != sig || slot.1.as_ref().is_some_and(|a| a.equip != equip) {
+                *slot = (sig, Animator::new(&self.assets, e.tid, &e.meshes, seed(e.cid), equip));
             }
             let near = (e.position - focus).length() < Self::ANIMATION_RANGE;
             if let (Some(a), true) = (&mut slot.1, near) {
-                a.update(&self.assets, &gpu.renderer, dt, Self::is_moving(e), e.speeds.fast, 30.0);
+                a.update(&self.assets, &gpu.renderer, dt, Self::is_moving(e), e.speeds.fast || e.speeds.riding, 30.0);
             }
         }
     }
@@ -2003,6 +2121,10 @@ impl App {
         if self.phase == Phase::InWorld {
             let mut closed = self.npc.close_windows();
             closed |= self.product.close_windows();
+            closed |= self.buddy.close_windows();
+            closed |= self.mail.close_windows();
+            closed |= self.auction.close_windows();
+            closed |= self.itemset.close_windows();
             for open in [&mut self.ui.show_inventory, &mut self.item_ui.show_character, &mut self.skills.show_book] {
                 closed |= std::mem::take(open);
             }
@@ -2026,6 +2148,11 @@ impl App {
                 crate::hud::MenuUi::ProductSkills => self.product.show_skills = !self.product.show_skills,
                 crate::hud::MenuUi::Guild => self.guild_toggle(),
                 crate::hud::MenuUi::Party => self.party.frames_ui.options = !self.party.frames_ui.options,
+                crate::hud::MenuUi::Friends => self.buddy.toggle_friends(),
+                crate::hud::MenuUi::IgnoreList => self.buddy.toggle_bans(),
+                crate::hud::MenuUi::Mailbox => self.mail.toggle(),
+                crate::hud::MenuUi::CreateChannel => self.chat.open_create(),
+                crate::hud::MenuUi::JoinChannel => self.chat.open_enter(),
                 crate::hud::MenuUi::Options | crate::hud::MenuUi::Exit => self.ui.show_options = !self.ui.show_options,
             }
         }
@@ -2058,6 +2185,8 @@ impl App {
             .entities
             .iter()
             .filter(|e| !e.is_player && e.cid != player.cid && !npcs.contains(&e.tid))
+            // Familiers non sélectionnables (voir `app_summons.rs`).
+            .filter(|e| !self.summons.book.is_pet(e.cid))
             .filter(|e| e.hp.is_none_or(|hp| hp > 0))
             .filter_map(|e| {
                 let dist = (e.position - player.position).length();
@@ -2086,6 +2215,7 @@ impl App {
         let (cx, cy) = (cx as f32, cy as f32);
         self.entities
             .iter()
+            .filter(|e| self.summons_selectable(e.cid))
             .filter_map(|e| {
                 let (fx, fy, depth) = to_screen(e.position)?;
                 let (_, hy, _) = to_screen(e.position + Vec3::new(0.0, 180.0, 0.0))?;
@@ -2171,6 +2301,9 @@ impl App {
         self.npc_frame();
         // Infobulles des objets, fenêtre du forgeron fermée en s'éloignant (voir `app_convert.rs`).
         self.convert_frame();
+        // Durabilité : cases, ligne « Repair Cost » des infobulles, réparation fermée en s'éloignant
+        // (voir `app_repair.rs`).
+        self.repair_frame();
         // Portails des tuiles proches, liste fermée en s'éloignant (voir `app_portal.rs`).
         self.portal_frame();
         self.refinery_frame();
@@ -2179,6 +2312,11 @@ impl App {
         self.guild_frame();
         // Demandes des fenêtres de compétences, barre du personnage (voir `app_skills.rs`).
         self.skills_frame();
+        // Bouton du marchand d'objets : op 9 ou refus (voir `app_auction.rs`).
+        self.auction_request();
+        // Coiffeur : fermeture en s'éloignant, aperçu, caméra ; avis : bouton de la fenêtre de mort, rang.
+        self.customize_frame(dt as f32);
+        self.wanted_frame();
 
         // Déplacement clavier (ZQSD / WASD) de la caméra.
         let speed = (self.camera.distance * 0.8 * dt as f32).max(1.0);
@@ -2196,6 +2334,8 @@ impl App {
         }
         self.update_login_scene();
         self.simulate(dt as f32);
+        // Montures : modèles, animations, bassin où s'assoit le cavalier (voir `app_ride.rs`).
+        self.ride_frame(dt as f32);
 
         // AddOns : état du monde, OnUpdate et minuteurs, commandes, CVars.
         self.sync_addons_frame();
@@ -2205,6 +2345,8 @@ impl App {
         // La scène de connexion garde sa caméra fixe (`LoginSettings.txt`), CVars comprises.
         self.reapply_scene_camera();
         let object_distance = self.object_draw_distance();
+        // Heure, ciel, brouillard, lumières et météo (`app_nature.rs`), après les CVars.
+        self.update_nature(dt as f32);
         self.update_audio(dt as f32);
         self.save_options_if_needed(false);
         // Fenêtre du groupe (`app_party.rs`) : membres, PV, cible.
@@ -2381,8 +2523,21 @@ impl App {
                 convert_glue::panel(ctx, &mut self.convert, &mut item_requests, &self.items, &mut self.hud, &self.assets, self.net.as_ref(), &mut self.ui);
                 // Sphère d'alchimie : clic droit sur un objet du sac pour le poser dans la grille.
                 refinery_glue::panel(ctx, &mut self.refinery, &mut item_requests, &self.items, &mut self.hud, &self.assets, self.net.as_ref(), &mut self.ui);
+                // Réparation (`UI_Repair`) et silhouette d'usure (`UI_EquipStatus`).
+                repair_glue::panel(ctx, &mut self.repair, &self.items, &mut self.hud, &self.assets, self.net.as_ref(), &mut self.ui);
+                // Potions refusées à cheval ou métamorphosé.
+                ride_glue::item_requests(&mut self.ride, &self.items, &mut item_requests, &mut self.hud, &self.assets, &mut self.ui);
                 // Fabrication, PNJ et compétences de production, barre de la récolte.
                 product_glue::panel(ctx, &mut self.product, &self.items, &mut self.hud, &self.assets, self.net.as_ref(), &mut self.ui);
+                // Amis, ignorés, menu d'un joueur ciblé (voir `app_buddy.rs`) ; courrier (voir `app_mail.rs`).
+                let player_target = self.addons.target_cid().filter(|c| *c != me).and_then(|cid| self.entities.iter().find(|e| e.cid == cid && e.is_player)).map(|e| (e.cid, e.name.clone()));
+                buddy_glue::panel(ctx, &mut self.buddy, player_target, &mut self.hud, &self.assets, self.net.as_ref(), &mut self.ui);
+                mail_glue::panel(ctx, &mut self.mail, &self.items, &player_name, &mut self.hud, &self.assets, self.net.as_ref(), &mut self.ui);
+                // Maison des ventes (« Sell » de l'inventaire compris) et commutateur d'équipement.
+                let player_pos = self.player.as_ref().map(|p| p.position);
+                auction_glue::panel(ctx, &mut self.auction, &mut item_requests, &self.items, &player_name, player_pos, &mut self.hud, &self.assets, self.net.as_ref(), &mut self.ui);
+                let owner = self.player.as_ref().filter(|p| p.cid != 0 && !p.name.is_empty()).map(|p| p.name.clone());
+                itemset_glue::panel(ctx, &mut self.itemset, &self.items, owner.as_deref(), &self.config.saved_dir, &mut self.hud, &self.assets, self.net.as_ref(), &mut self.ui);
                 items_glue::panel(ctx, &mut self.item_ui, std::mem::take(&mut item_requests), &self.items, &mut self.hud, &self.assets, self.net.as_ref(), &mut self.ui);
                 // Groupe : bouton, fenêtre des membres, invitations reçues.
                 party_glue::panel(ctx, &mut self.party, &party_view, self.net.as_ref(), &mut self.ui, &mut self.hud, &self.assets);
@@ -2395,6 +2550,12 @@ impl App {
                 reconnect_glue::panel(ctx, &mut self.reconnect, &mut self.hud, &self.assets);
                 // Fenêtres de guilde et boîte OK / Annuler.
                 guild_glue::panel(ctx, &mut self.guild, &mut self.hud, &self.assets, &player_name);
+                // Salons de discussion, coiffeur, avis de recherche.
+                chat_glue::panel(ctx, &mut self.chat, &mut self.hud, &self.assets, self.net.as_ref(), &mut self.ui, &player_name);
+                customize_glue::panel(ctx, &mut self.customize, &mut self.hud, &self.assets, self.net.as_ref());
+                wanted_glue::panel(ctx, &mut self.wanted, &mut self.hud, &self.assets, self.net.as_ref(), &mut self.ui);
+                // Menu d'une invocation ciblée (`UI_TargetSummonsMenu*`, voir `app_summons.rs`).
+                summons_glue::panel(ctx, &mut self.summons, self.addons.target_cid(), me, &mut self.hud, &self.assets, self.net.as_ref());
                 // Comme dans WoW, l'interface des AddOns n'apparaît qu'en jeu.
                 self.addon_glue
                     .ui
@@ -2538,10 +2699,12 @@ impl App {
             });
         }
         if let Some(p) = &self.player {
+            // À cheval, le cavalier est posé sur sa monture (voir `app_ride.rs`).
+            let base = self.ride.rider_matrix(p.cid, p.model_matrix());
             for (mesh, local) in &p.meshes {
                 items.push(DrawItem {
                     mesh: mesh.clone(),
-                    model: p.model_matrix() * *local,
+                    model: base * *local,
                     tint: self.addons.unit_tint(p.cid).unwrap_or([1.0; 4]),
                     character: true,
                 });
@@ -2554,15 +2717,18 @@ impl App {
             if char_distance.is_some_and(|d| e.position.distance(char_eye) > d) {
                 continue;
             }
+            let base = self.ride.rider_matrix(e.cid, e.model_matrix());
             for (mesh, local) in &e.meshes {
                 items.push(DrawItem {
                     mesh: mesh.clone(),
-                    model: e.model_matrix() * *local,
+                    model: base * *local,
                     tint: self.addons.unit_tint(e.cid).unwrap_or([1.0; 4]),
                     character: true,
                 });
             }
         }
+        // Montures (personnages locaux d'AgcmRide).
+        items.extend(self.ride.draw_items(self.entities.iter().chain(self.player.as_ref()), char_distance, char_eye));
         items.extend(loot_items);
         let view_proj = self.camera.render_view_proj(gpu.renderer.aspect());
         let eye = self.camera.eye();
@@ -2753,6 +2919,12 @@ impl ApplicationHandler for App {
                     PhysicalKey::Code(KeyCode::KeyJ) if down && !event.repeat && self.phase == Phase::InWorld => {
                         self.product.show_skills = !self.product.show_skills
                     }
+                    // U : boîte aux lettres (`Hotkey=0:22` « Mailbox », voir `app_mail.rs`) ; N : liste d'ignorés
+                    // (`Hotkey=0:49` « Ignore list », voir `app_buddy.rs`).
+                    PhysicalKey::Code(KeyCode::KeyU) if down && !event.repeat && self.phase == Phase::InWorld => self.mail.toggle(),
+                    // Ctrl+M : `UI_SkillMacro` (`Hotkey=2:50`), ici le commutateur d'équipement (voir `app_itemset.rs`).
+                    PhysicalKey::Code(KeyCode::KeyM) if down && !event.repeat && self.phase == Phase::InWorld && self.addon_glue.modifiers.control_key() => self.itemset.toggle(),
+                    PhysicalKey::Code(KeyCode::KeyN) if down && !event.repeat && self.phase == Phase::InWorld => self.buddy.toggle_bans(),
                     PhysicalKey::Code(KeyCode::KeyK) if down && !event.repeat && self.phase == Phase::InWorld => {
                         self.skills.show_book = !self.skills.show_book
                     }

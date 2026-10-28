@@ -20,7 +20,7 @@ pub struct Vertex {
 impl Vertex {
     const ATTRS: [wgpu::VertexAttribute; 4] =
         wgpu::vertex_attr_array![0 => Float32x3, 1 => Float32x3, 2 => Float32x2, 3 => Float32x4];
-    fn layout() -> wgpu::VertexBufferLayout<'static> {
+    pub(crate) fn layout() -> wgpu::VertexBufferLayout<'static> {
         wgpu::VertexBufferLayout {
             array_stride: std::mem::size_of::<Vertex>() as u64,
             step_mode: wgpu::VertexStepMode::Vertex,
@@ -78,7 +78,14 @@ struct Globals {
     light_dir: [f32; 4],
     ambient: [f32; 4],
     camera_pos: [f32; 4],
+    light_color: [f32; 4],
+    fog_color: [f32; 4],
+    fog_range: [f32; 4],
 }
+
+/// Brouillard par défaut (sans ciel d'Archonia) : de 30 000 à 90 000 unités, au plus 85 %.
+pub const DEFAULT_FOG_COLOR: [f32; 4] = [0.55, 0.65, 0.8, 1.0];
+pub const DEFAULT_FOG_RANGE: [f32; 4] = [30_000.0, 90_000.0, 0.85, 0.0];
 
 #[repr(C)]
 #[derive(Clone, Copy, Pod, Zeroable)]
@@ -151,6 +158,18 @@ pub struct Renderer {
     /// Direction du soleil et lumière ambiante (CVars `lightDirection`, `ambientColor` des AddOns).
     pub light_dir: Vec3,
     pub ambient: [f32; 4],
+    /// Couleur de la lumière directionnelle (`Directional` du ciel) ; `w = 0` : blanc atténué de
+    /// l'ambiante (`1 − ambiante`), l'éclairage d'avant le ciel.
+    pub light_color: [f32; 4],
+    /// Brouillard : couleur (linéaire) et (début, fin, opacité maximale, —).
+    pub fog_color: [f32; 4],
+    pub fog_range: [f32; 4],
+    /// Ciel d'Archonia, particules de météo (texture, sommets) et reflets du soleil de l'image
+    /// (remplis par `app_nature.rs` ; `None`/vides : fond uni `clear_color`).
+    pub sky_draw: Option<crate::sky_render::SkyDraw>,
+    pub particles: Option<(String, Vec<Vertex>)>,
+    pub flares: Vec<crate::sky_render::FlareDraw>,
+    sky: crate::sky_render::SkyRenderer,
     /// Demande de capture de la prochaine image (lue dans `take_capture`).
     pub capture_next: bool,
     captured: Option<(u32, u32, Vec<u8>)>,
@@ -411,6 +430,7 @@ impl Renderer {
         ));
         let mut textures = HashMap::new();
         textures.insert("__white".to_string(), white.clone());
+        let sky = crate::sky_render::SkyRenderer::new(&device, format, &globals_layout, &texture_layout, Vertex::layout());
         Ok(Renderer {
             device,
             queue,
@@ -438,6 +458,13 @@ impl Renderer {
             },
             light_dir: Vec3::new(0.4, 0.8, 0.3),
             ambient: [0.45, 0.45, 0.5, 1.0],
+            light_color: [0.0; 4],
+            fog_color: DEFAULT_FOG_COLOR,
+            fog_range: DEFAULT_FOG_RANGE,
+            sky_draw: None,
+            particles: None,
+            flares: Vec::new(),
+            sky,
             capture_next: false,
             captured: None,
         })
@@ -498,7 +525,8 @@ impl Renderer {
             sample_count: 1,
             dimension: wgpu::TextureDimension::D2,
             format: wgpu::TextureFormat::Depth32Float,
-            usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
+            // Lue aussi par les reflets du soleil (occultation, `nature.wgsl`).
+            usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::TEXTURE_BINDING,
             view_formats: &[],
         });
         tex.create_view(&Default::default())
@@ -689,9 +717,39 @@ impl Renderer {
             light_dir: self.light_dir.extend(0.0).to_array(),
             ambient: self.ambient,
             camera_pos: camera_pos.extend(1.0).to_array(),
+            light_color: self.light_color,
+            fog_color: self.fog_color,
+            fog_range: self.fog_range,
         };
         self.queue
             .write_buffer(&self.globals_buf, 0, bytemuck::bytes_of(&globals));
+        // Ciel, particules et reflets de l'image (voir `sky_render`).
+        if let Some(sky) = &self.sky_draw {
+            self.sky.prepare_sky(&self.device, &self.queue, &self.sampler, &self.textures, &self.white, view_proj, camera_pos, sky);
+        }
+        let particle_count = match &self.particles {
+            Some((_, v)) if !v.is_empty() => self.sky.prepare_particles(&self.device, &self.queue, v),
+            _ => 0,
+        };
+        let particle_tex = self.particles.as_ref().and_then(|(t, _)| self.textures.get(&t.to_ascii_lowercase()).cloned());
+        let sun_ndc = self
+            .sky_draw
+            .as_ref()
+            .filter(|_| !self.flares.is_empty())
+            .and_then(|s| crate::sky_render::project_direction(view_proj, camera_pos, s.sun_dir))
+            .filter(|p| p[0].abs() <= 1.0 && p[1].abs() <= 1.0);
+        let mut flare_textures: Vec<Arc<GpuTexture>> = Vec::new();
+        if let Some(sun) = sun_ndc {
+            let quads = crate::sky_render::flare_vertices(&self.flares, sun, self.aspect());
+            let mut vertices = Vec::with_capacity(quads.len() * 6);
+            for (name, q) in quads {
+                if let Some(t) = self.textures.get(&name.to_ascii_lowercase()) {
+                    flare_textures.push(t.clone());
+                    vertices.extend_from_slice(&q);
+                }
+            }
+            self.sky.prepare_flares(&self.device, &self.queue, &vertices);
+        }
         self.ensure_instances(items.len());
         for (i, item) in items.iter().enumerate() {
             let data = InstanceUniform {
@@ -729,6 +787,9 @@ impl Renderer {
                 timestamp_writes: None,
                 occlusion_query_set: None,
             });
+            if self.sky_draw.is_some() {
+                self.sky.draw_sky(&mut pass);
+            }
             pass.set_bind_group(0, &self.globals_bg, &[]);
             if !terrain.is_empty() {
                 pass.set_pipeline(&self.terrain_pipeline);
@@ -774,6 +835,27 @@ impl Renderer {
                     );
                 }
             }
+            // Particules de météo, après les objets opaques.
+            if let Some(tex) = &particle_tex {
+                self.sky.draw_particles(&mut pass, &self.globals_bg, &tex.bind_group, particle_count);
+            }
+        }
+        // Reflets du soleil, par-dessus la scène, cachés si le soleil l'est.
+        if !flare_textures.is_empty() {
+            let depth_bg = self.sky.depth_bind_group(&self.device, &self.depth);
+            let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: Some("flares"),
+                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                    view: &view,
+                    resolve_target: None,
+                    ops: wgpu::Operations { load: wgpu::LoadOp::Load, store: wgpu::StoreOp::Store },
+                })],
+                depth_stencil_attachment: None,
+                timestamp_writes: None,
+                occlusion_query_set: None,
+            });
+            let groups: Vec<&wgpu::BindGroup> = flare_textures.iter().map(|t| &t.bind_group).collect();
+            self.sky.draw_flares(&mut pass, &self.globals_bg, &depth_bg, &groups);
         }
         ui(&self.device, &self.queue, &mut encoder, &view);
         let capture = if self.capture_next {
@@ -820,7 +902,7 @@ impl Renderer {
 }
 
 #[allow(clippy::too_many_arguments)]
-fn upload_rgba(
+pub(crate) fn upload_rgba(
     device: &wgpu::Device,
     queue: &wgpu::Queue,
     layout: &wgpu::BindGroupLayout,

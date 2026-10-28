@@ -145,6 +145,8 @@ fn request(glue: &mut ItemsGlue, assets: &Assets, items: &HashMap<i32, ItemRecor
             }
             None
         }
+        // Traité par la maison des ventes (`app_auction.rs`).
+        ItemUi::SalesBox => None,
     }
 }
 

@@ -151,7 +151,7 @@ impl App {
     }
 
     /// Recharge le corps, la tête et l'équipement d'une entité ; la boîte de repère en cas d'échec.
-    fn reload_entity_meshes(&mut self, index: usize) {
+    pub(super) fn reload_entity_meshes(&mut self, index: usize) {
         let Some(gpu) = self.gpu.as_mut() else { return };
         let fallback = gpu.marker.clone();
         let e = &self.entities[index];

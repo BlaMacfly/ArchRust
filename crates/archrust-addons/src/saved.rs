@@ -53,6 +53,9 @@ fn push_escaped(c: char, out: &mut String) {
 fn serialize_table(t: &Table, indent: usize, out: &mut String) -> mlua::Result<()> {
     out.push_str("{\n");
     let pad = "\t".repeat(indent + 1);
+    // Entrées triées par clé : l'ordre de parcours d'une table Lua varie d'un chargement à l'autre, et le
+    // fichier sauvegardé doit rester le même tant que les données ne changent pas.
+    let mut entries = Vec::new();
     for pair in t.pairs::<Value, Value>() {
         let (k, v) = pair?;
         let mut key = String::new();
@@ -78,6 +81,10 @@ fn serialize_table(t: &Table, indent: usize, out: &mut String) -> mlua::Result<(
         if !serialize_value(&v, indent + 1, &mut val)? {
             continue;
         }
+        entries.push((key, val));
+    }
+    entries.sort();
+    for (key, val) in entries {
         out.push_str(&pad);
         out.push_str(&key);
         out.push_str(" = ");

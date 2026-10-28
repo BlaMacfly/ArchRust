@@ -12,7 +12,9 @@
 //!   packs de ressources (activation ; l'ordre se règle dans `packs.toml`), AddOns (activation,
 //!   `AddOns.txt`, appliquée aussitôt en jeu par un rechargement de l'interface).
 //! - **GFX** : listes `OP_CharView` et `OP_MapView` (distances des personnages et de la carte,
-//!   « Proche » à « Global », un clic passe au choix suivant).
+//!   « Proche » à « Global », un clic passe au choix suivant), `OP_Nature` (environnement bas à haut :
+//!   densité de la météo) et son bouton détail, qui ouvre `Option_Detail_Nature` (reflets
+//!   `OP_LensFlare`, brouillard `OP_Fog`, effets météo `OP_Sky`, en cases Oui/Non).
 //! - **Affichage** : noms au-dessus de soi, des monstres, des autres joueurs, ligne de guilde, cadre
 //!   des membres du groupe, casque (envoyé au serveur).
 //! - **Fonction** : refus d'échange, d'invitation de groupe et de guilde (drapeaux envoyés au
@@ -30,7 +32,13 @@ use crate::options::{DisplayOptions, RefuseOptions, VideoOptions};
 use crate::ui::PackAction;
 
 const TABS: [(&str, &str); 5] = [("GFX", "Option_Video"), ("Son", "Option_Sound"), ("Affichage", "Option_System"), ("Fonction", "Option_Option"), ("Avance", "Option_Advanced")];
-pub(super) const OPTION_WINDOWS: [&str; 5] = ["Option_Video", "Option_Sound", "Option_System", "Option_Option", "Option_Advanced"];
+pub(super) const OPTION_WINDOWS: [&str; 6] = ["Option_Video", "Option_Sound", "Option_System", "Option_Option", "Option_Advanced", DETAIL_NATURE];
+/// Fenêtre « Environnement » ouverte par le bouton détail (`OP_Nature`) de l'onglet GFX : reflets
+/// (`OP_LensFlare`), brouillard (`OP_Fog`), effets météo (`OP_Sky`) en cases Oui/Non ; la ligne
+/// « Objets » (`OP_NaturalObj`) reste inactive.
+const DETAIL_NATURE: &str = "Option_Detail_Nature";
+/// Libellés de la liste `OP_Nature` (`uimessage.txt`).
+const NATURE_LABELS: [&str; 3] = ["Option_Msg_LOW", "Option_Msg_MEDIUM", "Option_Msg_HIGH"];
 /// Hauteur d'une ligne d'`OpAdv_List_Op`.
 const ADV_ROW: f32 = 20.0;
 
@@ -61,6 +69,7 @@ fn option_flag<'b>(action: &str, display: &'b mut DisplayOptions, refuse: &'b mu
         "OP_RefuseTrade" => &mut refuse.trade,
         "OP_RefusePartyIn" => &mut refuse.party,
         "OP_RefuseGuildIn" => &mut refuse.guild,
+        "OP_RefuseBuddy" => &mut refuse.buddy,
         _ => return None,
     })
 }
@@ -184,10 +193,17 @@ pub fn draw_options(ctx: &egui::Context, hud: &mut HudState, assets: &Assets, ed
                         }
                     }
                     // Onglet GFX : distances des personnages et de la carte, un clic passe au choix suivant.
-                    (5, _) if tab == 0 && matches!(c.action.as_deref(), Some("OP_CharView" | "OP_MapView")) => {
-                        let action = if c.action.as_deref() == Some("OP_CharView") { "OP_CharView" } else { "OP_MapView" };
-                        let value = if action == "OP_CharView" { video.char_view } else { video.map_view };
-                        let text = ui_message(hud, assets, VIEW_LABELS[value.min(3) as usize]);
+                    (5, _) if tab == 0 && matches!(c.action.as_deref(), Some("OP_CharView" | "OP_MapView" | "OP_Nature")) => {
+                        let action = match c.action.as_deref() {
+                            Some("OP_CharView") => "OP_CharView",
+                            Some("OP_Nature") => "OP_Nature",
+                            _ => "OP_MapView",
+                        };
+                        let text = match action {
+                            "OP_CharView" => ui_message(hud, assets, VIEW_LABELS[video.char_view.min(3) as usize]),
+                            "OP_Nature" => ui_message(hud, assets, NATURE_LABELS[video.nature.min(2) as usize]),
+                            _ => ui_message(hud, assets, VIEW_LABELS[video.map_view.min(3) as usize]),
+                        };
                         if button(ctx, ui, hud, assets, &painter, r, c, "", font, true, ("options-combo", action)).clicked() {
                             cycle_view(video, action);
                             out.changed = true;
@@ -200,6 +216,15 @@ pub fn draw_options(ctx: &egui::Context, hud: &mut HudState, assets: &Assets, ed
                         if button(ctx, ui, hud, assets, &painter, r, c, "", font, true, ("options-combo-arrow", action)).clicked() {
                             cycle_view(video, action);
                             out.changed = true;
+                        }
+                    }
+                    // Bouton détail de l'environnement : fenêtre `Option_Detail_Nature`.
+                    (3, _) if tab == 0 && c.action.as_deref() == Some("OP_Nature") => {
+                        if button(ctx, ui, hud, assets, &painter, r, c, fixed.unwrap_or(""), font, true, ("options-detail-nature", name)).clicked() {
+                            ctx.data_mut(|d| {
+                                let open = d.get_temp_mut_or_default::<bool>(egui::Id::new(DETAIL_NATURE));
+                                *open = !*open;
+                            });
                         }
                     }
                     (15, _) => {}
@@ -254,21 +279,114 @@ pub fn draw_options(ctx: &egui::Context, hud: &mut HudState, assets: &Assets, ed
     if let Some(t) = new_tab {
         hud.options_tab = t as u8;
     }
+    if draw_detail_nature(ctx, hud, assets, video) {
+        out.changed = true;
+    }
     if ctx.input(|i| i.key_pressed(egui::Key::Escape)) {
         out.close = true;
+    }
+    if out.close {
+        ctx.data_mut(|d| d.insert_temp(egui::Id::new(DETAIL_NATURE), false));
     }
     Some(out)
 }
 
-/// Choix suivant d'une liste de distances (proche → moyen → loin → global → proche).
+/// Choix suivant d'une liste de distances (proche → moyen → loin → global → proche) ou de
+/// l'environnement (bas → moyen → haut → bas).
 fn cycle_view(video: &mut VideoOptions, action: &str) {
-    let v = if action == "OP_CharView" { &mut video.char_view } else { &mut video.map_view };
-    *v = (*v + 1) % 4;
+    match action {
+        "OP_Nature" => video.nature = (video.nature.min(2) + 1) % 3,
+        "OP_CharView" => video.char_view = (video.char_view + 1) % 4,
+        _ => video.map_view = (video.map_view + 1) % 4,
+    }
+}
+
+/// Réglage d'une case Oui/Non de `Option_Detail_Nature` et sa valeur (« On » = `true`), d'après le
+/// nom du contrôle (`OP_Detail_Nature_LF_On`…) : le premier rappel de ces cases est vide.
+fn detail_nature_flag<'b>(name: &str, video: &'b mut VideoOptions) -> Option<(&'b mut bool, bool)> {
+    let rest = name.strip_prefix("OP_Detail_Nature_")?;
+    let (what, on) = rest.rsplit_once('_')?;
+    let on = match on {
+        "On" => true,
+        "Off" => false,
+        _ => return None,
+    };
+    Some((
+        match what {
+            "LF" => &mut video.lens_flare,
+            "Fog" => &mut video.fog,
+            "Sky" => &mut video.sky,
+            _ => return None,
+        },
+        on,
+    ))
+}
+
+/// Fenêtre `Option_Detail_Nature` si elle est ouverte ; rend `true` si un réglage a changé.
+fn draw_detail_nature(ctx: &egui::Context, hud: &mut HudState, assets: &Assets, video: &mut VideoOptions) -> bool {
+    let id = egui::Id::new(DETAIL_NATURE);
+    if !ctx.data(|d| d.get_temp::<bool>(id).unwrap_or(false)) {
+        return false;
+    }
+    let Some(w) = window(hud, assets, DETAIL_NATURE) else { return false };
+    let layout = Layout::new(ctx.screen_rect());
+    let s = layout.scale;
+    let font = (10.5 * s).max(8.0);
+    let mut changed = false;
+    let mut close = false;
+    egui::Area::new(egui::Id::new("archonia-options-detail-nature"))
+        .default_pos(layout.window_origin(&w))
+        .movable(true)
+        .constrain(true)
+        .order(egui::Order::Tooltip)
+        .show(ctx, |ui| {
+            let (rect, _) = ui.allocate_exact_size(Vec2::new(w.size[0], w.size[1]) * s, egui::Sense::hover());
+            let painter = ui.painter().clone();
+            if let Some((_, tex)) = w.textures.first() {
+                control_image(ctx, hud, assets, &painter, rect, w.size, tex, 1.0);
+            }
+            for c in &w.controls {
+                let r = layout.rect(rect.min, c.pos, c.size);
+                let fixed = c.display.as_deref().and_then(|d| d.strip_prefix("1:"));
+                let name = c.name.as_str();
+                match c.kind {
+                    3 if name == "OP_Detail_Nature_Btn1" || name == "OP_Detail_Nature_Btn2" => {
+                        if button(ctx, ui, hud, assets, &painter, r, c, fixed.unwrap_or(""), font, true, ("detail-nature", name)).clicked() {
+                            close = true;
+                        }
+                    }
+                    3 => match detail_nature_flag(name, video) {
+                        Some((flag, on)) => {
+                            if checkbox(ctx, ui, hud, assets, &painter, r, c, *flag == on, true, ("detail-nature", name)).clicked() && *flag != on {
+                                *flag = on;
+                                changed = true;
+                            }
+                        }
+                        // « Objets » (`OP_NaturalObj`) : ArchRust n'a pas ce réglage.
+                        None => {
+                            let _ = checkbox(ctx, ui, hud, assets, &painter, r, c, false, false, ("detail-nature", name));
+                        }
+                    },
+                    _ => {
+                        if let Some((_, t)) = c.textures.first() {
+                            control_image(ctx, hud, assets, &painter, r, c.size, &t.clone(), 1.0);
+                        }
+                        if let Some(text) = fixed.filter(|t| !t.is_empty()) {
+                            shadow_text(&painter, r.left_center(), Align2::LEFT_CENTER, text, font, Color32::WHITE);
+                        }
+                    }
+                }
+            }
+        });
+    if close {
+        ctx.data_mut(|d| d.insert_temp(id, false));
+    }
+    changed
 }
 
 /// Case `OP_Check` : « a » vide, « c » cochée, « b » survol, « d » inactive.
 #[allow(clippy::too_many_arguments)]
-fn checkbox(ctx: &egui::Context, ui: &mut egui::Ui, hud: &mut HudState, assets: &Assets, painter: &egui::Painter, r: Rect, c: &UiControl, checked: bool, enabled: bool, id: impl std::hash::Hash) -> egui::Response {
+pub(super) fn checkbox(ctx: &egui::Context, ui: &mut egui::Ui, hud: &mut HudState, assets: &Assets, painter: &egui::Painter, r: Rect, c: &UiControl, checked: bool, enabled: bool, id: impl std::hash::Hash) -> egui::Response {
     let resp = ui.interact(r, egui::Id::new(id), if enabled { egui::Sense::click() } else { egui::Sense::hover() });
     let pick = |suffix: &str| c.textures.iter().find(|(_, n)| n.to_ascii_lowercase().ends_with(suffix)).map(|(_, n)| n.clone());
     let tex = if !enabled {

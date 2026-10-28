@@ -5,7 +5,7 @@
 //! « Inventaire » et « Groupe ».
 //!
 //! Écart : seules les entrées dont la fenêtre existe dans ArchRust sont affichées (quêtes,
-//! inventaire, personnage, compétences de combat et de production, guilde, groupe, options, menu) ; un bouton
+//! inventaire, personnage, compétences de combat et de production, amis, ignorés, courrier, guilde, groupe, options, menu) ; un bouton
 //! sans entrée gérée (monde, Chantra) reste inactif.
 
 use super::npc_ui::{button, window};
@@ -21,6 +21,15 @@ pub enum MenuUi {
     /// Compétences de production (`UI_PDSkill`, `MenuBtnProductSkill`).
     ProductSkills,
     Guild,
+    /// Liste d'amis (`UI_BuddyList`, `MenuBtnBuddyList`).
+    Friends,
+    /// Liste d'ignorés (`UI_BanList`, `MenuBtnBanList`).
+    IgnoreList,
+    /// Boîte aux lettres (`MailBox`, `MenuBtn`).
+    Mailbox,
+    /// Salons de discussion : « Create Room » (`UI_CreateChatRoom`) et « Enter Chat » (`UI_EnterChatRoom`).
+    CreateChannel,
+    JoinChannel,
     Party,
     Options,
     Exit,
@@ -33,7 +42,11 @@ const MENUS: [(&str, &str, &[(&str, MenuUi)]); 5] = [
         "UI_MainMenuCharacter",
         &[("MenuBtnQuest", MenuUi::Quests), ("MenuBtnInventory", MenuUi::Inventory), ("MenuBtnEquip", MenuUi::Character), ("MenuBtnCombatSkill", MenuUi::Skills), ("MenuBtnProductSkill", MenuUi::ProductSkills)],
     ),
-    ("MainBtnCommunity", "UI_MainMenuCommunity", &[("MenuBtnGuild", MenuUi::Guild), ("CONTROL_15350", MenuUi::Party)]),
+    (
+        "MainBtnCommunity",
+        "UI_MainMenuCommunity",
+        &[("MenuBtnBuddyList", MenuUi::Friends), ("MenuBtnBanList", MenuUi::IgnoreList), ("MenuBtnCreateChannel", MenuUi::CreateChannel), ("MenuBtnJoinChannel", MenuUi::JoinChannel), ("MenuBtn", MenuUi::Mailbox), ("MenuBtnGuild", MenuUi::Guild), ("CONTROL_15350", MenuUi::Party)],
+    ),
     ("MainBtnWorld", "UI_MainMenuWorld", &[]),
     ("MainBtnChantra", "UI_MainMenuChantra", &[]),
     ("MainBtnOption", "UI_MainMenuOptions", &[("MenuBtnEnvironment", MenuUi::Options), ("MenuBtnExit", MenuUi::Exit)]),

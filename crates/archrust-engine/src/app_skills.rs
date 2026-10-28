@@ -351,6 +351,10 @@ impl App {
         }
         let Some(me) = self.player.as_ref().map(|p| p.cid) else { return };
         let target = self.addons.target_cid().unwrap_or(me);
+        // À cheval : `auto_attack` seulement (voir `app_ride.rs`).
+        if !self.ride_allows_skill(tid) {
+            return;
+        }
         // Compétences de production (AgcmProductMed) : contrôles de la récolte, ou fenêtre de fabrication
         // sans envoi pour la cuisine et l'alchimie (voir `app_product.rs`).
         if !self.product_before_cast(tid, id, target) {

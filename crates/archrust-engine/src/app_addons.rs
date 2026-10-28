@@ -407,10 +407,22 @@ impl App {
             match cmd {
                 HostCommand::Print(l) => self.ui.push_chat(l),
                 HostCommand::Chat { message, kind, .. } => {
-                    if kind != "SAY" {
-                        log::debug!("canal {kind} non géré par le serveur : envoyé en SAY");
+                    // Groupe, guilde et cri : préfixes `/p`, `/g`, `/s` d'Archonia (voir `chat::prefixed`).
+                    let mode = match kind.to_ascii_uppercase().as_str() {
+                        "PARTY" => Some(archrust_netclient::chat::chat_type::PARTY),
+                        "GUILD" => Some(archrust_netclient::chat::chat_type::GUILD),
+                        "YELL" => Some(archrust_netclient::chat::chat_type::WORD_BALLOON),
+                        _ => None,
+                    };
+                    match (mode, &self.net) {
+                        (Some(kind), Some(net)) => net.send(Command::Chat { kind, message }),
+                        _ => {
+                            if kind != "SAY" {
+                                log::debug!("canal {kind} non géré par le serveur : envoyé en SAY");
+                            }
+                            self.say(message);
+                        }
                     }
-                    self.say(message);
                 }
                 HostCommand::PlaySound(p) => {
                     // `PlaySound(1234)` façon WoW : identifiants de kits inconnus ici.

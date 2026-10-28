@@ -468,6 +468,10 @@ Réglages honorés :
 | Fonction | `OP_RefuseTrade` (`REF_TRADE`) | drapeau 1 (serveur) | `refuse.trade` : drapeau envoyé (pas d'échange entre joueurs dans ArchRust) |
 | Fonction | `OP_RefusePartyIn` (`REF_PIN`) | drapeau 2 (serveur) | `refuse.party` : drapeau envoyé, invitation reçue déclinée aussitôt (op de refus) |
 | Fonction | `OP_RefuseGuildIn` (`REF_GIN`) | drapeau 0x10 (serveur) | `refuse.guild` : drapeau envoyé, invitation reçue déclinée sans boîte |
+| GFX | `OP_Nature` (`Nature`, défaut 2) | liste « Environnement » bas / moyen / haut (effet non relevé) | `video.nature` : densité des particules de météo ×⅓ / ×⅔ / ×1 (hypothèse d'ArchRust) ; libellés `Option_Msg_LOW/MEDIUM/HIGH` |
+| GFX → `Option_Detail_Nature` | `OP_LensFlare` (`LensFlare`) | reflets du soleil (`LensFlare.ini`) | `video.lens_flare` |
+| GFX → `Option_Detail_Nature` | `OP_Fog` (`Fog`) | brouillard du ciel | `video.fog` |
+| GFX → `Option_Detail_Nature` | `OP_Sky` (`Sky`, libellé « Weather FX ») | effets météo | `video.sky` : particules de pluie et de neige (le ciel météo s'applique toujours) |
 
 Les noms masqués reviennent pour la cible (Archonia les rallume au survol, `FUN_14082b250`) ; ceux des PNJ
 (sorte 4) ne dépendent d'aucune option. Les listes de distances se règlent d'un clic (choix suivant, comme
@@ -494,8 +498,8 @@ d'Archonia renvoyés à l'auteur, voir « Refus des options » dans le protocole
 Réglages restés inactifs (ArchRust ne sait pas les honorer) :
 - GFX : `OP_SpeedTuning` (réglage automatique de la qualité par AgcmTuner, sans équivalent),
   `OP_TurnOffAllEffects` et `OP_Effect` avec sa fenêtre « Avancé » (ArchRust ne dessine pas d'effets),
-  `OP_Nature` et « Avancé » (herbe AgcmGrass `FUN_140597390`, objets naturels, halo, brouillard : non
-  dessinés), `OP_Shadow` et « Avancé » (pas d'ombres), `OP_Water` (AgcmWater, eau non dessinée),
+  la ligne « Objets » (`OP_NaturalObj`, herbe AgcmGrass `FUN_140597390`, objets naturels) de la fenêtre
+  `Option_Detail_Nature`, `OP_Shadow` et « Avancé » (pas d'ombres), `OP_Water` (AgcmWater, eau non dessinée),
   `OP_AntiAliasing` (rendu sans multiéchantillonnage), `OP_HighOptimization` (libellé « V-Sync » ; liste non
   relevée, présentation fixée à `AutoVsync`), `OP_WideView` (`FUN_1407080f0` non relevé), `OP_BrightVal`
   (gamma), `OP_AutoExposure`, `OP_MatEffect`, `OP_Impact`, `OP_Bloom`, `OP_BloomVal` (post-traitements
@@ -825,7 +829,10 @@ l'index (nom d'entrée) ou, pour le repli, par le préfixe du nom.
 section `[SkySet]`, 23 clés par tranche, toutes lues par Archonia avec le format `%02d_…`) qui
 porte, par tranche horaire, les couleurs du ciel, le brouillard, les nuages, la météo et :
 
-* `HH_BackGroundMusic` : nom d'un MP3 de `sound/bgm/` (vide = la tranche précédente continue) ;
+* `HH_BackGroundMusic` : nom d'un MP3 de `sound/bgm/`. Archonia ne suit pas la tranche : il tire au
+  hasard un morceau parmi les noms distincts et non vides des six tranches du gabarit, le joue une fois
+  et en tire un autre 10 s après la fin (liste vide : nouvel essai 5 s plus tard ; `FUN_1405804b0`,
+  `FUN_140580ab0`). ArchRust fait de même (`sky::MusicPlaylist`) ;
 * `HH_EffectIndex_01..05`, `HH_EffectRate_01..05`, `HH_EffectInterval` : jusqu'à cinq **jeux
   d'effets** (`effect/ini/new/efffile_set.eff`, voir ci-dessous). Au changement de tranche ou de
   ciel, Archonia (`AgcmSkySet`, fonction `FUN_140581fd0`) arrête les flux en cours puis joue en
@@ -834,14 +841,13 @@ porte, par tranche horaire, les couleurs du ciel, le brouillard, les nuages, la 
 
 Les six tranches sont les mêmes pour tous les jeux et fixes dans le code : `00` (0–4 h), `05`
 (5–6 h), `07` (7–12 h), `13` (13–17 h), `19` (18–20 h), `21` (21–23 h) ; l'heure vient du temps du
-jeu `(ms / 3 600 000) % 24` entretenu par `AgpmEventNature` à partir du paquet `AGPMTIMER` (champ 1,
-millisecondes, avancé localement), sans correction de fuseau. ArchCore envoie par défaut l'époque Unix
-décalée du fuseau local du serveur (`world.timeZone = "local"` ; `"utc"` pour l'époque UTC brute) :
-l'heure du jeu est donc l'heure locale du serveur, comme sur le serveur coréen d'origine ; sans
-serveur (`play` seul), ArchRust prend l'heure locale de la machine.
+jeu `(ms / 3 600 000) % 24` entretenu par AgpmTimer à partir du paquet `AGPMTIMER` (voir « Heure du
+monde, ciel et météo »), sans correction de fuseau. ArchCore envoie par défaut l'époque Unix
+décalée du fuseau local du serveur (`world.timeZone = "local"` ; `"utc"` pour l'époque UTC brute) ;
+sans serveur (`play` seul), ArchRust part comme Archonia de 12 h 00, vitesse ×6.
 
 Chaîne : position → secteur → cellule de la grille `.amf` → région (16 bits hauts) → `SkySet` →
-tranche de l'heure du jeu → `HH_BackGroundMusic` et `HH_EffectIndex_NN` → sons des jeux d'effets.
+musiques du gabarit ; tranche de l'heure du jeu → `HH_EffectIndex_NN` → sons des jeux d'effets.
 Vérifié : Anchorville (`C325,389`, région 9) → `SkySet` 13 → musique `HFT_001`/`HFT_006`/`HFT_008.mp3`
 et ambiance 3828 « 휴먼-심야 » `A_GRN_M.mp3` (0–6 h), 3825 « 휴먼-새벽 » `A_GRN_E.mp3` (7–12 h),
 3826 « 휴먼-낮 » `A_GRN_D.mp3` (13–17 h), 3827 « 휴먼-저녁 » `A_GRN_N.mp3` (18–23 h) ; vérifié en
@@ -917,6 +923,191 @@ Dans ArchRust (`app_product.rs`, `hud_product.rs`) : bouton « Crafting » (`sys
 cuisine ou l'alchimie ouvre `UI_Compose` sans rien envoyer (barre de 3 s puis op 0 au bouton « Create ») ;
 lancer la récolte sur un cadavre contrôle outil, cible et distance (≤ 250), puis, à l'action de lancement
 renvoyée par le serveur, barre de 5,4 s et op 2. Messages : `sysstr` 41–51, 351, 517, 518, 522, 426–430.
+
+## Amis, ignorés et courrier
+
+**AgpmBuddy 0x2B** (drapeaux 4, champs fixes) : I8 op, I32 CID du propriétaire de la liste, CHAR[33] nom de
+l'autre joueur, U32 drapeaux (0x1 discussion bloquée, 0x2 échange, 0x4 invitations, 0x00100000 en ligne,
+0x02000000 liste d'amis, sinon ignorés), I32 région (op 7, sinon -1), I32 relation « Buddy », I32 code (op 8).
+Ops : 1 ajout, 2 demande d'ami, 3 refus, 4 retrait, 5 cases d'un ignoré, 6 état en ligne, 7 région d'un ami,
+8 résultat (1 déjà présent, 2 hors ligne ou inconnu, 3 et 4 `sysstr` 715), 9 fin de la liste initiale, 10–14
+mentor (non traité). Op 15 (C → S, second schéma, drapeaux 4) : I8 op, I32 CID, I16 nombre, CHAR[990] = 30 noms
+de 33 octets, U32 × 30 drapeaux. Le client l'envoie après l'op 9 avec les ignorés d'`IgnoreList.txt` qu'il ne
+connaissait pas (lignes `nom\tdrapeaux\n` en CP1252, 512 lues au plus, commun à tous les personnages du PC ;
+ArchRust : `saved-variables/IgnoreList.txt`). 30 amis et 30 ignorés au plus.
+
+**AgpmMailBox 0x2D** (drapeaux 2) : I8 op, I32 CID, PACKET courrier, I32 IID de l'objet joint (op 3),
+I32 résultat (0 succès). Mini courrier (drapeaux 2) : I32 ID, CHAR[33] expéditeur, CHAR[33] destinataire
+(exactement le nom du joueur), CHAR[51] objet, I32 date (secondes Unix), I32 drapeaux (0x01 lu, 0x10 pièce
+récupérée), I32 TID et I16 quantité de la pièce jointe, MEMORY_BLOCK texte (NUL compris, 1 à 1000 octets).
+Ops : 0 ajout (S → C seulement, en tête, 30 au plus), 1 retrait, 2 lecture, 3 écriture, 4 récupération de la
+pièce jointe, 5 tout retirer (S → C). Pour 1, 2 et 4 le client ne remplit que l'ID du mini courrier.
+
+Dans ArchRust (`app_buddy.rs`, `hud_buddy.rs`, `app_mail.rs`, `hud_mail.rs`) : `UI_BuddyList`, `UI_BanList`,
+`UI_AddBuddyList`, `UI_AddBanList` (menu Communauté, touche N, `/amis`, `/ignores`), « Menu » d'un joueur ciblé
+(`UI_TargetUserMenu` → `UI_TargetCharacterMenu` : Invite, Whisper, Add Friend, Ignore User) ; `MailBox`,
+`MailWrite`, `MailRead` (menu Communauté, touche U, `/courrier`), papier à lettre 3601 exigé pour écrire.
+
+## Usure et réparation
+
+Durabilité : facteur « objet » (type 10) de l'objet, sous-valeur 0 = actuelle, reçue dans AGPMITEM op 0/2
+champ 10 (mini `CHAR_FACTORS`, sous-paquet 10 = `FACTOR_ITEM`, champ 0) ; maximum = colonne `DUR`
+d'itemdatatable.txt (`@` en tête : inusable, 50000). Pourcentage tronqué, 1 entre 0 et 1, -1 sans maximum.
+Coût : `tronc(NPC Price / max × (max − actuelle) × 0,5)` + taxe de région (0 sur ArchCore).
+
+**AgpmEventItemRepair 0x34** (drapeaux 1) : I8 op, PACKET EVENT_BASE (fonction 17), I32 CID, I32 × 20 IID de la
+grille (5 lignes × 4, 0 = vide), I64 coût total, I32 résultat. Ops : 3 demande (C → S) → 4 accord ; 0 réparation
+(C → S, résultat 0) → 1 résultat (1 réussi, 2 or, 3 déjà au maximum, 4 échec, 5 non réparable).
+
+Dans ArchRust (`app_repair.rs`, `hud_repair.rs`) : bouton « Repair » (`sysstr` 325) du dialogue, `UI_Repair`,
+`UI_EquipStatus` (parties sous 21 %), case marquée `DurabilityZero.png`, « Repair Cost » de l'infobulle ;
+`/reparation`, `/areparer nom`, `/reparer`, `/durabilite`.
+
+## Montures
+
+**AgpmRide 0x4D** (drapeaux 1) : I8 op, I32 CID du cavalier, I32 IID de l'objet monture (op 2) ou TID de la
+monture (op 6), I32 temps restant (ignoré). Reçu seulement : 2 monté, 4 descendu, 5 sans effet, 6 monté sur un
+TID. Monter = porter l'objet de partie 14 (genre 32), son `SubType` étant le TID de la monture
+(`charactertemplateclient.ini`, `a%07x.ecl`) ; lance en partie 15. Octet d'état d'AGPMCHARACTER (champ 18) et
+de la vue optimisée (champ 15) : bit 0 métamorphosé, bit 1 monté, bit 2 évolution.
+
+Dans ArchRust (`app_ride.rs`) : monture tracée et animée sous le cavalier, posé sur la première piste animée
+de la monture (déduit) ; animations « à cheval » du cavalier (FUN_140756060) ; course sans plafond de 60 000 ;
+`RIDER_HEIGHT` ajouté au panneau du nom ; refus des compétences (`sysstr` 320, 527) et potions (346 à 348).
+
+## Maison des ventes
+
+**AgpmAuction 0x0B** (drapeaux 2) : I8 op, I32 CID, PACKET sous-paquet, I32 résultat. Sous-paquets (identifiants
+internes 192 à 198) : SALES (drapeaux 2 : I32 salesID, U64 docID, U64 n° d'objet, I32 IID, I64 or, I64 CC, I16
+quantité, I16 statut 0/1, CHAR[33] date, I32 TID), SELECT2 (I32 TID, U64 curseur, I16 sens, I32 total, PACKET
+rowset), SELL (I32 IID, I16 quantité, I64 or, I64 CC, CHAR[33], I32 IID du parchemin Marvel), CANCEL (I32 salesID,
+I32 TID, I16), CONFIRM (+ I64 gain or, I64 gain CC), BUY (I64 docID, I16, I32 TID, I64 or, I64 CC = 0 à l'envoi),
+ROWSET (drapeaux 2 : I32, bloc requête, bloc en-têtes, U32 lignes, U32 colonnes, U32 taille de ligne, bloc
+tampon, bloc des décalages U32 : une chaîne terminée par 0 par colonne — 0 docID, 1 vendeur, 3 or, 4 CC, 6 TID,
+7 quantité). Ops : 1/2/3 vente ajoutée/retirée/statut, 4 vente (6, 14 : limite), 5 annulation (7 : sac plein),
+6 encaissement, 7 achat (5, 7, 12), 8 avis, 9 → 10 ouverture (EVENT_BASE, fonction 28), 12 recherche (15 lignes
+par réponse, curseur 9 999 999 999 999 puis docID de la dernière ligne, 200 requêtes au plus, une par seconde).
+Frais 3 % (division entière) ; or ≤ 1e11 (refus de 1 à 99 999), CC ≤ 1e6. Catégories : colonnes
+`FirstCategory`, `FirstCategoryName`, `SecondCategory`, `SecondCategoryName` d'itemdatatable.txt.
+
+AGPMITEM : champs 18 et 22 en UINT64 (temps de recharge), 19 drapeaux d'état (`AgpdItem+0x218` : bits 0-2 lié,
+bit 30 lié définitivement), 25 bloc (inconnu), 26 UINT64 identifiant de l'objet (`AgpdItem+0x58`).
+
+Dans ArchRust (`app_auction.rs`, `hud_auction.rs`) : `UI_Auction`, `UI_SalesBox2` (bouton « Sell » de
+l'inventaire), `UI_AuctionCreateSale` ; liste des catégories par niveau, retour au niveau supérieur par le bouton
+« − » ou un clic droit (`AC_BackToParent` n'a pas de contrôle) ; `/ventes`.
+
+## Commutateur d'équipement
+
+**AgpmItemSet 0x6A** (drapeaux 1) : I8 op, I32 emplacement (`(profil × 10 + config) × 2 + jeu`, -1 aucun),
+I8 argument, CHAR[4000] objets. Ops : 0 capturer, 1 équiper, 2 vider, 6 déplacer (`(de << 4) | vers`), 7 retirer
+(C → S, quatre champs toujours présents) ; 3 drapeau, 4 jeu actif, 5 contenu (S → C, rejet si op ≥ 8 ou
+emplacement ≥ 100). Contenu : jetons `E,<partie>,<id64>` séparés par `:` (10 au plus), `id64` = champ 26
+d'AGPMITEM. Aucun bonus de panoplie dans Archonia.
+
+`ItemSwitch_<nom, octets hors [A-Za-z0-9] en _%02X>.dat` (ArchRust : `saved-variables/`) : u32 version 3, u32
+profil courant (0 à 4), 5 profils de 0x20C octets : nom[32], 10 configurations de 0x30 octets (nom[32], u32,
+u32 réservés, i32 raccourci -1 = aucun, i32 utilisée), i32 -1, i32 -1, i32 valide. Codage du raccourci propre à
+ArchRust (VK Windows, bits 16-18 Maj / Ctrl / Alt). Fenêtre `UI_SwitchEditor` (`Ctrl+M`, `/commutateur`),
+anciens raccourcis `/switch N` et `/saveset N` (jeux 1 à 5, avec confirmation).
+
+## Heure du monde, ciel et météo
+
+Relevé dans Archonia (AgpmTimer, AgpmEventNature, AgcmEventNature, AgcmNatureEffect). Les trois paquets
+vont du serveur au client, sans octet d'opération (`archrust-netclient/src/nature.rs`) :
+
+| Paquet | Drapeaux | Champs | Client |
+|---|---|---|---|
+| AgpmTimer 0x11 | 1 | `UINT8` vitesse, `UINT64` temps de jeu (ms), `UINT32`, `UINT32` | champ nul ignoré ; temps = base + écoulé × vitesse ; seul le temps remet la base à l'instant de réception |
+| AgpmEventNature 0x30 | 1 | `INT8` météo (−1 absent), `INT64`, `INT64` (non lus) | 0 fin en fondu, 3 pluie (effet 1), 5 neige (effet 0), autres sans effet |
+| AgpmNatureEffect 0x47 | **2** | `INT32` effet de `natureeffect.ini` (−1 = arrêt, défaut) | démarrage net ; −1 : fondu de sortie de 5 s (0,0002 par ms) |
+
+Sans paquet, Archonia part de 12 h 00 à la vitesse ×6 (1 h de jeu = 10 min, une journée = 4 h réelles).
+
+**Gabarits de ciel** (`ini/skyset.ini`, 159 gabarits) : six tranches de 28 clés (`HH_SkyTop`, `SkyBottom`,
+`Ambient`, `Directional` en flottants 0-1 ; `FogColor`, `FogDistance`, `FogFarClip` ; `CloudTexture1/2`,
+`CloudColor1/2` RGBA 0-255, `CloudSpeed1/2` ; `Circumstance` et sa couleur (bande d'horizon) ; `Sun` et sa
+couleur (texture `SKY00001`, une lune : les tranches de jour ont `Sun=-1`) ; `EffectInterval`,
+`EffectIndex/Rate_01..05` ; `BackGroundMusic` ; `WeatherEffect1/2`). Chaque clé présente met un bit de
+la tranche : 1 couleurs et lumières, 2 brouillard, 4 nuages / horizon / astre, 8 effets, 0x10 musique,
+0x20 météo ; la composition copie chaque composante séparément. `WeatherEffect1` : bit 2 étoiles (0-5 h
+et 18-23 h), bit 0x20 gabarit abrité (s'impose pendant la météo), autres bits inconnus. Textures :
+`ini/alefskysetting.ini` `[Texture]` `NN=SKY000NN.tif` (nuages = masques alpha blancs, `SKY00000` = bande
+d'horizon opaque en bas, transparente en haut). Reflets : `ini/LensFlare.ini` (`FN=n:fichier`,
+`SET=taille,position,r,g,b,a,texture`, textures sans alpha, mélange additif).
+
+**Choix du gabarit** : ciel local d'un objet (`obj%05d.ini`, événement `Function=11`, sphère
+`CondAreaSphereRadius`, `SkyTemplateID`), sinon région (`RegionTemplate.ini` `SkySet`, 13 par défaut) ;
+pendant un effet de nature, `NEFFECT_SKYSET` (98 neige, 99 pluie) sauf gabarit abrité. Transition de
+25 000 ms de temps de jeu à chaque changement de tranche ou de gabarit (couleurs et distances linéaires,
+fondu croisé des couches), aucune variation à l'intérieur d'une tranche. Nuages : défilement = vitesse ×
+Δ temps de jeu × 1,5 × k.
+
+**Météo** (`ini/natureeffect.ini`) : `[Textures]` `TEXTURE_NAME=n:fichier` (`NE_Snow`, `NE_Rain`,
+`NE_Pollen`, 8 × 8), blocs `NEFFECT_ID`, `TEXTURE_ID`, `NEFFECT_TYPE` (0 flocons qui oscillent, 1-3
+traînées), `SIZE/SPEED/SWING/DENSITY/RED/GREEN/BLUE/ALPHA _MIN/_MAX`, `NEFFECT_SKYSET`. Particules sur une
+grille de 5 × 5 cases autour de la caméra, couleurs tirées parmi 32 teintes.
+
+Dans ArchRust (`sky.rs`, `weather.rs`, `sky_render.rs`, `sky.wgsl`, `nature.wgsl`, `app_nature.rs`) :
+dôme en dégradé selon l'élévation, étoiles procédurales (20 % changent d'alpha toutes les 100 ms),
+astre, deux couches de nuages projetées sur un plan, bande d'horizon, lumière ambiante et
+directionnelle, brouillard linéaire `FogDistance` → `FogFarClip` ramené à la distance de tracé, couleurs
+converties du gamma du fichier vers le rendu linéaire. Choix propres à ArchRust (formes non relevées) :
+géométrie du dôme et des couches, astre à 30° dans l'azimut de la lumière, k du défilement, unités des
+particules (case de 1 000, 100 particules par unité de densité, taille × 40, chute × 40 ou × 250 /s),
+plus petite sphère de ciel local au lieu de la grille pondérée d'Archonia, reflets liés à la lumière
+directionnelle (intensité = sa plus forte composante) et cachés si un objet couvre l'astre.
+
+## Discussion, salons, coiffeur et avis de recherche
+
+Relevés dans Archonia (`chat.rs`, `customize.rs`, `wanted.rs` d'`archrust-netclient`).
+
+- **Envoi** (AGPMCHATTING 0x0F) : toujours op 0 **type 0**, le mode devenant un préfixe du texte (`/p`, `/g`,
+  `/s` ; `/race`, `/scream`, `/warn` tels que tapés), interprété par le serveur ; seul le chuchotement part en
+  type 5. Texte coupé à 0x200 octets.
+- **Réception** : type → classe (masque d'onglet), couleur `color.ini`, format (`FUN_1407a2b30`) : 0 `[nom] t`
+  (`NORMAL_CHAT`) ; 1 `[Shout][nom] t` (`WORD_BALLON`) ; 3, 13, 14 guilde ; 4 groupe ; 5/6 chuchotement ;
+  7, 11, 12 `[Notice] t` (`NOTICE_CHAT1`) ; 8-10 `[System] t` (`SYSTEM_CHAT2`, doublon < 500 ms ignoré) ;
+  16 siège ; 17 et 20 texte seul en jaune, 19 texte seul `RACE_TRUMPET` ; 2, 15, 18 non affichés ; un texte
+  commençant par `/` n'est jamais affiché. Suffixe `RRGGBB` : couleur du corps (après le 2ᵉ `]` pour
+  17, 19, 20).
+- **AgpmAreaChatting 0x4C** (drapeaux 1) : `INT8 op, INT32 CID, INT8 genre, INT8, UINT32 type, CHAR[49] nom,
+  MEMORY_BLOCK texte` ; op 0 seule, serveur → client, affichée comme une discussion du type donné.
+- **AgpmChannel 0x2C** (drapeaux 4) : `INT8 op, INT32 CID, CHAR[41] salon, CHAR[9] mot de passe, CHAR[33]
+  personnage, INT32 genre (1 public, 2 privé, 3 guilde), INT32 résultat, CHAR[121] texte, MEMORY_BLOCK
+  membres`. Ops : 1 créer, 3 entrer (S→C : membres `nom1;nom2;`, un nom n'est pris que suivi de `;`), 4
+  sortir, 5/6 membre arrivé/parti, 7 inviter, 8 mot de passe, 9 message (pas d'écho local), 10 chercher,
+  11 résultat (1 nom pris, 2 inexistant, 3 joueur absent, 4 plein, 5 pas chef, 6 pas membre, 7 guilde déjà
+  pourvue, 8 mauvais mot de passe, 11 déjà membre). 5 salons, 15 membres (100 en guilde).
+- **AgpmEventCharCustomize 0x43** (drapeaux 1) : `INT8 op, PACKET EVENT_BASE, INT32 CID, INT8 visage, INT8
+  coiffure` ; op 0 demande, 1 accord, 2 achat (-1 : inchangé) ; aucun résultat : le changement revient par
+  AGPMCHARACTER op 1 champs 20/21 ≥ 0. Table `charactercustomizelist.txt` (`Type`, `Number`, `Sell Name`,
+  `Case` 0/1 coiffeur, `CharacterTID`, `UseLevel`, `Price(Money)`).
+- **AgpmWantedCriminal 0x46** (drapeaux 2) : `INT8 op, INT32 CID, INT32 page, INT32 rang, INT32 résultat /
+  drapeau / genre, PACKET` ; mini (drapeaux 2) `CHAR[33] nom, INT64 montant, INT32 niveau, INT32 TID, INT32
+  en ligne`. Ops : 0/1 tableau (fonction 32), 2 mise à prix (0 réussite, 1 prime de base, 2 or, 3 déjà),
+  3 page, 4 ligne (page -100 : fin), 5 rang (toutes les 30 s si recherché), 6 tueur de la victime, 7
+  recherché, 8 notification (4 `WC_KILL`, 5 `WC_DEAD`). Prime de base selon le niveau du poseur : ≤ 20
+  50 000, ≤ 40 100 000, ≤ 60 200 000, ≤ 80 400 000, au-delà 1 000 000 ; argent compté : porté + banque.
+
+## Invocations
+
+Relevées dans Archonia (`summons.rs` d'`archrust-netclient`, `app_summons.rs` du moteur).
+
+- **AgpmSummons 0x4F** (drapeaux 2) : `INT8 op, INT32 maître, INT32 créature, INT32 TID, INT8 type (ou limite),
+  INT8 propension, UINT64 apparition, UINT64 fin, UINT8 forcée`. Du serveur : 0 ajout, 1 retrait, 2 propension
+  (renvoyée au maître ; seule l'op 2 vient du client : maître, créature, propension, forcée = 0), 3 limite des
+  invocations, 4 limite des apprivoisées. Propension 0 attaque, 1 défense, 2 ombre.
+- **Ordre** : vue de la créature (0x42 op 1), état spécial (AGPMCHARACTER op 1, champ 17 u64 : 0x800 pour les
+  types 1 et 8, 0x1000 pour 2, 0xC00 pour 4, rien pour 0x20), puis op 0 ; sinon le client l'ignore. Horodatages
+  non nuls, rangés sans être lus.
+- **Registre** : par maître, trois listes de 10 (types 1/8/0x20, limite 1 ; type 2, limite 10 ; type 4, limite 10).
+  Sans « forcée », liste pleine = refus ; un familier (8) ou une invocation forcée relève la limite d'un cran,
+  rendu au retrait. Au retrait, les bits 0x800/0x400/0x1000 de la créature s'effacent.
+- **Interface** : cibler une de ses invocations ouvre `UI_TargetSummonsMenu` (texte `SummonsPropensity*`) ; son
+  bouton ouvre `UI_TargetSummonsMenu2` (Attack / Defense / Shadow Type → op 2). Un familier n'est pas sélectionnable.
+  Messages système 10-13, 15-17 : clés de `systemmsgformat.xml` (`TameFailure*`, `FixedFailureMaxCount`,
+  `SummonsFailureMaxCount`, `SummonsLevelLimitRegion`).
 
 ## Inconnues
 

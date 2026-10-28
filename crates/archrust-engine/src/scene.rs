@@ -454,11 +454,13 @@ pub struct Speeds {
     pub run: i32,
     /// Déplacement en cours à la course (drapeau 0x10).
     pub fast: bool,
+    /// Monté (`AgpmCharacter + 0xbfc`) : le plafond de 60000 ne s'applique pas (`FUN_14017a850`).
+    pub riding: bool,
 }
 
 impl Default for Speeds {
     fn default() -> Self {
-        Self { walk: 0, run: 0, fast: true }
+        Self { walk: 0, run: 0, fast: true, riding: false }
     }
 }
 
@@ -476,7 +478,7 @@ impl Speeds {
     /// Vitesse du déplacement en cours, en unités du monde par seconde.
     pub fn units_per_second(&self) -> f32 {
         let v = if self.fast {
-            if self.run > 0 { self.run.min(60_000) } else { 12_000 }
+            if self.run > 0 && self.riding { self.run } else if self.run > 0 { self.run.min(60_000) } else { 12_000 }
         } else if self.walk > 0 {
             self.walk
         } else {
@@ -561,6 +563,11 @@ pub fn entity_meshes_with_equipment(
 ) -> Result<Vec<(Arc<Mesh>, Mat4)>> {
     let mut meshes = entity_pieces(renderer, assets, tid, head, fallback)?;
     for item in equipment {
+        // Monture (partie 14) et arme montée (15) : pas des vêtements ; la monture est un personnage à
+        // part (voir `app_ride.rs`).
+        if matches!(item_part_for_tid(assets, item.template_id), Some(14 | 15)) {
+            continue;
+        }
         let Some(file) = item_model_for_tid(assets, item.template_id) else {
             continue;
         };
@@ -798,6 +805,8 @@ mod tests {
         assert_eq!(s.units_per_second(), 500.0, "MovementFast=5000");
         s.learn(None, Some(90_000));
         assert_eq!(s.units_per_second(), 6000.0, "plafond 60000");
+        s.riding = true;
+        assert_eq!(s.units_per_second(), 9000.0, "à cheval : sans plafond");
     }
 
     #[test]

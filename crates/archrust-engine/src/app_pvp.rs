@@ -140,6 +140,11 @@ impl PvpGlue {
         });
         messages.get(key).cloned().unwrap_or_default()
     }
+
+    /// Palier de meurtrier connu d'un personnage (0 à 3), pour les refus d'autres systèmes (maison des ventes).
+    pub(super) fn murderer_level_of(&self, cid: i32) -> usize {
+        murderer_level(self.marks.get(&cid).map_or(0, |m| m.1))
+    }
 }
 
 /// Points de meurtrier retirés par une rémission, comme le client d'Archonia l'annonce (`REMIT_MSG_RM_PO`).

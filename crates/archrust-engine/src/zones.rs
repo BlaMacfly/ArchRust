@@ -13,7 +13,8 @@
 //! 2. `ini/RegionTemplate.ini` : section `[région]`, clés `Name`, `SkySet`, `WorldMap`, `Type` ;
 //! 3. `ini/skyset.ini` : section `[SkySet]`, six tranches horaires fixes `00`, `05`, `07`, `13`,
 //!    `19`, `21` (Archonia : 0–4 h, 5–6 h, 7–12 h, 13–17 h, 18–20 h, 21–23 h), chacune avec :
-//!    * `HH_BackGroundMusic` : MP3 de `sound/bgm/` (vide = la tranche précédente continue) ;
+//!    * `HH_BackGroundMusic` : MP3 de `sound/bgm/` ; Archonia tire au hasard parmi ceux des six
+//!      tranches, sans suivre l'heure (voir [`crate::sky::MusicPlaylist`]) ;
 //!    * `HH_EffectIndex_01..05` : jeux d'effets (`effect/ini/new/efffile_set.eff`) dont les effets
 //!      **son** nomment un MP3 de `sound/stream/` ; Archonia les joue tous en boucle au changement
 //!      de tranche ou de ciel (`HH_EffectRate_NN` ne sert qu'au tirage de l'effet visuel). Pour le
@@ -22,8 +23,8 @@
 //!      3827 « 휴먼-저녁 » `A_GRN_N.mp3` ensuite. Vérifié en jeu sur ArchCore à 7 h UTC :
 //!      région 0 → `hft_008.mp3` + `a_grn_e.mp3`.
 //! 4. l'heure est celle du jeu : `(temps_ms / 3 600 000) % 24` sur le temps du paquet
-//!    `AGPMTIMER` (champ 1, millisecondes) entretenu par le client ([`GameClock`]) ; sans serveur,
-//!    l'heure locale.
+//!    `AGPMTIMER` (champ 0 vitesse, champ 1 millisecondes) entretenu par le client ([`GameClock`]) ;
+//!    sans serveur, 12 h 00 à la vitesse ×6 comme Archonia.
 
 use crate::assets::Assets;
 use crate::world::{sector_of, sector_origin, tile_of, CELLS, CELL_SIZE};
@@ -67,21 +68,11 @@ pub fn parse_amf(bytes: &[u8]) -> Option<Vec<u32>> {
     )
 }
 
-/// Musique d'une section `skyset.ini` à l'heure `hour` (0–23) : `HH_BackGroundMusic` de la tranche
-/// de l'heure, une tranche vide reconduisant la précédente (minuit passé : la dernière remplie).
-pub fn sky_music(section: &archrust_data::ini::IniSection, hour: u32) -> Option<String> {
-    let slot = sky_slot(hour);
-    let value = |i: usize| {
-        section
-            .get(&format!("{}_BackGroundMusic", SKY_SLOTS[i]))
-            .map(str::trim)
-            .filter(|v| !v.is_empty() && *v != "-")
-    };
-    let pick = (0..=slot)
-        .rev()
-        .chain((slot + 1..SKY_SLOTS.len()).rev())
-        .find_map(value)?;
-    Some(format!("sound/bgm/{}", pick.to_ascii_lowercase()))
+/// Musiques d'une section `skyset.ini` : `HH_BackGroundMusic` distincts et non vides des six
+/// tranches (`sound/bgm/…`). Archonia en tire une au hasard, sans suivre l'heure (voir
+/// [`crate::sky::MusicPlaylist`]).
+pub fn sky_music(section: &archrust_data::ini::IniSection) -> Vec<String> {
+    crate::sky::SkyTemplate::parse(section).map(|t| t.music()).unwrap_or_default()
 }
 
 /// Jeux d'effets (`HH_EffectIndex_01..05`, non nuls) de la tranche de l'heure.
@@ -124,38 +115,80 @@ pub fn local_hour() -> u32 {
     }
 }
 
-/// Horloge du jeu : temps du serveur (paquet `AGPMTIMER`, millisecondes) avancé localement.
-/// Archonia en tire l'heure du ciel par `(ms / 3 600 000) % 24`, sans fuseau : ArchCore envoie par
-/// défaut l'époque Unix décalée du fuseau local du serveur (`world.timeZone`), l'heure du jeu est
-/// donc l'heure locale du serveur.
-#[derive(Debug, Clone, Copy, Default)]
+/// Temps de jeu d'Archonia avant tout paquet `AGPMTIMER` : 12 h 00 (`FUN_1400f72d0`).
+pub const DEFAULT_GAME_MS: u64 = 43_200_000;
+/// Vitesse du temps d'Archonia avant tout paquet : ×6 (1 h de jeu = 10 min, 1 jour = 4 h réelles).
+pub const DEFAULT_TIME_SPEED: u32 = 6;
+
+/// Horloge du jeu d'AgpmTimer (`FUN_14022e640`) : `temps = base + (tick − tick_base) × vitesse`,
+/// heure `(temps / 3 600 000) % 24`. Le paquet `AGPMTIMER` donne la vitesse (champ 0) et le temps
+/// (champ 1, ms) ; un champ nul est ignoré, et seul le temps remet la base à l'instant de
+/// réception (une vitesse seule s'applique donc à tout le temps écoulé depuis la base, comme dans
+/// Archonia). Sans serveur : 12 h 00 ×6 depuis le lancement, comme Archonia (ArchCore envoie
+/// l'époque Unix décalée du fuseau du serveur, `world.timeZone`).
+#[derive(Debug, Clone, Copy)]
 pub struct GameClock {
-    base: Option<(u64, Instant)>,
+    base_ms: u64,
+    speed: u32,
+    at: Instant,
+    from_server: bool,
+}
+
+impl Default for GameClock {
+    fn default() -> Self {
+        Self { base_ms: DEFAULT_GAME_MS, speed: DEFAULT_TIME_SPEED, at: Instant::now(), from_server: false }
+    }
 }
 
 impl GameClock {
-    /// Temps reçu du serveur (`WorldEvent::GameTime`).
+    /// Paquet `AGPMTIMER` reçu : vitesse et temps, `None` = inchangé.
+    pub fn receive(&mut self, speed: Option<u8>, time_ms: Option<u64>) {
+        self.receive_at(speed, time_ms, Instant::now());
+    }
+
+    pub fn receive_at(&mut self, speed: Option<u8>, time_ms: Option<u64>, now: Instant) {
+        if let Some(s) = speed.filter(|&s| s != 0) {
+            self.speed = s as u32;
+        }
+        if let Some(t) = time_ms.filter(|&t| t != 0) {
+            self.base_ms = t;
+            self.at = now;
+            self.from_server = true;
+        }
+    }
+
+    /// Temps reçu du serveur, vitesse inchangée.
     pub fn set(&mut self, server_ms: u64) {
-        self.base = Some((server_ms, Instant::now()));
+        self.receive(None, Some(server_ms));
     }
 
+    /// Retour aux valeurs d'Archonia (sortie du monde).
     pub fn clear(&mut self) {
-        self.base = None;
+        *self = Self::default();
     }
 
+    /// Le serveur a donné le temps.
     pub fn is_set(&self) -> bool {
-        self.base.is_some()
+        self.from_server
     }
 
-    /// Temps du jeu courant en millisecondes, si le serveur l'a donné.
-    pub fn now_ms(&self) -> Option<u64> {
-        self.base
-            .map(|(ms, at)| ms.saturating_add(at.elapsed().as_millis() as u64))
+    pub fn speed(&self) -> u32 {
+        self.speed
     }
 
-    /// Heure du jeu (0–23) : celle du serveur, sinon l'heure locale.
+    /// Temps du jeu courant en millisecondes.
+    pub fn now_ms(&self) -> u64 {
+        self.ms_at(Instant::now())
+    }
+
+    pub fn ms_at(&self, now: Instant) -> u64 {
+        let elapsed = now.saturating_duration_since(self.at).as_millis() as u64;
+        self.base_ms.saturating_add(elapsed.saturating_mul(self.speed as u64))
+    }
+
+    /// Heure du jeu (0–23).
     pub fn hour(&self) -> u32 {
-        self.now_ms().map_or_else(local_hour, hour_of_ms)
+        hour_of_ms(self.now_ms())
     }
 }
 
@@ -168,8 +201,8 @@ pub fn hour_of_ms(ms: u64) -> u32 {
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct ZoneAudio {
     pub region: u16,
-    /// Musique (`sound/bgm/…`) de la région à l'heure donnée.
-    pub music: Option<String>,
+    /// Musiques (`sound/bgm/…`) du gabarit de ciel de la région (toutes tranches).
+    pub music: Vec<String>,
     /// Ambiances (`sound/stream/…`) de la région à l'heure donnée, dans l'ordre des
     /// `EffectIndex` ; Archonia les joue toutes, ArchRust la première.
     pub ambience: Vec<String>,
@@ -221,11 +254,11 @@ impl Zones {
         t.section(&region.to_string())?.get_i64("SkySet")
     }
 
-    /// Musique (`sound/bgm/…`) d'une région à l'heure donnée, d'après `skyset.ini`.
-    pub fn music_for_region(assets: &Assets, region: u16, hour: u32) -> Option<String> {
-        let sky = Self::sky_set(assets, region)?;
-        let t = assets.table("ini", "skyset.ini").ok()?;
-        sky_music(t.section(&sky.to_string())?, hour)
+    /// Musiques (`sound/bgm/…`) du gabarit de ciel d'une région, d'après `skyset.ini`.
+    pub fn music_for_region(assets: &Assets, region: u16) -> Vec<String> {
+        let Some(sky) = Self::sky_set(assets, region) else { return Vec::new() };
+        let Ok(t) = assets.table("ini", "skyset.ini") else { return Vec::new() };
+        t.section(&sky.to_string()).map(sky_music).unwrap_or_default()
     }
 
     /// Ambiances (`sound/stream/…`) d'une région à l'heure donnée : jeux d'effets
@@ -269,7 +302,7 @@ impl Zones {
         let region = self.region_at(assets, x, z)?;
         Some(ZoneAudio {
             region,
-            music: Self::music_for_region(assets, region, hour),
+            music: Self::music_for_region(assets, region),
             ambience: Self::ambience_for_region(assets, region, hour),
         })
     }
@@ -312,20 +345,14 @@ mod tests {
     }
 
     #[test]
-    fn sky_music_picks_the_slot_for_the_hour() {
+    fn sky_music_lists_every_slot() {
         let t = IniTable::parse(
-            "[13]\nTID=13\n00_BackGroundMusic=HFT_001.mp3\n05_BackGroundMusic=HFT_006.mp3\n07_BackGroundMusic=\n13_BackGroundMusic=-\n19_BackGroundMusic=HFT_002.MP3\n21_BackGroundMusic=\n[3]\n00_BackGroundMusic=\n05_BackGroundMusic=\n",
+            "[13]\nTID=13\n00_BackGroundMusic=HFT_001.mp3\n05_BackGroundMusic=HFT_006.mp3\n07_BackGroundMusic=\n13_BackGroundMusic=-\n19_BackGroundMusic=HFT_002.MP3\n21_BackGroundMusic=hft_001.mp3\n[3]\n00_BackGroundMusic=\n05_BackGroundMusic=\n",
         );
         let s = t.section("13").unwrap();
-        assert_eq!(sky_music(s, 3).as_deref(), Some("sound/bgm/hft_001.mp3"));
-        assert_eq!(sky_music(s, 5).as_deref(), Some("sound/bgm/hft_006.mp3"));
-        // Tranches vides : la précédente continue.
-        assert_eq!(sky_music(s, 10).as_deref(), Some("sound/bgm/hft_006.mp3"));
-        assert_eq!(sky_music(s, 15).as_deref(), Some("sound/bgm/hft_006.mp3"));
-        // 18 h appartient à la tranche « 19 » (18–20 h), comme Archonia.
-        assert_eq!(sky_music(s, 18).as_deref(), Some("sound/bgm/hft_002.mp3"));
-        assert_eq!(sky_music(s, 23).as_deref(), Some("sound/bgm/hft_002.mp3"));
-        assert_eq!(sky_music(t.section("3").unwrap(), 12), None);
+        // Toutes les tranches, sans doublon ni vide : la musique ne suit pas l'heure (Archonia).
+        assert_eq!(sky_music(s), ["sound/bgm/hft_001.mp3", "sound/bgm/hft_006.mp3", "sound/bgm/hft_002.mp3"]);
+        assert!(sky_music(t.section("3").unwrap()).is_empty());
         assert!(local_hour() < 24);
     }
 
@@ -346,7 +373,9 @@ mod tests {
     fn game_clock_uses_the_server_time_when_known() {
         let mut clock = GameClock::default();
         assert!(!clock.is_set());
-        assert_eq!(clock.hour(), local_hour());
+        // Sans serveur : 12 h ×6, comme Archonia.
+        assert_eq!(clock.hour(), 12);
+        assert_eq!(clock.speed(), 6);
         // 1970-01-01 15:30 UTC.
         clock.set(15 * 3_600_000 + 30 * 60_000);
         assert!(clock.is_set());
@@ -355,6 +384,25 @@ mod tests {
         assert_eq!(hour_of_ms(u64::MAX), ((u64::MAX / 3_600_000) % 24) as u32);
         clock.clear();
         assert!(!clock.is_set());
+        assert_eq!(clock.speed(), DEFAULT_TIME_SPEED);
+    }
+
+    #[test]
+    fn game_clock_applies_the_time_speed() {
+        let t0 = Instant::now();
+        let mut clock = GameClock::default();
+        clock.receive_at(Some(6), Some(10_000), t0);
+        assert_eq!(clock.ms_at(t0 + std::time::Duration::from_secs(10)), 70_000);
+        // Champs nuls : ignorés.
+        clock.receive_at(Some(0), Some(0), t0 + std::time::Duration::from_secs(1));
+        assert_eq!(clock.speed(), 6);
+        assert_eq!(clock.ms_at(t0 + std::time::Duration::from_secs(10)), 70_000);
+        // Vitesse seule : appliquée depuis la base (Archonia ne remet pas la base à zéro).
+        clock.receive_at(Some(1), None, t0 + std::time::Duration::from_secs(5));
+        assert_eq!(clock.ms_at(t0 + std::time::Duration::from_secs(10)), 20_000);
+        // ×6 : une heure de jeu = 10 minutes réelles.
+        clock.receive_at(Some(6), Some(3_600_000), t0);
+        assert_eq!(hour_of_ms(clock.ms_at(t0 + std::time::Duration::from_secs(600))), 2);
     }
 
     #[test]
@@ -362,7 +410,7 @@ mod tests {
         let assets = Assets::new(None, &[]);
         let mut z = Zones::default();
         assert_eq!(z.region_at(&assets, -478_000.0, -68_000.0), None);
-        assert_eq!(Zones::music_for_region(&assets, 9, 12), None);
+        assert!(Zones::music_for_region(&assets, 9).is_empty());
         assert!(Zones::ambience_for_region(&assets, 9, 12).is_empty());
         assert!(z.audio_at(&assets, 0.0, 0.0, 12).is_none());
         assert!(assets.effect_sets().is_empty());

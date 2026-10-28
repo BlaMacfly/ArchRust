@@ -500,6 +500,13 @@ impl Animator {
     pub fn clip_name(&self) -> Option<&str> {
         self.clip.as_ref().map(|c| c.name.as_str())
     }
+
+    /// Translation locale de la piste `track` dans la pose courante (bassin d'une monture, où se
+    /// pose le cavalier : voir `app_ride.rs`).
+    pub fn track_translation(&self, track: usize) -> Option<Vec3> {
+        let clip = self.clip.as_ref()?;
+        clip.sample(self.time).get(track).map(|s| Vec3::from_array(s.translation))
+    }
 }
 
 /// Identité d'un ensemble de maillages (adresses des `Arc`).

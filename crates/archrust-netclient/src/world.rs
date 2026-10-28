@@ -95,6 +95,8 @@ pub struct CharacterStats {
     pub money: Option<i64>,
     /// Argent en banque (champ 9).
     pub bank_money: Option<i64>,
+    /// CC (champ 10 « cash » : monnaie de la maison des ventes).
+    pub cash: Option<i64>,
     /// Pages de banque achetées en plus de la première (champ 23).
     pub bank_pages: Option<i8>,
     /// Points de compétence (facteurs, sous-paquet « dirt » indice 5).
@@ -161,7 +163,8 @@ pub enum WorldEvent {
     /// Inventaire/équipement complet transmis dans OPT_VIEW op 2 à l'entrée en jeu.
     ItemsSnapshot(Vec<ItemRecord>),
     LoadingPosition(Vec3),
-    GameTime(u64),
+    /// Heure du monde et météo (AgpmTimer, AgpmEventNature, AgpmNatureEffect ; voir `nature`).
+    Nature(crate::nature::NatureEvent),
     CharacterSeen(SeenCharacter),
     CharacterMoved {
         cid: i32,
@@ -269,6 +272,18 @@ pub enum WorldEvent {
     Remission(crate::remission::RemissionEvent),
     /// Production : recettes connues, résultat, PNJ de production (voir `product`).
     Product(crate::product::ProductEvent),
+    /// Amis et ignorés (AgpmBuddy, voir `buddy`).
+    Buddy(crate::buddy::BuddyEvent),
+    /// Courrier (AgpmMailBox, voir `mail`).
+    Mail(crate::mail::MailEvent),
+    /// Réparation chez les forgerons et durabilité des objets (voir `repair`).
+    Repair(crate::repair::RepairEvent),
+    /// Montures (AgpmRide et bit 1 de l'octet d'état, voir `ride`).
+    Ride(crate::ride::RideEvent),
+    /// Maison des ventes (AgpmAuction 0x0B, voir `auction`).
+    Auction(crate::auction::AuctionEvent),
+    /// Commutateur d'équipement (AgpmItemSet 0x6A, voir `itemset`).
+    ItemSet(crate::itemset::ItemSetEvent),
     /// Métamorphose d'un personnage (AGPMCHARACTER champ 18) : les portails la refusent
     /// (`Teleport_TransformChar`).
     Transformed { cid: i32, transformed: bool },
@@ -276,6 +291,14 @@ pub enum WorldEvent {
     Reconnecting,
     /// Reconnexion acceptée : la partie reprend (`ReconnectingServerHide`).
     Reconnected,
+    /// Salons de discussion (AgpmChannel 0x2C, voir `chat`). Les cris de zone (0x4C) arrivent en `Chat`.
+    Channel(crate::chat::ChannelEvent),
+    /// Coiffeur et apparence des personnages (AgpmEventCharCustomize 0x43, voir `customize`).
+    Customize(crate::customize::CustomizeEvent),
+    /// Avis de recherche (AgpmWantedCriminal 0x46, voir `wanted`).
+    Wanted(crate::wanted::WantedEvent),
+    /// Invocations (AgpmSummons 0x4F) et état spécial des personnages (voir `summons`).
+    Summons(crate::summons::SummonsEvent),
     Disconnected(String),
 }
 
@@ -331,6 +354,16 @@ pub enum Command {
     Remission(crate::remission::RemissionCommand),
     /// Récolte, fabrication, PNJ de production (voir `product`).
     Product(crate::product::ProductCommand),
+    /// Amis et ignorés (voir `buddy`).
+    Buddy(crate::buddy::BuddyCommand),
+    /// Courrier (voir `mail`).
+    Mail(crate::mail::MailCommand),
+    /// Maison des ventes (voir `auction`).
+    Auction(crate::auction::AuctionCommand),
+    /// Commutateur d'équipement (voir `itemset`).
+    ItemSet(crate::itemset::ItemSetCommand),
+    /// Réparation chez les forgerons (voir `repair`).
+    Repair(crate::repair::RepairCommand),
     /// Casque visible ou non (AgpmUIStatus op 3, champ 8).
     ViewHelmet(bool),
     /// Drapeaux de refus du personnage (AgpmCharacter op 0x11, champ 22).
@@ -342,6 +375,14 @@ pub enum Command {
     /// Essai de la reconnexion (`/coupure`) : la connexion au monde est coupée comme par une panne du
     /// réseau ; la reconnexion automatique suit.
     CutConnection,
+    /// Salons de discussion (voir `chat`).
+    Channel(crate::chat::ChannelCommand),
+    /// Coiffeur (voir `customize`).
+    Customize(crate::customize::CustomizeCommand),
+    /// Avis de recherche (voir `wanted`).
+    Wanted(crate::wanted::WantedCommand),
+    /// Propension d'une invocation (voir `summons`).
+    Summons(crate::summons::SummonsCommand),
     Quit,
 }
 
@@ -430,6 +471,9 @@ fn character_stats(p: &Incoming) -> Option<CharacterStats> {
     }
     if let Some(bank) = p.get(9).and_then(Value::as_i64) {
         stats.get_or_insert_with(CharacterStats::default).bank_money = Some(bank);
+    }
+    if let Some(cash) = p.get(10).and_then(Value::as_i64) {
+        stats.get_or_insert_with(CharacterStats::default).cash = Some(cash);
     }
     if let Some(pages) = p.get(23).and_then(Value::as_i64) {
         stats.get_or_insert_with(CharacterStats::default).bank_pages = Some(pages as i8);
@@ -531,16 +575,40 @@ pub fn extra_events(p: &Incoming) -> Vec<WorldEvent> {
     // Métamorphose (champ 18 des paquets personnage).
     if p.packet_type == packet_type::CHARACTER && matches!(p.op(), Some(op) if op == character_op::ADD as i64 || op == character_op::UPDATE as i64) {
         if let (Some(cid), Some(t)) = (p.get(1).and_then(Value::as_i64), p.get(18).and_then(Value::as_i64)) {
-            out.push(WorldEvent::Transformed { cid: cid as i32, transformed: t != 0 });
+            // Bit 0 métamorphosé, bit 1 monté (FUN_140175bb0).
+            out.push(WorldEvent::Transformed { cid: cid as i32, transformed: t & crate::ride::state::TRANSFORMED != 0 });
+            out.push(WorldEvent::Ride(crate::ride::RideEvent::State { cid: cid as i32, riding: crate::ride::is_riding(t) }));
         }
     }
+    // Vue d'un personnage : octet d'état au champ 15 (bit 1 : monté).
+    if p.packet_type == packet_type::OPT_VIEW && p.op() == Some(view_op::ADD_CHAR as i64) {
+        let view = p.get(1).and_then(Value::as_bytes).and_then(|b| decode_mini(mini::OPT_VIEW_CHAR, b).ok()).map(|(_, v)| v);
+        let field = |i: usize| view.as_ref().and_then(|v| v.get(i)).and_then(Option::as_ref).and_then(Value::as_i64);
+        if let (Some(cid), Some(t)) = (field(0), field(15)) {
+            out.push(WorldEvent::Ride(crate::ride::RideEvent::State { cid: cid as i32, riding: crate::ride::is_riding(t) }));
+        }
+    }
+    // Visage ou coiffure changés (AGPMCHARACTER op 1, champs 20/21 ≥ 0), voir `customize`.
+    out.extend(p.packet.as_ref().and_then(|packet| crate::customize::appearance_of(p.packet_type, &packet.values)).map(WorldEvent::Customize));
+    // État spécial (AGPMCHARACTER champ 17) : exigé par l'op 0 des invocations, voir `summons`.
+    out.extend(p.packet.as_ref().and_then(|packet| crate::summons::special_status_of(p.packet_type, &packet.values)).map(WorldEvent::Summons));
     // Options d'un objet (AGPMITEM op 0, champ 20), à part de l'objet lui-même.
     if p.packet_type == packet_type::ITEM {
         out.extend(p.packet.as_ref().and_then(|packet| crate::convert::options_of(&packet.values)).map(WorldEvent::Convert));
+        // Durabilité (champ 10, facteur objet).
+        out.extend(p.packet.as_ref().and_then(|packet| crate::repair::durability_of(&packet.values)).map(WorldEvent::Repair));
+        // Drapeaux d'état (champ 19) et identifiant 64 bits (champ 26) : maison des ventes, commutateur.
+        out.extend(p.packet.as_ref().and_then(|packet| crate::auction::item_flags_of(&packet.values)).map(WorldEvent::Auction));
+        out.extend(p.packet.as_ref().and_then(|packet| crate::itemset::item_key_of(&packet.values)).map(WorldEvent::ItemSet));
     }
     if p.packet_type == packet_type::OPT_VIEW && p.op() == Some(view_op::ADD_CHARACTER_ITEMS as i64) {
         if let Some(b) = p.get(6).and_then(Value::as_bytes) {
             out.extend(crate::convert::states_in_block(b).into_iter().map(WorldEvent::Convert));
+            out.extend(crate::repair::durabilities_in_block(b).into_iter().map(WorldEvent::Repair));
+            for values in crate::itemset::item_packets_in_block(b) {
+                out.extend(crate::auction::item_flags_of(&values).map(WorldEvent::Auction));
+                out.extend(crate::itemset::item_key_of(&values).map(WorldEvent::ItemSet));
+            }
         }
         if let Some(b) = p.get(8).and_then(Value::as_bytes) {
             out.extend(crate::skills::decode_skill_block(b));
@@ -563,12 +631,53 @@ pub fn translate(p: &Incoming) -> WorldEvent {
     if let Some(ev) = p.packet.as_ref().and_then(|packet| crate::refinery::translate(p.packet_type, &packet.values)) {
         return WorldEvent::Refinery(ev);
     }
+    // Réparation (voir `repair`), montures (voir `ride`).
+    if let Some(ev) = p.packet.as_ref().and_then(|packet| crate::repair::translate(p.packet_type, &packet.values)) {
+        return WorldEvent::Repair(ev);
+    }
+    if let Some(ev) = p.packet.as_ref().and_then(|packet| crate::ride::translate(p.packet_type, &packet.values)) {
+        return WorldEvent::Ride(ev);
+    }
     if let Some(ev) = p.packet.as_ref().and_then(|packet| crate::remission::translate(p.packet_type, &packet.values)) {
         return WorldEvent::Remission(ev);
+    }
+    // Cris de zone (0x4C, en discussion), salons (0x2C), coiffeur (0x43), avis de recherche (0x46).
+    if let Some(ev) = p.packet.as_ref().and_then(|packet| crate::chat::translate_area(p.packet_type, &packet.values)) {
+        return ev;
+    }
+    if let Some(ev) = p.packet.as_ref().and_then(|packet| crate::chat::translate(p.packet_type, &packet.values)) {
+        return WorldEvent::Channel(ev);
+    }
+    if let Some(ev) = p.packet.as_ref().and_then(|packet| crate::customize::translate(p.packet_type, &packet.values)) {
+        return WorldEvent::Customize(ev);
+    }
+    if let Some(ev) = p.packet.as_ref().and_then(|packet| crate::summons::translate(p.packet_type, &packet.values)) {
+        return WorldEvent::Summons(ev);
+    }
+    if let Some(ev) = p.packet.as_ref().and_then(|packet| crate::wanted::translate(p.packet_type, &packet.values)) {
+        return WorldEvent::Wanted(ev);
+    }
+    // Heure du monde et météo (voir `nature`).
+    if let Some(ev) = p.packet.as_ref().and_then(|packet| crate::nature::translate(p.packet_type, &packet.values)) {
+        return WorldEvent::Nature(ev);
     }
     // Production (voir `product`).
     if let Some(ev) = p.packet.as_ref().and_then(|packet| crate::product::translate(p.packet_type, &packet.values)) {
         return WorldEvent::Product(ev);
+    }
+    // Amis et ignorés, courrier (voir `buddy`, `mail`).
+    if let Some(ev) = p.packet.as_ref().and_then(|packet| crate::buddy::translate(p.packet_type, &packet.values)) {
+        return WorldEvent::Buddy(ev);
+    }
+    if let Some(ev) = p.packet.as_ref().and_then(|packet| crate::mail::translate(p.packet_type, &packet.values)) {
+        return WorldEvent::Mail(ev);
+    }
+    // Maison des ventes, commutateur d'équipement (voir `auction`, `itemset`).
+    if let Some(ev) = p.packet.as_ref().and_then(|packet| crate::auction::translate(p.packet_type, &packet.values)) {
+        return WorldEvent::Auction(ev);
+    }
+    if let Some(ev) = p.packet.as_ref().and_then(|packet| crate::itemset::translate(p.packet_type, &packet.values)) {
+        return WorldEvent::ItemSet(ev);
     }
     // Combat entre joueurs (voir `pvp`).
     if let Some(ev) = p.packet.as_ref().and_then(|packet| crate::pvp::translate(p.packet_type, &packet.values)) {
@@ -708,9 +817,6 @@ pub fn translate(p: &Incoming) -> WorldEvent {
         }
         packet_type::CHAR_MANAGER if p.op() == Some(char_mgr_op::FINISH_ENTER as i64) => {
             WorldEvent::EnteredWorld
-        }
-        packet_type::TIMER => {
-            WorldEvent::GameTime(p.get(1).and_then(Value::as_i64).unwrap_or(0) as u64)
         }
         packet_type::OPT_VIEW if p.op() == Some(view_op::ADD_CHAR as i64) => {
             match p
@@ -1117,15 +1223,19 @@ impl WorldClient {
         self.send_chat(0, message).await
     }
 
-    /// Message sur le canal `kind` (0 normal, 3 guilde, 4 groupe), en CP1252 comme Archonia.
+    /// Message sur le canal `kind` (0 normal, 1 cri, 3 guilde, 4 groupe), en CP1252 comme Archonia : toujours
+    /// en type 0, le mode devenant un préfixe du texte (`/p`, `/g`, `/s`, voir `chat::prefixed`), que le serveur
+    /// interprète (`FUN_140786e20`). Le texte est coupé à 0x200 octets (`FUN_1402e3180`).
     pub async fn send_chat(&mut self, kind: i8, message: &str) -> Result<(), NetError> {
+        let mut text = crate::guild::to_cp1252(&crate::chat::prefixed(kind, message));
+        text.truncate(crate::chat::MAX_MESSAGE);
         let values = sparse(
             main::CHATTING,
             &[
                 (0, Value::I8(0)),
                 (1, Value::I32(self.cid)),
-                (2, Value::I8(kind)),
-                (6, Value::Block(crate::guild::to_cp1252(message))),
+                (2, Value::I8(crate::chat::chat_type::NORMAL)),
+                (6, Value::Block(text)),
             ],
         );
         self.conn.send(main::CHATTING, &values).await
@@ -1247,12 +1357,48 @@ impl WorldClient {
                         Some(Command::Say(m)) => self.send_say(&m).await,
                         Some(Command::Chat { kind, message }) => self.send_chat(kind, &message).await,
                         Some(Command::Whisper { to, message }) => self.send_whisper(&to, &message).await,
+                        Some(Command::Channel(c)) => {
+                            let (schema, values) = crate::chat::command_packet(&c, self.cid);
+                            self.conn.send(schema, &values).await
+                        }
+                        Some(Command::Customize(c)) => {
+                            let (schema, values) = crate::customize::command_packet(&c, self.cid);
+                            self.conn.send(schema, &values).await
+                        }
+                        Some(Command::Summons(c)) => {
+                            let (schema, values) = crate::summons::command_packet(&c, self.cid);
+                            self.conn.send(schema, &values).await
+                        }
+                        Some(Command::Wanted(c)) => {
+                            let (schema, values) = crate::wanted::command_packet(&c, self.cid);
+                            self.conn.send(schema, &values).await
+                        }
                         Some(Command::Remission(c)) => {
                             let (schema, values) = crate::remission::command_packet(&c, self.cid);
                             self.conn.send(schema, &values).await
                         }
                         Some(Command::Product(c)) => {
                             let (schema, values) = crate::product::command_packet(&c, self.cid);
+                            self.conn.send(schema, &values).await
+                        }
+                        Some(Command::Buddy(c)) => {
+                            let (schema, values) = crate::buddy::command_packet(&c, self.cid);
+                            self.conn.send(schema, &values).await
+                        }
+                        Some(Command::Repair(c)) => {
+                            let (schema, values) = crate::repair::command_packet(&c, self.cid);
+                            self.conn.send(schema, &values).await
+                        }
+                        Some(Command::Mail(c)) => {
+                            let (schema, values) = crate::mail::command_packet(&c, self.cid);
+                            self.conn.send(schema, &values).await
+                        }
+                        Some(Command::Auction(c)) => {
+                            let (schema, values) = crate::auction::command_packet(&c, self.cid);
+                            self.conn.send(schema, &values).await
+                        }
+                        Some(Command::ItemSet(c)) => {
+                            let (schema, values) = crate::itemset::command_packet(&c);
                             self.conn.send(schema, &values).await
                         }
                         Some(Command::UiStatus(u)) => {
@@ -1907,5 +2053,26 @@ mod tests {
             WorldEvent::BuffRemoved { owner, skill_tid } => assert_eq!((owner, skill_tid), (42, 1201)),
             other => panic!("retrait attendu, reçu {other:?}"),
         }
+    }
+
+    #[test]
+    fn octet_d_etat_monte_et_vue_optimisee() {
+        use archrust_protocol::packet::{build_mini, build_packet, decode_packet, sparse};
+        use crate::ride::RideEvent;
+        // AGPMCHARACTER op 1 champ 18 = 2 : monté, pas métamorphosé.
+        let c = main::CHARACTER;
+        let raw = build_packet(c, &sparse(c, &[(0, Value::I8(character_op::UPDATE)), (1, Value::I32(42)), (18, Value::I8(2))])).unwrap();
+        let packet = decode_packet(c, &raw).unwrap();
+        let extra = extra_events(&Incoming { packet_type: packet_type::CHARACTER, packet: Some(packet), raw });
+        assert!(extra.iter().any(|e| matches!(e, WorldEvent::Transformed { cid: 42, transformed: false })));
+        assert!(extra.iter().any(|e| matches!(e, WorldEvent::Ride(RideEvent::State { cid: 42, riding: true }))));
+        // Vue optimisée op 1 : champ 15 de la vue.
+        let v = mini::OPT_VIEW_CHAR;
+        let view = build_mini(v, &sparse(v, &[(0, Value::I32(43)), (1, Value::I32(1)), (15, Value::I8(3))])).unwrap();
+        let o = main::OPT_VIEW;
+        let raw = build_packet(o, &sparse(o, &[(0, Value::I8(view_op::ADD_CHAR)), (1, Value::Packet(view))])).unwrap();
+        let packet = decode_packet(o, &raw).unwrap();
+        let extra = extra_events(&Incoming { packet_type: packet_type::OPT_VIEW, packet: Some(packet), raw });
+        assert!(extra.iter().any(|e| matches!(e, WorldEvent::Ride(RideEvent::State { cid: 43, riding: true }))));
     }
 }

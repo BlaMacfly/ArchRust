@@ -28,6 +28,8 @@ pub enum ItemUi {
     DropOnEquip(ItemDrag),
     /// Maj + clic : séparer une pile.
     Split(i32),
+    /// Bouton « Sell » de l'inventaire : boîte de ventes (voir `app_auction.rs`).
+    SalesBox,
 }
 
 /// Objet porté et sa partie du corps (`Part` de `ItemTemplateAll.ini`).
@@ -39,8 +41,11 @@ pub struct EquippedItem {
 }
 
 /// Emplacements de `Character_Status` et parties du corps qu'ils montrent (2 corps, 3 tête,
-/// 5 mains, 6 jambes, 7 pieds, 9 main gauche, 10 main droite, 11 anneau, 13 collier).
+/// 5 mains, 6 jambes, 7 pieds, 9 main gauche, 10 main droite, 11 anneau, 13 collier, 14 monture
+/// `CONTROL_3711`, 15 arme montée `CONTROL_3409`).
 const SLOTS: &[(&str, i32)] = &[
+    ("EquipSlotGridRide", 14),
+    ("EquipSlotGridLancer", 15),
     ("EquipSlotGridHead", 3),
     ("EquipSlotGridBody", 2),
     ("EquipSlotGridHands", 5),
@@ -103,6 +108,10 @@ pub(super) fn bag_grid(
                 let lifted = dragging.is_some_and(|d| d.iid == item.id);
                 let tint = if lifted { Color32::from_white_alpha(70) } else { Color32::WHITE };
                 icon(ctx, hud, assets, painter, cell, item.template_id, tint);
+                // Case marquée si la durabilité est à 20 % ou moins (FUN_1407579b0).
+                if hud.durability.get(&item.id).is_some_and(|p| (0..=20).contains(p)) {
+                    super::repair_ui::durability_mark(ctx, hud, assets, painter, cell);
+                }
                 let count = item.count.unwrap_or(1);
                 if count > 1 && !lifted {
                     shadow_text(painter, cell.right_bottom() - Vec2::new(3.0, 2.0) * s, Align2::RIGHT_BOTTOM, &count.to_string(), font, Color32::WHITE);
@@ -257,6 +266,10 @@ pub fn draw_character(
                             let lifted = dragging.is_some_and(|d| d.iid == e.item.id);
                             let tint = if lifted { Color32::from_white_alpha(70) } else { Color32::WHITE };
                             icon(ctx, hud, assets, &painter, r, e.item.template_id, tint);
+                            // Case d'équipement marquée à 0 % (FUN_14053ff90, FUN_14053fe80).
+                            if hud.durability.get(&e.item.id) == Some(&0) {
+                                super::repair_ui::durability_mark(ctx, hud, assets, &painter, r);
+                            }
                             if resp.dragged() {
                                 resp.dnd_set_drag_payload(ItemDrag { iid: e.item.id, tid: e.item.template_id.unwrap_or(0), worn: true, bank: false });
                             }

@@ -6,6 +6,11 @@ struct Globals {
     light_dir: vec4<f32>,
     ambient: vec4<f32>,
     camera_pos: vec4<f32>,
+    // Lumière directionnelle du ciel (w = 0 : 1 − ambiante).
+    light_color: vec4<f32>,
+    fog_color: vec4<f32>,
+    // Début, fin, opacité maximale du brouillard.
+    fog_range: vec4<f32>,
 };
 @group(0) @binding(0) var<uniform> globals: Globals;
 
@@ -64,10 +69,11 @@ fn fs_main(in: VertexOut) -> @location(0) vec4<f32> {
     let n = safe_normal(in.normal);
     let l = normalize(globals.light_dir.xyz);
     let diffuse = max(dot(n, l), 0.0);
-    let light = globals.ambient.rgb + vec3<f32>(diffuse) * (1.0 - globals.ambient.rgb);
-    // Léger brouillard de distance pour la profondeur.
+    let directional = select(1.0 - globals.ambient.rgb, globals.light_color.rgb, globals.light_color.w > 0.0);
+    let light = globals.ambient.rgb + vec3<f32>(diffuse) * directional;
+    // Brouillard linéaire du ciel (FogDistance → FogFarClip), ou léger brouillard par défaut.
     let dist = distance(in.world_pos, globals.camera_pos.xyz);
-    let fog = clamp((dist - 30000.0) / 60000.0, 0.0, 0.85);
+    let fog = clamp((dist - globals.fog_range.x) / max(globals.fog_range.y - globals.fog_range.x, 1.0), 0.0, globals.fog_range.z);
     let color = tex.rgb * in.color.rgb * light;
-    return vec4<f32>(mix(color, vec3<f32>(0.55, 0.65, 0.8), fog), tex.a * in.color.a);
+    return vec4<f32>(mix(color, globals.fog_color.rgb, fog), tex.a * in.color.a);
 }

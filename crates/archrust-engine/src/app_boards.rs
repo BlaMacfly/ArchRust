@@ -3,8 +3,8 @@
 //! coups qui touchent le joueur ou qu'il porte. Calculs dans [`crate::boards`] ; ici l'état du
 //! jeu (entités, gabarits, guildes) et le dessin egui.
 //!
-//! Hauteur de l'ancre : colonne `HEIGHT` de `charactertemplateclient.ini` (Archonia y ajoute le
-//! `RIDER_HEIGHT` de la monture, sans objet ici), décalée de `DEPTH` vers l'avant.
+//! Hauteur de l'ancre : colonne `HEIGHT` de `charactertemplateclient.ini` (plus le
+//! `RIDER_HEIGHT` de la monture à cheval, voir `app_ride.rs`), décalée de `DEPTH` vers l'avant.
 
 use super::App;
 use crate::assets::Assets;
@@ -191,6 +191,8 @@ impl App {
         let (char_distance, eye) = (self.options.video.char_distance(), self.camera.eye());
         for (cid, tid, name, pos, turn, player) in chars {
             let (height, depth) = self.boards_template(tid);
+            // À cheval : `RIDER_HEIGHT` de la monture en plus (voir `app_ride.rs`).
+            let height = height + self.ride_board_height(cid);
             let forward = Vec3::new(turn.to_radians().sin(), 0.0, turn.to_radians().cos());
             let foot = pos + forward * depth;
             feet.insert(cid, (foot, height));

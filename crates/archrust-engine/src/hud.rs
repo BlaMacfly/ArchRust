@@ -69,9 +69,45 @@ pub use convert_ui::{colored_text, draw_convert, draw_convert_confirm, item_tool
 mod refinery_ui;
 pub use refinery_ui::{draw_cooldown, draw_recipes, draw_refinery, RecipeUi, RecipeView, RefineryUi, RefineryView};
 
+#[path = "hud_repair.rs"]
+mod repair_ui;
+pub use repair_ui::{draw_equip_status, draw_repair, RepairUi, RepairView};
+
 #[path = "hud_product.rs"]
 mod product_ui;
 pub use product_ui::{draw_compose, draw_pdskill, draw_pdskill_buy, ComposeUi, ComposeView, PdBuyEntry, PdBuyView, PdSkillEntry, PdSkillUi};
+
+#[path = "hud_buddy.rs"]
+mod buddy_ui;
+pub use buddy_ui::{draw_add_name, draw_ban_list, draw_buddy_list, draw_target_menu, BanListView, BuddyListView, BuddyUi, TargetMenuUi, LIST_ROWS as BUDDY_LIST_ROWS};
+
+#[path = "hud_mail.rs"]
+mod mail_ui;
+pub use mail_ui::{draw_mail_read, draw_mail_write, draw_mailbox, MailBoxView, MailReadView, MailRow, MailUi, MailWriteView, MAIL_ROWS};
+
+#[path = "hud_auction.rs"]
+mod auction_ui;
+pub use auction_ui::{draw_auction, draw_create_sale, draw_sales_box, AuctionSort, AuctionUi, AuctionView, BoardLine, CreateSaleUi, CreateSaleView, SalesBoxUi, SalesBoxView, SalesLine, TreeLine, AUCTION_BOARD_ROWS, AUCTION_TREE_ROWS, SALES_BOX_ROWS};
+
+#[path = "hud_itemset.rs"]
+mod itemset_ui;
+pub use itemset_ui::{draw_switch_editor, SwitchUi, SwitchView};
+
+#[path = "hud_chat.rs"]
+mod chat_ui;
+pub use chat_ui::{draw_chat_room, draw_create_room, draw_invite_received, draw_prompt, ChatRoomUi, ChatRoomView};
+
+#[path = "hud_customize.rs"]
+mod customize_ui;
+pub use customize_ui::{draw_customize_confirm, draw_customizing, CustomizeUi, CustomizeView, LIST_ROWS as CUSTOMIZE_LIST_ROWS};
+
+#[path = "hud_wanted.rs"]
+mod wanted_ui;
+pub use wanted_ui::{draw_arrange, draw_wanted_alarm, draw_wanted_board, ArrangeView, WantedBoardView, WantedRow, WantedUi};
+
+#[path = "hud_summons.rs"]
+mod summons_ui;
+pub use summons_ui::{draw_summons_menu, SummonsUi};
 pub use options_ui::{draw_options, OptionsEdit, OptionsOut};
 pub use login_ui::{draw_char_create, draw_char_select, CharSlotView, CreateUi, SelectUi};
 pub use menu_ui::{draw_main_menu, main_menu_open, toggle_options_menu, MenuUi};
@@ -305,6 +341,9 @@ pub struct HudState {
     /// Infobulle de chaque objet du joueur (IID → lignes colorées), préparée par le moteur avant la
     /// passe egui (voir `app_convert.rs`) ; sans entrée, le nom seul.
     pub item_tips: HashMap<i32, Vec<(String, Color32)>>,
+    /// Pourcentage de durabilité des objets du joueur qui en ont une (IID → 0 à 100, voir
+    /// `app_repair.rs`) : marque des cases à 0 % (porté) ou à 20 % et moins (sac).
+    pub durability: HashMap<i32, i32>,
 }
 
 /// Cible du joueur affichée dans `UI_TargetInfo`.
@@ -341,6 +380,7 @@ impl HudState {
         st.exp = s.exp.or(st.exp);
         st.money = s.money.or(st.money);
         st.bank_money = s.bank_money.or(st.bank_money);
+        st.cash = s.cash.or(st.cash);
         st.bank_pages = s.bank_pages.or(st.bank_pages);
         st.skill_points = s.skill_points.or(st.skill_points);
     }
@@ -411,14 +451,23 @@ impl HudState {
                 .chain(options_ui::OPTION_WINDOWS.iter())
                 .chain(convert_ui::CONVERT_WINDOWS.iter())
                 .chain(refinery_ui::REFINERY_WINDOWS.iter())
+                .chain(repair_ui::REPAIR_WINDOWS.iter())
                 .chain(product_ui::PRODUCT_WINDOWS.iter())
+                .chain(buddy_ui::BUDDY_WINDOWS.iter())
+                .chain(mail_ui::MAIL_WINDOWS.iter())
+                .chain(auction_ui::AUCTION_WINDOWS.iter())
+                .chain(itemset_ui::ITEMSET_WINDOWS.iter())
+                .chain(chat_ui::CHAT_WINDOWS.iter())
+                .chain(customize_ui::CUSTOMIZE_WINDOWS.iter())
+                .chain(wanted_ui::WANTED_WINDOWS.iter())
+                .chain(summons_ui::SUMMONS_WINDOWS.iter())
                 .filter_map(|n| UiWindow::parse(&ui, pos.as_deref(), n))
                 .collect();
             // Textes fixes du dossier de langue (`ini_fr/UI_1024X768.ini`…, mêmes contrôles) pour les
             // fenêtres qui les affichent tels quels ; rien à remplacer en anglais (`ini`).
             let lang = crate::assets::text_dir();
             if let Some(fr) = (lang != "ini").then(|| assets.table(lang, "UI_1024X768.ini").ok()).flatten() {
-                for w in list.iter_mut().filter(|w| ["UI_Teleport", "UI_BuyBank", "UI_Bank", "UI_SplitItem", "UI_NPCTrade_BuyStackCount", "UI_BankConfirm", "UI_Party", "UI_SelfCharacterMenu", "UI_TargetCharacterMenu", "UI_PartyOption", "UI_LG_CHARSELECT", "UI_ConfirmDeleteChar", "UI_LG_CHARCREATE", "UI_ReconnectHold", "UI_Remission"].contains(&w.name.as_str()) || GUILD_WINDOWS.contains(&w.name.as_str()) || menu_ui::MENU_WINDOWS.contains(&w.name.as_str()) || options_ui::OPTION_WINDOWS.contains(&w.name.as_str()) || convert_ui::CONVERT_WINDOWS.contains(&w.name.as_str()) || refinery_ui::REFINERY_WINDOWS.contains(&w.name.as_str()) || product_ui::PRODUCT_WINDOWS.contains(&w.name.as_str())) {
+                for w in list.iter_mut().filter(|w| ["UI_Teleport", "UI_BuyBank", "UI_Bank", "UI_SplitItem", "UI_NPCTrade_BuyStackCount", "UI_BankConfirm", "UI_Party", "UI_SelfCharacterMenu", "UI_TargetCharacterMenu", "UI_PartyOption", "UI_LG_CHARSELECT", "UI_ConfirmDeleteChar", "UI_LG_CHARCREATE", "UI_ReconnectHold", "UI_Remission"].contains(&w.name.as_str()) || GUILD_WINDOWS.contains(&w.name.as_str()) || menu_ui::MENU_WINDOWS.contains(&w.name.as_str()) || options_ui::OPTION_WINDOWS.contains(&w.name.as_str()) || convert_ui::CONVERT_WINDOWS.contains(&w.name.as_str()) || refinery_ui::REFINERY_WINDOWS.contains(&w.name.as_str()) || repair_ui::REPAIR_WINDOWS.contains(&w.name.as_str()) || product_ui::PRODUCT_WINDOWS.contains(&w.name.as_str()) || buddy_ui::BUDDY_WINDOWS.contains(&w.name.as_str()) || mail_ui::MAIL_WINDOWS.contains(&w.name.as_str()) || auction_ui::AUCTION_WINDOWS.contains(&w.name.as_str()) || chat_ui::CHAT_WINDOWS.contains(&w.name.as_str()) || customize_ui::CUSTOMIZE_WINDOWS.contains(&w.name.as_str()) || wanted_ui::WANTED_WINDOWS.contains(&w.name.as_str()) || summons_ui::SUMMONS_WINDOWS.contains(&w.name.as_str())) {
                     let Some(fw) = UiWindow::parse(&fr, None, &w.name) else { continue };
                     for c in &mut w.controls {
                         if let Some(d) = fw.control(&c.name).and_then(|x| x.display.clone()) {
@@ -821,6 +870,11 @@ pub fn draw_inventory(
                         if c.name == "CONTROL_Inventory_Close_Button" {
                             if resp.clicked() {
                                 *open = false;
+                            }
+                        } else if c.name == "CONTROL_AuctionButton" {
+                            // « Sell » : boîte de ventes de la maison des ventes (`AC_SalesBox2Open`).
+                            if resp.clicked() {
+                                out.push(ItemUi::SalesBox);
                             }
                         } else {
                             resp.on_hover_text("Pas encore disponible dans ArchRust");
@@ -1444,7 +1498,16 @@ fn draw_buffs(
 /// est centrée (ses `UIPos` visent d'autres définitions d'écran). `enabled` grise le bouton (demande
 /// déjà envoyée). Rend `true` au clic sur le bouton.
 pub fn draw_resurrection(ctx: &egui::Context, hud: &mut HudState, assets: &Assets, enabled: bool) -> bool {
+    draw_resurrection_with(ctx, hud, assets, enabled, None).0
+}
+
+/// Comme [`draw_resurrection`], avec le bouton « Wanted » (`CONTROL_10892`, `WC_ARRANGE_MENU`) quand `wanted`
+/// est donné : actif si le serveur a nommé le tueur (`WC_ACTIVE_ARRANGE`, voir `app_wanted.rs`). Rend les clics
+/// (résurrection au village, « Wanted »).
+pub fn draw_resurrection_with(ctx: &egui::Context, hud: &mut HudState, assets: &Assets, enabled: bool, wanted: Option<bool>) -> (bool, bool) {
     let window = hud.windows(assets).iter().find(|w| w.name == "UI_Resurrection").cloned();
+    let wanted_button = wanted.and_then(|active| window.as_ref().and_then(|w| w.control("CONTROL_10892")).cloned().map(|c| (c, active)));
+    let mut wanted_clicked = false;
     let size = window.as_ref().map_or([236.0, 173.0], |w| w.size);
     let layout = Layout::new(ctx.screen_rect());
     let s = layout.scale * 1.25;
@@ -1503,9 +1566,15 @@ pub fn draw_resurrection(ctx: &egui::Context, hud: &mut HudState, assets: &Asset
             let color = if enabled { Color32::WHITE } else { Color32::GRAY };
             shadow_text(painter, brect.center(), Align2::CENTER_CENTER, "Ressusciter au village", (11.0 * s).max(9.0), color);
             clicked = enabled && b.clicked();
+            if let Some((c, active)) = &wanted_button {
+                let r = rect_of(c.pos, c.size);
+                let label = c.display.as_deref().and_then(|d| d.strip_prefix("1:")).unwrap_or("");
+                let painter = painter.clone();
+                wanted_clicked = npc_ui::button(ctx, ui, hud, assets, &painter, r, c, label, (11.0 * s).max(9.0), *active, "archrust-resurrect-wanted").clicked();
+            }
             let _ = response;
         });
-    clicked
+    (clicked, wanted_clicked)
 }
 
 #[cfg(test)]

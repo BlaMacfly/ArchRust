@@ -9,6 +9,8 @@
 //! * [`net`] : liaison avec `archrust-netclient` sur un fil tokio, événements/commandes.
 //! * [`audio`] : musique, ambiance et effets (rodio), résolution des sons (packs `.pk`, patchs).
 //! * [`zones`] : région d'une position (grille `.amf`), musique de région (`RegionTemplate.ini`, `skyset.ini`).
+//! * [`sky`], [`sky_render`], [`weather`] : heure du monde, ciel d'Archonia (gabarits, transitions,
+//!   nuages, étoiles), météo (pluie, neige) et leur rendu.
 //! * [`options`] : options du client persistées (`saved-variables/options.toml`).
 //! * [`ui`] : interface egui (connexion, discussion, console) et rendu des frames Lua.
 //! * [`app`] : boucle winit, états (connexion → personnages → monde).
@@ -30,8 +32,11 @@ pub mod options;
 pub mod realmlist;
 pub mod render;
 pub mod scene;
+pub mod sky;
+pub mod sky_render;
 pub mod targeting;
 pub mod ui;
+pub mod weather;
 pub mod world;
 pub mod zones;
 

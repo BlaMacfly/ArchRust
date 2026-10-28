@@ -69,6 +69,9 @@ pub struct CombatGlue {
     right_press: Option<(f64, f64)>,
     /// Type de personnage par TID (`CharacterDataTable.txt`), lu au premier besoin.
     types: Option<HashMap<i32, u32>>,
+    /// Bouton « Wanted » de la fenêtre de mort : `Some(actif)` (voir `app_wanted.rs`), clic de la dernière image.
+    pub wanted_button: Option<bool>,
+    pub wanted_clicked: bool,
 }
 
 /// Ce que la fenêtre egui dessine : textes projetés à l'écran (points egui).
@@ -193,6 +196,15 @@ impl App {
         let assets = &self.assets;
         let t = self.combat.types.get_or_insert_with(|| character_types(assets)).get(&tid).copied().unwrap_or(0);
         t & ATTACKABLE_TYPE == ATTACKABLE_TYPE && t & TYPE_PC == 0
+    }
+
+    /// Le personnage `cid` (modèle `tid`) peut-il être attaqué : monstre, joueur ennemi, ou invocation selon la règle
+    /// de `app_summons.rs` (jamais la sienne).
+    fn combat_can_attack(&mut self, cid: i32, tid: Option<i32>) -> bool {
+        if let Some(ok) = self.summons_attackable(cid) {
+            return ok;
+        }
+        tid.is_some_and(|t| self.combat_attackable(t)) || self.guild.state.is_enemy(cid) || self.pvp_target(cid)
     }
 
     /// Relevé des événements avant leur traitement par `on_world_event` (statuts de mort, vues,
@@ -471,7 +483,7 @@ impl App {
             return false;
         }
         // Joueur de la guilde adverse, pendant un combat de guildes.
-        if !self.combat_attackable(tid) && !self.guild.state.is_enemy(cid) && !self.pvp_target(cid) {
+        if !self.combat_can_attack(cid, Some(tid)) {
             self.ui.push_chat(format!("[combat] {name} ne peut pas être attaqué."));
             return false;
         }
@@ -605,7 +617,7 @@ impl App {
         match self.entity_under_cursor() {
             Some(cid) if self.addons.target_cid() == Some(cid) => {
                 let tid = self.entities.iter().find(|e| e.cid == cid).map(|e| e.tid);
-                if tid.is_some_and(|t| self.combat_attackable(t)) || self.guild.state.is_enemy(cid) || self.pvp_target(cid) {
+                if self.combat_can_attack(cid, tid) {
                     self.combat_attack(cid);
                     return true;
                 }
@@ -630,7 +642,7 @@ impl App {
         }
         if let Some(cid) = self.entity_under_cursor() {
             let tid = self.entities.iter().find(|e| e.cid == cid).map(|e| e.tid);
-            if tid.is_some_and(|t| self.combat_attackable(t)) || self.guild.state.is_enemy(cid) || self.pvp_target(cid) {
+            if self.combat_can_attack(cid, tid) {
                 self.combat_attack(cid);
             } else if !self.npc_talk(cid) {
                 // PNJ : dialogue (voir `app_npc.rs`) ; autre personnage : il devient la cible.
@@ -831,10 +843,14 @@ pub fn panel(
         painter.text(*pos + Vec2::splat(1.0), Align2::CENTER_BOTTOM, text, font.clone(), Color32::from_black_alpha(200));
         painter.text(*pos, Align2::CENTER_BOTTOM, text, font, *color);
     }
-    if view.dead && crate::hud::draw_resurrection(ctx, hud, assets, view.can_resurrect) {
-        match net {
-            Some(net) => send_resurrect(net, glue, ui),
-            None => ui.push_chat("[combat] hors ligne"),
+    if view.dead {
+        let (town, wanted) = crate::hud::draw_resurrection_with(ctx, hud, assets, view.can_resurrect, glue.wanted_button);
+        glue.wanted_clicked |= wanted;
+        if town {
+            match net {
+                Some(net) => send_resurrect(net, glue, ui),
+                None => ui.push_chat("[combat] hors ligne"),
+            }
         }
     }
 }

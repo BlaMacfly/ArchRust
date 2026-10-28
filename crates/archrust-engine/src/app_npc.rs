@@ -97,6 +97,8 @@ pub struct NpcGlue {
     money: Option<(bool, i64)>,
     /// Fenêtre d'achat d'une page de banque (`UI_BuyBank`) ouverte.
     buy_bank: bool,
+    /// Marchand d'objets choisi dans le dialogue : demande de la maison des ventes (voir `app_auction.rs`).
+    pub auction_request: Option<i32>,
 }
 
 /// Ce que les fenêtres dessinent, préparé avant la passe egui.
@@ -388,11 +390,30 @@ fn start_function(glue: &mut NpcGlue, npc: i32, f: i32, net: Option<&NetLink>, u
             glue.dialog = None;
             send(net, NpcCommand::BankOpen(npc));
         }
+        // Coiffeur : AGPMEVENTCHARCUSTOMIZE op 0, l'accord ouvre `UI_Customizing` (voir `app_customize.rs`).
+        archrust_netclient::customize::FUNCTION => {
+            glue.dialog = None;
+            if let Some(net) = net {
+                net.send(Command::Customize(archrust_netclient::customize::CustomizeCommand::Request(npc)));
+            }
+        }
+        // Tableau des avis : AGPMWANTEDCRIMINAL op 0, l'accord ouvre `UI_WantedCriminal` (voir `app_wanted.rs`).
+        archrust_netclient::wanted::FUNCTION => {
+            glue.dialog = None;
+            if let Some(net) = net {
+                net.send(Command::Wanted(archrust_netclient::wanted::WantedCommand::Request(npc)));
+            }
+        }
         archrust_netclient::remission::FUNCTION => {
             glue.dialog = None;
             if let Some(net) = net {
                 net.send(Command::Remission(archrust_netclient::remission::RemissionCommand::Request(npc)));
             }
+        }
+        // Marchand d'objets : AGPMAUCTION op 9, l'accord (op 10) ouvre `UI_Auction` (voir `app_auction.rs`).
+        archrust_netclient::auction::FUNCTION => {
+            glue.dialog = None;
+            glue.auction_request = Some(npc);
         }
         // PNJ de production : AGPMEVENTPRODUCT op 0, l'accord ouvre `UI_PDSkillBuy` (voir `app_product.rs`).
         archrust_netclient::product::FUNCTION => {
@@ -430,6 +451,13 @@ fn start_function(glue: &mut NpcGlue, npc: i32, f: i32, net: Option<&NetLink>, u
             glue.dialog = None;
             if let Some(net) = net {
                 net.send(Command::Convert(archrust_netclient::convert::ConvertCommand::Open(npc)));
+            }
+        }
+        // Réparation : AGPMEVENTITEMREPAIR op 3, l'accord ouvre `UI_Repair` (voir `app_repair.rs`).
+        archrust_netclient::repair::FUNCTION => {
+            glue.dialog = None;
+            if let Some(net) = net {
+                net.send(Command::Repair(archrust_netclient::repair::RepairCommand::Open(npc)));
             }
         }
         _ => {}
@@ -836,10 +864,17 @@ impl App {
                     // Entrepôt de guilde chez les gardiens de banque (FUN_1406ca6a0 : fonction 0x23).
                     archrust_netclient::guild::FUNCTION_GUILD_WAREHOUSE => 611,
                     archrust_netclient::convert::FUNCTION_ITEM_CONVERT => 327,
+                    // Réparation (fonction 0x11) : « Repair ».
+                    archrust_netclient::repair::FUNCTION => 325,
                     // Pardonneur (fonction 0x1F) : « Pardon ».
                     archrust_netclient::remission::FUNCTION => 335,
+                    // Coiffeur (fonction 0x1D) : « Change Appearance » ; tableau des avis (0x20) : « Bounties ».
+                    archrust_netclient::customize::FUNCTION => 334,
+                    archrust_netclient::wanted::FUNCTION => 336,
                     // Production (fonction 0x18) : « Crafting ».
                     archrust_netclient::product::FUNCTION => 329,
+                    // Marchand d'objets (fonction 0x1C) : « Auction House ».
+                    archrust_netclient::auction::FUNCTION => 332,
                     _ => continue,
                 };
                 buttons.push((f.function, sysstr(&assets, id).unwrap_or_default()));

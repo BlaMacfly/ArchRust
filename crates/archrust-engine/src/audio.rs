@@ -351,6 +351,9 @@ struct Track {
     layers: Vec<Layer>,
     /// Chemin demandé (même s'il n'a pas pu être lu, pour ne pas réessayer à chaque image).
     wanted: Option<String>,
+    /// Mode de la lecture demandée : en boucle, ou une fois avec son numéro de tirage (un même
+    /// morceau retiré par la liste de lecture du ciel est relancé).
+    wanted_mode: Option<u32>,
 }
 
 impl Track {
@@ -359,6 +362,7 @@ impl Track {
             label,
             layers: Vec::new(),
             wanted: None,
+            wanted_mode: None,
         }
     }
 
@@ -486,15 +490,17 @@ impl Audio {
         }
     }
 
-    /// Lecture en boucle sur une piste, avec fondu enchaîné.
-    fn set_track(&mut self, which: fn(&mut Audio) -> &mut Track, path: Option<&str>) {
+    /// Lecture sur une piste, avec fondu enchaîné : en boucle (`once = None`) ou une seule fois
+    /// (`once = Some(numéro de tirage)`).
+    fn set_track(&mut self, which: fn(&mut Audio) -> &mut Track, path: Option<&str>, once: Option<u32>) {
         let path = path
             .map(normalize_sound_path)
             .filter(|p| !p.is_empty());
-        if which(self).wanted == path {
+        if which(self).wanted == path && (path.is_none() || which(self).wanted_mode == once) {
             return;
         }
         which(self).wanted = path.clone();
+        which(self).wanted_mode = once;
         which(self).fade_out_all();
         let Some(path) = path else {
             return;
@@ -511,23 +517,23 @@ impl Audio {
         };
         let ext = path.rsplit('.').next().unwrap_or("").to_ascii_lowercase();
         let len = located.bytes.len() as u64;
-        let source = Decoder::builder()
+        let builder = Decoder::builder()
             .with_data(Cursor::new(located.bytes))
             .with_hint(&ext)
             .with_byte_len(len)
-            .with_seekable(true)
-            .build_looped();
-        let source = match source {
-            Ok(s) => s,
-            Err(e) => {
-                let err = anyhow!("décodage {ext} : {e}");
-                self.report_missing(&path, &err);
-                return;
-            }
-        };
+            .with_seekable(true);
         let player = Player::connect_new(device.mixer());
         player.set_volume(0.0);
-        player.append(source);
+        let appended = if once.is_some() {
+            builder.build().map(|s| player.append(s))
+        } else {
+            builder.build_looped().map(|s| player.append(s))
+        };
+        if let Err(e) = appended {
+            let err = anyhow!("décodage {ext} : {e}");
+            self.report_missing(&path, &err);
+            return;
+        }
         let track = which(self);
         log::info!("{} : {path} ({})", track.label, located.source);
         track.layers.push(Layer {
@@ -541,12 +547,32 @@ impl Audio {
     /// Musique de fond (`None` = silence en fondu). Idempotent : rappeler avec le même chemin ne
     /// relance rien.
     pub fn play_music(&mut self, path: Option<&str>) {
-        self.set_track(|a| &mut a.music, path);
+        self.set_track(|a| &mut a.music, path, None);
+    }
+
+    /// Musique jouée une seule fois (liste de lecture du ciel) ; `generation` distingue deux
+    /// tirages du même morceau. Voir [`Audio::music_finished`].
+    pub fn play_music_once(&mut self, path: Option<&str>, generation: u32) {
+        self.set_track(|a| &mut a.music, path, Some(generation));
+    }
+
+    /// La musique demandée en lecture unique est terminée, ou n'a pas pu être lue. Toujours faux
+    /// sans périphérique de sortie (rien ne se termine).
+    pub fn music_finished(&self) -> bool {
+        if self.device.is_none() || self.music.wanted.is_none() || self.music.wanted_mode.is_none() {
+            return false;
+        }
+        let wanted = self.music.wanted.as_deref();
+        !self
+            .music
+            .layers
+            .iter()
+            .any(|l| l.target > 0.0 && Some(l.path.as_str()) == wanted && !l.player.empty())
     }
 
     /// Ambiance de zone (`sound/stream/*.mp3`), même fonctionnement.
     pub fn play_ambience(&mut self, path: Option<&str>) {
-        self.set_track(|a| &mut a.ambience, path);
+        self.set_track(|a| &mut a.ambience, path, None);
     }
 
     /// Effet ponctuel : `sound/ui/x.wav`, `sound/effect/sd0000.wav`, fichier d'AddOn… Rend `false`

@@ -80,6 +80,10 @@ pub mod packet_type {
     pub const LOGIN: u8 = 0x0d;
     pub const CHATTING: u8 = 0x0f;
     pub const TIMER: u8 = 0x11;
+    /// AgpmEventNature : météo (serveur → client).
+    pub const EVENT_NATURE: u8 = 0x30;
+    /// AgpmNatureEffect : effet de nature (pluie, neige…), drapeaux 2 octets.
+    pub const NATURE_EFFECT: u8 = 0x47;
     pub const ADMIN: u8 = 0x12;
     pub const QUEST: u8 = 0x13;
     pub const UI_STATUS: u8 = 0x14;
@@ -110,6 +114,22 @@ pub mod packet_type {
     pub const REMISSION: u8 = 0x2a;
     pub const PRODUCT: u8 = 0x17;
     pub const EVENT_PRODUCT: u8 = 0x3a;
+    pub const BUDDY: u8 = 0x2b;
+    pub const MAILBOX: u8 = 0x2d;
+    pub const EVENT_ITEM_REPAIR: u8 = 0x34;
+    pub const RIDE: u8 = 0x4d;
+    pub const AUCTION: u8 = 0x0b;
+    pub const ITEM_SET: u8 = 0x6a;
+    /// AgpmAreaChatting : cris de zone (serveur → client seulement).
+    pub const AREA_CHATTING: u8 = 0x4c;
+    /// AgpmChannel : salons de discussion.
+    pub const CHANNEL: u8 = 0x2c;
+    /// AgpmEventCharCustomize : changement d'apparence chez les « Stylist » (fonction de PNJ 29).
+    pub const EVENT_CHAR_CUSTOMIZE: u8 = 0x43;
+    /// AgpmWantedCriminal : avis de recherche (fonction de PNJ 32).
+    pub const WANTED_CRIMINAL: u8 = 0x46;
+    /// AgpmSummons : invocations (esprits, pièges, familiers).
+    pub const SUMMONS: u8 = 0x4f;
 }
 
 /// Schémas des paquets principaux.
@@ -159,7 +179,11 @@ pub mod main {
         f!(UInt8), f!(Int8), f!(Int32), f!(Int32), f!(Int32), f!(Int32),
         f!(Packet), f!(Packet), f!(Packet), f!(Packet), f!(Packet), f!(Packet),
         f!(Int32), f!(Packet), f!(Packet), f!(Packet), f!(Packet), f!(Int32),
-        f!(UInt32), f!(Int32), f!(Packet), f!(Packet), f!(UInt32), f!(Packet), f!(Packet),
+        // 18 et 22 : temps de recharge en UINT64 (relevé d'Archonia, comme ArchCore) ; 19 drapeaux d'état
+        // de l'objet (`AgpdItem+0x218` : bits 0-2 lié, bit 30 lié définitivement).
+        f!(UInt64), f!(Int32), f!(Packet), f!(Packet), f!(UInt64), f!(Packet), f!(Packet),
+        // 25 bloc (inconnu), 26 identifiant 64 bits de l'objet (`AgpdItem+0x58`, commutateur d'équipement).
+        f!(MemoryBlock), f!(UInt64),
     ]);
 
     // AgcmCharacter (type 3) — drapeaux 4 (SetFlagLength(4))
@@ -194,8 +218,16 @@ pub mod main {
         f!(Int32),          // 15 compte protégé
     ]);
 
-    // AgpmTimer — drapeaux 1
+    // AgpmTimer — drapeaux 1 : vitesse du temps (multiplicateur, 0 = inchangée), temps du jeu en ms
+    // (0 = inchangé), deux UINT32 sans lecteur dans Archonia (FUN_14022e800).
     schema!(pub TIMER = "AGPMTIMER", T::TIMER, 1, [f!(UInt8), f!(UInt64), f!(UInt32), f!(UInt32)]);
+
+    // AgpmEventNature — drapeaux 1 : météo (−1 absent ; 0 clair, 3 pluie, 5 neige), deux INT64 non
+    // lus par le client (FUN_1401ea2d0).
+    schema!(pub EVENT_NATURE = "AGPMEVENTNATURE", T::EVENT_NATURE, 1, [f!(Int8), f!(Int64), f!(Int64)]);
+
+    // AgpmNatureEffect — drapeaux 2 : identifiant d'effet de `natureeffect.ini` (−1 = arrêt).
+    schema!(pub NATURE_EFFECT = "AGPMNATUREEFFECT", T::NATURE_EFFECT, 2, [f!(Int32)]);
 
     // AgpmWorld — drapeaux 1
     schema!(pub WORLD = "AGPMWORLD", T::WORLD, 1, [f!(Int8), f!(Char, 32), f!(Int16), f!(MemoryBlock), f!(Char, 32)]);
@@ -375,6 +407,35 @@ pub mod main {
         f!(Int32),          // 4 code de résultat
     ]);
 
+    // AgpmBuddy (0x2B, constructeur d'Archonia FUN_1402ab0c0) — drapeaux 4 : amis et ignorés.
+    schema!(pub BUDDY = "AGPMBUDDY", T::BUDDY, 4, [
+        f!(Int8),           // 0 opération (1 à 15)
+        f!(Int32),          // 1 CID du propriétaire de la liste
+        f!(Char, 33),       // 2 nom de l'autre joueur
+        f!(UInt32),         // 3 drapeaux de l'entrée (blocages, en ligne, ami)
+        f!(Int32),          // 4 région (op 7) ; -1 ou 0 ailleurs
+        f!(Int32),          // 5 relation « Buddy » (mentor)
+        f!(Int32),          // 6 code de résultat (op 8)
+    ]);
+
+    // AgpmBuddy, second paquet (op 15, même type 0x2B) — drapeaux 4 : ignorés d'`IgnoreList.txt`.
+    schema!(pub BUDDY_LIST = "AGPMBUDDY_LIST", T::BUDDY, 4, [
+        f!(Int8),           // 0 opération (15)
+        f!(Int32),          // 1 CID du propriétaire
+        f!(Int16),          // 2 nombre de noms (30 au plus)
+        f!(Char, 990),      // 3 30 noms de 33 octets bout à bout
+        f!(UInt32, 30),     // 4 drapeaux de chaque nom
+    ]);
+
+    // AgpmMailBox (0x2D, FUN_1402ead30) — drapeaux 2 : courrier entre joueurs.
+    schema!(pub MAILBOX = "AGPMMAILBOX", T::MAILBOX, 2, [
+        f!(Int8),           // 0 opération (0 ajout … 5 tout retirer)
+        f!(Int32),          // 1 CID du personnage concerné
+        f!(Packet),         // 2 mini courrier (MAIL)
+        f!(Int32),          // 3 IID de l'objet joint (op 3)
+        f!(Int32),          // 4 code de résultat (0 succès)
+    ]);
+
     // AgpmUIStatus (0x14) — drapeaux 2 : barre de raccourcis, potions et seuils de leur prise automatique.
     schema!(pub UI_STATUS = "AGPMUISTATUS", T::UI_STATUS, 2, [
         f!(Int8),        // 0 opération (0 envoi complet, 1 changement, 2 barre encodée, 3 casque)
@@ -486,9 +547,112 @@ pub mod main {
         f!(Int8),           // 7 réinitialisation consommée
     ]);
 
+    // AgpmEventItemRepair (0x34) — drapeaux 1 : réparation chez les forgerons (constructeur FUN_1402b3b50
+    // d'Archonia ; op 3 demande → 4 accord ; op 0 réparation → 1 résultat).
+    schema!(pub EVENT_ITEM_REPAIR = "AGPMEVENTITEMREPAIR", T::EVENT_ITEM_REPAIR, 1, [
+        f!(Int8),           // 0 opération
+        f!(Packet),         // 1 événement (EVENT_BASE, fonction 17)
+        f!(Int32),          // 2 CID du joueur
+        f!(Int32, 20),      // 3 IID des 20 cases de la grille (0 : vide)
+        f!(Int64),          // 4 coût total calculé par le client
+        f!(Int32),          // 5 code de résultat
+    ]);
+
+    // AgpmRide (0x4D) — drapeaux 1 : montures (constructeur FUN_14027ad80 ; le client n'en émet pas).
+    schema!(pub RIDE = "AGPMRIDE", T::RIDE, 1, [
+        f!(Int8),           // 0 opération (2 monté, 4 descendu, 5 fin de durée, 6 monté sur un TID)
+        f!(Int32),          // 1 CID du cavalier
+        f!(Int32),          // 2 IID de l'objet monture (op 2) ou TID du modèle de monture (op 6)
+        f!(Int32),          // 3 temps restant (s), ignoré par le client
+    ]);
+
+    // AgpmAuction (0x0B, constructeur d'Archonia FUN_140268eb0) — drapeaux 2 : maison des ventes.
+    schema!(pub AUCTION = "AGPMAUCTION", T::AUCTION, 2, [
+        f!(Int8),           // 0 opération (1 ajout, 2 retrait, 3 statut, 4 vente, 5 annulation, 6 encaissement,
+                            //   7 achat, 8 avis, 9 demande au PNJ, 10 accord, 11 connexion, 12 recherche)
+        f!(Int32),          // 1 CID du joueur
+        f!(Packet),         // 2 sous-paquet de l'opération (mini AUCTION_*, EVENT_BASE aux ops 9 et 10)
+        f!(Int32),          // 3 résultat (0 réussite)
+    ]);
+
+    // AgpmItemSet (0x6A, FUN_14024fb10) — drapeaux 1 : commutateur d'équipement.
+    schema!(pub ITEM_SET = "AGPMITEMSET", T::ITEM_SET, 1, [
+        f!(Int8),           // 0 opération (0 capturer, 1 équiper, 2 vider, 3 drapeau, 4 actif, 5 contenu,
+                            //   6 déplacer, 7 retirer)
+        f!(Int32),          // 1 emplacement 0 à 99 (-1 : aucun, op 4)
+        f!(Int8),           // 2 drapeau (op 3), case (op 7), `(de << 4) | vers` (op 6)
+        f!(Char, 4000),     // 3 objets du jeu, `E,%d,%llu` séparés par `:` (op 5)
+    ]);
+
+    // AgpmAreaChatting (0x4C, constructeur d'Archonia FUN_1402b49c0) — drapeaux 1 : cri de zone (op 0 seule).
+    schema!(pub AREA_CHATTING = "AGPMAREACHATTING", T::AREA_CHATTING, 1, [
+        f!(Int8),           // 0 opération (0 message)
+        f!(Int32),          // 1 CID de l'émetteur
+        f!(Int8),           // 2 genre de cri (lu, inutilisé par le client)
+        f!(Int8),           // 3 (lu, inutilisé)
+        f!(UInt32),         // 4 type AgpmChatting du message (onglet et couleur)
+        f!(Char, 49),       // 5 nom de l'émetteur
+        f!(MemoryBlock),    // 6 texte
+    ]);
+
+    // AgpmChannel (0x2C, FUN_1402af5d0) — drapeaux 4 : salons de discussion.
+    schema!(pub CHANNEL = "AGPMCHANNEL", T::CHANNEL, 4, [
+        f!(Int8),           // 0 opération (1 créer, 3 entrer, 4 sortir, 5 arrivée, 6 départ, 7 invitation,
+                            //   8 mot de passe, 9 message, 10 recherche, 11 résultat)
+        f!(Int32),          // 1 CID du demandeur
+        f!(Char, 41),       // 2 nom du salon
+        f!(Char, 9),        // 3 mot de passe
+        f!(Char, 33),       // 4 nom de personnage (membre, invitant, cible, auteur)
+        f!(Int32),          // 5 genre (1 public, 2 privé, 3 guilde)
+        f!(Int32),          // 6 code de résultat (op 11)
+        f!(Char, 121),      // 7 texte du message
+        f!(MemoryBlock),    // 8 membres `nom1;nom2;` (op 3)
+    ]);
+
+    // AgpmEventCharCustomize (0x43, FUN_14022ceb0) — drapeaux 1 : coiffeur.
+    schema!(pub EVENT_CHAR_CUSTOMIZE = "AGPMEVENTCHARCUSTOMIZE", T::EVENT_CHAR_CUSTOMIZE, 1, [
+        f!(Int8),           // 0 opération (0 demande, 1 accord, 2 achat)
+        f!(Packet),         // 1 événement (EVENT_BASE, fonction 29)
+        f!(Int32),          // 2 CID du joueur
+        f!(Int8),           // 3 visage (-1 : inchangé)
+        f!(Int8),           // 4 coiffure (-1 : inchangée)
+    ]);
+
+    // AgpmWantedCriminal (0x46, FUN_14028a080) — drapeaux 2 : avis de recherche.
+    schema!(pub WANTED_CRIMINAL = "AGPMWANTEDCRIMINAL", T::WANTED_CRIMINAL, 2, [
+        f!(Int8),           // 0 opération (0 à 8)
+        f!(Int32),          // 1 CID du personnage concerné
+        f!(Int32),          // 2 page (ops 3 et 4 ; -100 : fin de page)
+        f!(Int32),          // 3 rang (ops 4 et 5)
+        f!(Int32),          // 4 résultat (op 2), recherché (op 7), genre de notification (op 8)
+        f!(Packet),         // 5 EVENT_BASE (ops 0 et 1) ou mini WANTED_CRIMINAL
+    ]);
+
+    // AgpmSummons (0x4F, constructeur d'Archonia FUN_14028f6d0) — drapeaux 2.
+    schema!(pub SUMMONS = "AGPMSUMMONS", T::SUMMONS, 2, [
+        f!(Int8),           // 0 opération (0 ajout, 1 retrait, 2 propension, 3 limite, 4 limite des apprivoisées)
+        f!(Int32),          // 1 CID du maître
+        f!(Int32),          // 2 CID de la créature invoquée
+        f!(Int32),          // 3 TID de la créature
+        f!(Int8),           // 4 type d'invocation (op 0) ou nouvelle limite (ops 3 et 4)
+        f!(Int8),           // 5 propension (0 attaque, 1 défense, 2 ombre)
+        f!(UInt64),         // 6 horodatage 1 (apparition)
+        f!(UInt64),         // 7 horodatage 2 (fin prévue)
+        f!(UInt8),          // 8 « forcée » : hors limite (toujours posé par le client)
+    ]);
+
     /// Schéma principal d'un type de paquet, s'il est connu.
     pub fn by_id(id: u8) -> Option<&'static Schema> {
         Some(match id {
+            T::SUMMONS => SUMMONS,
+            T::AREA_CHATTING => AREA_CHATTING,
+            T::CHANNEL => CHANNEL,
+            T::EVENT_CHAR_CUSTOMIZE => EVENT_CHAR_CUSTOMIZE,
+            T::WANTED_CRIMINAL => WANTED_CRIMINAL,
+            T::AUCTION => AUCTION,
+            T::ITEM_SET => ITEM_SET,
+            T::EVENT_ITEM_REPAIR => EVENT_ITEM_REPAIR,
+            T::RIDE => RIDE,
             T::EVENT_SKILL_MASTER => EVENT_SKILL_MASTER,
             T::EVENT_TELEPORT => EVENT_TELEPORT,
             T::EVENT_MANAGER => EVENT_MANAGER,
@@ -507,6 +671,8 @@ pub mod main {
             T::REMISSION => REMISSION,
             T::PRODUCT => PRODUCT,
             T::EVENT_PRODUCT => EVENT_PRODUCT,
+            T::BUDDY => BUDDY,
+            T::MAILBOX => MAILBOX,
             T::EVENT_QUEST => EVENT_QUEST,
             T::QUEST => QUEST,
             T::PARTY => PARTY,
@@ -517,6 +683,8 @@ pub mod main {
             T::CHAR_MANAGER => CHAR_MANAGER,
             T::LOGIN => LOGIN,
             T::TIMER => TIMER,
+            T::EVENT_NATURE => EVENT_NATURE,
+            T::NATURE_EFFECT => NATURE_EFFECT,
             T::WORLD => WORLD,
             T::CHATTING => CHATTING,
             T::SYSTEM_MESSAGE => SYSTEM_MESSAGE,
@@ -542,6 +710,35 @@ pub mod mini {
     schema!(pub SKILL_BASE = "AGPMSKILL_BASE", 150, 1, [f!(Int8), f!(Int32)]);
     // Rémission (AgpmRemission op 2) — drapeaux 1 : type (4 lettres de pardon), résultat.
     schema!(pub REMISSION = "AGPMREMISSION_MINI", 190, 1, [f!(Int8), f!(Int32)]);
+    // Criminel d'un avis de recherche (AgpmWantedCriminal champ 5 hors ops 0 et 1) — drapeaux 2 : nom, montant
+    // (prime cumulée, prime posée, or gagné ou expérience perdue), niveau, TID du modèle, en ligne.
+    schema!(pub WANTED_CRIMINAL = "AGPMWANTEDCRIMINAL_MINI", 210, 2, [f!(Char, 33), f!(Int64), f!(Int32), f!(Int32), f!(Int32)]);
+    // Maison des ventes (AgpmAuction champ 2, constructeur FUN_140268eb0 d'Archonia).
+    // Vente du joueur — drapeaux 2 : salesID, docID, n° d'objet en base, IID, prix or, prix CC, quantité, statut
+    // (0 en vente, 1 vendu), date d'enregistrement, TID.
+    schema!(pub AUCTION_SALES = "AGPMAUCTION_SALES", 192, 2, [
+        f!(Int32), f!(UInt64), f!(UInt64), f!(Int32), f!(Int64), f!(Int64), f!(Int16), f!(Int16), f!(Char, 33), f!(Int32),
+    ]);
+    // Recherche — drapeaux 1 : TID, docID (curseur), sens (0 docID décroissants sous le curseur), total, rowset.
+    schema!(pub AUCTION_SELECT2 = "AGPMAUCTION_SELECT2", 193, 1, [f!(Int32), f!(UInt64), f!(Int16), f!(Int32), f!(Packet)]);
+    // Mise en vente — drapeaux 1 : IID, quantité, prix or, prix CC, date, IID du parchemin Marvel (0 sans).
+    schema!(pub AUCTION_SELL = "AGPMAUCTION_SELL", 194, 1, [f!(Int32), f!(Int16), f!(Int64), f!(Int64), f!(Char, 33), f!(Int32)]);
+    // Annulation — drapeaux 1 : salesID, TID, quantité.
+    schema!(pub AUCTION_CANCEL = "AGPMAUCTION_CANCEL", 195, 1, [f!(Int32), f!(Int32), f!(Int16)]);
+    // Encaissement — drapeaux 1 : salesID, TID, quantité vendue, gain or, gain CC.
+    schema!(pub AUCTION_CONFIRM = "AGPMAUCTION_CONFIRM", 196, 1, [f!(Int32), f!(Int32), f!(Int16), f!(Int64), f!(Int64)]);
+    // Achat — drapeaux 1 : docID, quantité, TID, prix or, prix CC.
+    schema!(pub AUCTION_BUY = "AGPMAUCTION_BUY", 197, 1, [f!(Int64), f!(Int16), f!(Int32), f!(Int64), f!(Int64)]);
+    // Résultat d'une requête — drapeaux 2 : index, texte de la requête, en-têtes, lignes, colonnes, taille d'une
+    // ligne, tampon des lignes, décalages des colonnes (U32).
+    schema!(pub AUCTION_ROWSET = "AGPMAUCTION_ROWSET", 198, 2, [
+        f!(Int32), f!(MemoryBlock), f!(MemoryBlock), f!(UInt32), f!(UInt32), f!(UInt32), f!(MemoryBlock), f!(MemoryBlock),
+    ]);
+    // Courrier (AgpmMailBox champ 2) — drapeaux 2 : ID, expéditeur, destinataire, objet, date (s Unix), drapeaux
+    // (0x01 lu, 0x10 pièce récupérée), TID et quantité de la pièce jointe, texte (NUL final compris).
+    schema!(pub MAIL = "AGPMMAILBOX_MAIL", 191, 2, [
+        f!(Int32), f!(Char, 33), f!(Char, 33), f!(Char, 51), f!(Int32), f!(Int32), f!(Int32), f!(Int16), f!(MemoryBlock),
+    ]);
     // Action d'une compétence — drapeaux 2 : type (0 demande, 1 lancement, 2 résultat), cible
     // (SKILL_BASE), facteurs du résultat, position visée, attaque forcée, incantation, durée et relance
     // (ms), niveau, facteurs à mettre en file, effet supplémentaire, CID des cibles.

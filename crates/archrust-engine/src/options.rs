@@ -82,11 +82,28 @@ impl RefuseOptions {
 pub struct VideoOptions {
     pub char_view: u8,
     pub map_view: u8,
+    /// `Nature` de `COption.ini` (liste `OP_Nature` « Environnement » : 0 bas, 1 moyen, 2 haut) :
+    /// ArchRust y règle la densité des particules de météo.
+    pub nature: u8,
+    /// `Sky` (`OP_Sky`, « Weather FX » de la fenêtre `Option_Detail_Nature`) : particules de météo.
+    pub sky: bool,
+    /// `Fog` (`OP_Fog`) : brouillard du ciel.
+    pub fog: bool,
+    /// `LensFlare` (`OP_LensFlare`) : reflets du soleil.
+    pub lens_flare: bool,
 }
 
 impl Default for VideoOptions {
+    /// Valeurs de `COption.ini` d'Archonia : `Nature=2`, `LensFlare=1`, `Fog=1`, `Sky=1`.
     fn default() -> Self {
-        Self { char_view: 3, map_view: 1 }
+        Self { char_view: 3, map_view: 1, nature: 2, sky: true, fog: true, lens_flare: true }
+    }
+}
+
+impl VideoOptions {
+    /// Facteur de densité des particules de météo selon `Nature` (hypothèse : 1/3, 2/3, 1).
+    pub fn nature_density(&self) -> f32 {
+        [1.0 / 3.0, 2.0 / 3.0, 1.0][self.nature.min(2) as usize]
     }
 }
 
@@ -203,8 +220,14 @@ mod tests {
         let v = VideoOptions::default();
         // Par défaut : personnages sans limite, carte au rayon et à la distance d'avant les réglages.
         assert_eq!((v.char_distance(), v.sector_radius(), v.object_distance()), (None, 3, 25_000.0));
-        let near = VideoOptions { char_view: 0, map_view: 0 };
+        let near = VideoOptions { char_view: 0, map_view: 0, ..Default::default() };
         assert_eq!((near.char_distance(), near.sector_radius(), near.object_distance()), (Some(7_812.5), 2, 15_625.0));
-        assert_eq!(VideoOptions { char_view: 9, map_view: 9 }.sector_radius(), 5);
+        assert_eq!(VideoOptions { char_view: 9, map_view: 9, ..Default::default() }.sector_radius(), 5);
+        // Nature, ciel, brouillard, reflets : valeurs de COption.ini ; un ancien fichier sans ces
+        // clés les reçoit aussi.
+        assert_eq!((v.nature, v.sky, v.fog, v.lens_flare), (2, true, true, true));
+        assert_eq!(v.nature_density(), 1.0);
+        let old: VideoOptions = toml::from_str("char_view = 1\nmap_view = 2\n").unwrap();
+        assert_eq!((old.map_view, old.nature, old.fog), (2, 2, true));
     }
 }
