@@ -616,6 +616,10 @@ impl App {
         }
         match self.entity_under_cursor() {
             Some(cid) if self.addons.target_cid() == Some(cid) => {
+                // Objet de siège : carving du trône, catapulte, camp (voir `app_siege.rs`).
+                if self.siege_click(cid) {
+                    return true;
+                }
                 let tid = self.entities.iter().find(|e| e.cid == cid).map(|e| e.tid);
                 if self.combat_can_attack(cid, tid) {
                     self.combat_attack(cid);
@@ -642,6 +646,9 @@ impl App {
         }
         if let Some(cid) = self.entity_under_cursor() {
             let tid = self.entities.iter().find(|e| e.cid == cid).map(|e| e.tid);
+            if self.siege_click(cid) {
+                return;
+            }
             if self.combat_can_attack(cid, tid) {
                 self.combat_attack(cid);
             } else if !self.npc_talk(cid) {

@@ -460,6 +460,28 @@ fn start_function(glue: &mut NpcGlue, npc: i32, f: i32, net: Option<&NetLink>, u
                 net.send(Command::Repair(archrust_netclient::repair::RepairCommand::Open(npc)));
             }
         }
+        // Siege Commander : AGPMEVENTSIEGEWARNPC op 1, l'accord ouvre `UI_SiegeWarMain` (voir `app_siege.rs`).
+        archrust_netclient::siege::FUNCTION => {
+            glue.dialog = None;
+            if let Some(net) = net {
+                net.send(Command::Siege(archrust_netclient::siege::SiegeCommand::NpcRequest(npc)));
+            }
+        }
+        // Intendant « Grand Advisor » : AGPMTAX op 0 (`FUN_1406341e0`), l'accord ouvre `UI_TaxSteward` (voir
+        // `app_tax.rs`).
+        archrust_netclient::tax::FUNCTION => {
+            glue.dialog = None;
+            if let Some(net) = net {
+                net.send(Command::Tax(archrust_netclient::tax::TaxCommand::Request(npc)));
+            }
+        }
+        // Événement ArchLord : AGPMARCHLORD op 7 seule (`FUN_14061b230`, voir `app_archlord.rs`).
+        archrust_netclient::archlord::FUNCTION => {
+            glue.dialog = None;
+            if let Some(net) = net {
+                net.send(Command::Archlord(archrust_netclient::archlord::ArchlordCommand::EventRequest));
+            }
+        }
         _ => {}
     }
 }
@@ -509,7 +531,9 @@ pub fn panel(
         crate::hud::draw_npc_dialog(ctx, hud, assets, view, &mut out);
     }
     if let Some(shop) = glue.shop.as_mut() {
-        let view = ShopView { npc_name: &views.shop_name, items: &shop.items, loading: shop.loading, first_row: &mut shop.first_row };
+        // Prix d'achat affiché avec la taxe de la région du joueur (« Buy_Price », `FUN_1405479c0`, voir `app_tax.rs`).
+        let items: Vec<ShopEntry> = shop.items.iter().map(|e| ShopEntry { iid: e.iid, tid: e.tid, price: super::tax_glue::taxed(e.price), count: e.count, grid: e.grid, name: e.name.clone() }).collect();
+        let view = ShopView { npc_name: &views.shop_name, items: &items, loading: shop.loading, first_row: &mut shop.first_row };
         crate::hud::draw_shop(ctx, hud, assets, view, &mut out);
     }
     let pages = 1 + hud.stats.bank_pages.unwrap_or(0).clamp(0, 3) as i16;
@@ -875,6 +899,11 @@ impl App {
                     archrust_netclient::product::FUNCTION => 329,
                     // Marchand d'objets (fonction 0x1C) : « Auction House ».
                     archrust_netclient::auction::FUNCTION => 332,
+                    // Siege Commander (fonction 0x21) : « Apply for a Siege War ».
+                    archrust_netclient::siege::FUNCTION => 529,
+                    // Intendant (fonction 0x22) : « Tax » ; événement ArchLord (0x24) : « Archlord ».
+                    archrust_netclient::tax::FUNCTION => 609,
+                    archrust_netclient::archlord::FUNCTION => 672,
                     _ => continue,
                 };
                 buttons.push((f.function, sysstr(&assets, id).unwrap_or_default()));

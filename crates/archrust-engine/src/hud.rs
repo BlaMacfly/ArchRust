@@ -108,6 +108,22 @@ pub use wanted_ui::{draw_arrange, draw_wanted_alarm, draw_wanted_board, ArrangeV
 #[path = "hud_summons.rs"]
 mod summons_ui;
 pub use summons_ui::{draw_summons_menu, SummonsUi};
+
+#[path = "hud_shrine.rs"]
+mod shrine_ui;
+pub use shrine_ui::{draw_shrine_hp, draw_shrine_info, minimap_shrine_button, ShrineIcon, ShrineInfoView, ShrineMapEntry, ShrineRow, ShrineUi, SHRINE_LIST_ROWS};
+
+#[path = "hud_siege.rs"]
+mod siege_ui;
+pub use siege_ui::{draw_carve_message, draw_resurrection_siege, draw_siege_window, SiegeGuildRow, SiegeUi, SiegeView, SIEGE_LIST_ROWS};
+
+#[path = "hud_tax.rs"]
+mod tax_ui;
+pub use tax_ui::{draw_announce, draw_tax_window, TaxView};
+
+#[path = "hud_boss.rs"]
+mod boss_ui;
+pub use boss_ui::{draw_boss, draw_boss_button, draw_boss_dps, BossDetail, BossEntry, BossUi, BossView, DpsRow, BOSS_LIST_ROWS};
 pub use options_ui::{draw_options, OptionsEdit, OptionsOut};
 pub use login_ui::{draw_char_create, draw_char_select, CharSlotView, CreateUi, SelectUi};
 pub use menu_ui::{draw_main_menu, main_menu_open, toggle_options_menu, MenuUi};
@@ -461,13 +477,17 @@ impl HudState {
                 .chain(customize_ui::CUSTOMIZE_WINDOWS.iter())
                 .chain(wanted_ui::WANTED_WINDOWS.iter())
                 .chain(summons_ui::SUMMONS_WINDOWS.iter())
+                .chain(shrine_ui::SHRINE_WINDOWS.iter())
+                .chain(boss_ui::BOSS_WINDOWS.iter())
+                .chain(siege_ui::SIEGE_WINDOWS.iter())
+                .chain(tax_ui::TAX_WINDOWS.iter())
                 .filter_map(|n| UiWindow::parse(&ui, pos.as_deref(), n))
                 .collect();
             // Textes fixes du dossier de langue (`ini_fr/UI_1024X768.ini`…, mêmes contrôles) pour les
             // fenêtres qui les affichent tels quels ; rien à remplacer en anglais (`ini`).
             let lang = crate::assets::text_dir();
             if let Some(fr) = (lang != "ini").then(|| assets.table(lang, "UI_1024X768.ini").ok()).flatten() {
-                for w in list.iter_mut().filter(|w| ["UI_Teleport", "UI_BuyBank", "UI_Bank", "UI_SplitItem", "UI_NPCTrade_BuyStackCount", "UI_BankConfirm", "UI_Party", "UI_SelfCharacterMenu", "UI_TargetCharacterMenu", "UI_PartyOption", "UI_LG_CHARSELECT", "UI_ConfirmDeleteChar", "UI_LG_CHARCREATE", "UI_ReconnectHold", "UI_Remission"].contains(&w.name.as_str()) || GUILD_WINDOWS.contains(&w.name.as_str()) || menu_ui::MENU_WINDOWS.contains(&w.name.as_str()) || options_ui::OPTION_WINDOWS.contains(&w.name.as_str()) || convert_ui::CONVERT_WINDOWS.contains(&w.name.as_str()) || refinery_ui::REFINERY_WINDOWS.contains(&w.name.as_str()) || repair_ui::REPAIR_WINDOWS.contains(&w.name.as_str()) || product_ui::PRODUCT_WINDOWS.contains(&w.name.as_str()) || buddy_ui::BUDDY_WINDOWS.contains(&w.name.as_str()) || mail_ui::MAIL_WINDOWS.contains(&w.name.as_str()) || auction_ui::AUCTION_WINDOWS.contains(&w.name.as_str()) || chat_ui::CHAT_WINDOWS.contains(&w.name.as_str()) || customize_ui::CUSTOMIZE_WINDOWS.contains(&w.name.as_str()) || wanted_ui::WANTED_WINDOWS.contains(&w.name.as_str()) || summons_ui::SUMMONS_WINDOWS.contains(&w.name.as_str())) {
+                for w in list.iter_mut().filter(|w| ["UI_Teleport", "UI_BuyBank", "UI_Bank", "UI_SplitItem", "UI_NPCTrade_BuyStackCount", "UI_BankConfirm", "UI_Party", "UI_SelfCharacterMenu", "UI_TargetCharacterMenu", "UI_PartyOption", "UI_LG_CHARSELECT", "UI_ConfirmDeleteChar", "UI_LG_CHARCREATE", "UI_ReconnectHold", "UI_Remission"].contains(&w.name.as_str()) || GUILD_WINDOWS.contains(&w.name.as_str()) || menu_ui::MENU_WINDOWS.contains(&w.name.as_str()) || options_ui::OPTION_WINDOWS.contains(&w.name.as_str()) || convert_ui::CONVERT_WINDOWS.contains(&w.name.as_str()) || refinery_ui::REFINERY_WINDOWS.contains(&w.name.as_str()) || repair_ui::REPAIR_WINDOWS.contains(&w.name.as_str()) || product_ui::PRODUCT_WINDOWS.contains(&w.name.as_str()) || buddy_ui::BUDDY_WINDOWS.contains(&w.name.as_str()) || mail_ui::MAIL_WINDOWS.contains(&w.name.as_str()) || auction_ui::AUCTION_WINDOWS.contains(&w.name.as_str()) || chat_ui::CHAT_WINDOWS.contains(&w.name.as_str()) || customize_ui::CUSTOMIZE_WINDOWS.contains(&w.name.as_str()) || wanted_ui::WANTED_WINDOWS.contains(&w.name.as_str()) || summons_ui::SUMMONS_WINDOWS.contains(&w.name.as_str()) || shrine_ui::SHRINE_WINDOWS.contains(&w.name.as_str()) || boss_ui::BOSS_WINDOWS.contains(&w.name.as_str()) || siege_ui::SIEGE_WINDOWS.contains(&w.name.as_str()) || tax_ui::TAX_WINDOWS.contains(&w.name.as_str())) {
                     let Some(fw) = UiWindow::parse(&fr, None, &w.name) else { continue };
                     for c in &mut w.controls {
                         if let Some(d) = fw.control(&c.name).and_then(|x| x.display.clone()) {

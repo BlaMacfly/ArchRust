@@ -110,6 +110,21 @@ mod wanted_glue;
 #[path = "app_summons.rs"]
 mod summons_glue;
 
+#[path = "app_shrine.rs"]
+mod shrine_glue;
+
+#[path = "app_boss.rs"]
+mod boss_glue;
+
+#[path = "app_siege.rs"]
+mod siege_glue;
+
+#[path = "app_archlord.rs"]
+mod archlord_glue;
+
+#[path = "app_tax.rs"]
+mod tax_glue;
+
 /// Configuration du client.
 #[derive(Debug, Clone)]
 pub struct Config {
@@ -283,6 +298,16 @@ pub struct App {
     wanted: wanted_glue::WantedGlue,
     /// Invocations : registre, menus `UI_TargetSummonsMenu*`, familiers, voir `app_summons.rs`.
     summons: summons_glue::SummonsGlue,
+    /// Combats de Shrine (0x62) et annonces du Battleground (0x58), voir `app_shrine.rs`.
+    shrine: shrine_glue::ShrineGlue,
+    /// Fenêtre des boss et compteur de dégâts (0x64), voir `app_boss.rs`.
+    boss: boss_glue::BossGlue,
+    /// Guerres de siège (0x49 / 0x50) et tableau des guerres (0x61), voir `app_siege.rs`.
+    siege: siege_glue::SiegeGlue,
+    /// Titre d'ArchLord (0x55), voir `app_archlord.rs`.
+    archlord: archlord_glue::ArchlordGlue,
+    /// Taxes des régions et intendants (0x53), voir `app_tax.rs`.
+    tax: tax_glue::TaxGlue,
 }
 
 impl App {
@@ -403,6 +428,11 @@ impl App {
             customize: Default::default(),
             wanted: Default::default(),
             summons: Default::default(),
+            shrine: Default::default(),
+            boss: Default::default(),
+            siege: Default::default(),
+            archlord: Default::default(),
+            tax: Default::default(),
         })
     }
 
@@ -1243,6 +1273,13 @@ impl App {
         self.wanted_observe(&ev);
         // Invocations : remises à zéro, attaches des personnages sortis de la vue (voir `app_summons.rs`).
         self.summons_observe(&ev);
+        // Shrines : métamorphose du joueur, remises à zéro (voir `app_shrine.rs`).
+        self.shrine_observe(&ev);
+        // Siège : remises à zéro (voir `app_siege.rs`).
+        self.siege_observe(&ev);
+        // ArchLord et taxes : remises à zéro (voir `app_archlord.rs`, `app_tax.rs`).
+        self.archlord_observe(&ev);
+        self.tax_observe(&ev);
         match ev {
             WorldEvent::Connected => {
                 // Nouvelle connexion au monde : les instantanés d'objets qui suivent repartent de zéro.
@@ -1588,6 +1625,15 @@ impl App {
             WorldEvent::Wanted(ev) => self.on_wanted_event(ev),
             // Invocations (0x4F) et état spécial des personnages : voir `app_summons.rs`.
             WorldEvent::Summons(ev) => self.on_summons_event(ev),
+            // Shrines (0x62), Battleground (0x58), fenêtre des boss (0x64) : voir `app_shrine.rs`, `app_boss.rs`.
+            WorldEvent::Shrine(ev) => self.on_shrine_event(ev),
+            WorldEvent::Battleground(ev) => self.on_battleground(ev),
+            WorldEvent::Boss(ev) => self.on_boss_event(ev),
+            // Guerres de siège (0x49 / 0x50) et tableau des guerres (0x61) : voir `app_siege.rs`.
+            WorldEvent::Siege(ev) => self.on_siege_event(ev),
+            // Titre d'ArchLord (0x55) et taxes des régions (0x53) : voir `app_archlord.rs`, `app_tax.rs`.
+            WorldEvent::Archlord(ev) => self.on_archlord_event(ev),
+            WorldEvent::Tax(ev) => self.on_tax_event(ev),
             // Messages système réduits à un code (invocations : `app_summons.rs` ; banque agrandie… :
             // `app_npc.rs`).
             WorldEvent::SystemCode(code) => {
@@ -2317,6 +2363,10 @@ impl App {
         // Coiffeur : fermeture en s'éloignant, aperçu, caméra ; avis : bouton de la fenêtre de mort, rang.
         self.customize_frame(dt as f32);
         self.wanted_frame();
+        // Droits de l'ArchLord ; taux de taxe de la région du joueur, fenêtres de l'intendant fermées en
+        // s'éloignant (voir `app_archlord.rs`, `app_tax.rs`).
+        self.archlord_frame();
+        self.tax_frame();
 
         // Déplacement clavier (ZQSD / WASD) de la caméra.
         let speed = (self.camera.distance * 0.8 * dt as f32).max(1.0);
@@ -2363,6 +2413,8 @@ impl App {
         let npc_views = self.npc_views();
         // Compétences et barre de raccourcis (voir `app_skills.rs`).
         let skill_views = self.skills_views();
+        // Siège : joueur et résurrection de siège (voir `app_siege.rs`).
+        let siege_me = self.siege_me();
 
         let Some(gpu) = &mut self.gpu else {
             return Ok(());
@@ -2556,6 +2608,14 @@ impl App {
                 wanted_glue::panel(ctx, &mut self.wanted, &mut self.hud, &self.assets, self.net.as_ref(), &mut self.ui);
                 // Menu d'une invocation ciblée (`UI_TargetSummonsMenu*`, voir `app_summons.rs`).
                 summons_glue::panel(ctx, &mut self.summons, self.addons.target_cid(), me, &mut self.hud, &self.assets, self.net.as_ref());
+                // Shrines (`UI_Shrine_info`, jauge, messages du centre) et fenêtre des boss.
+                shrine_glue::panel(ctx, &mut self.shrine, &mut self.hud, &self.assets, self.net.as_ref());
+                boss_glue::panel(ctx, &mut self.boss, &self.game_clock, &self.config.saved_dir, &mut self.hud, &self.assets, self.net.as_ref());
+                // Guerres de siège : fenêtres d'AgcmUISiegeWar, résurrection de siège, `UI_WarInfo`.
+                siege_glue::panel(ctx, &mut self.siege, &siege_me, &self.items, &mut self.hud, &self.assets, self.net.as_ref(), &mut self.ui);
+                // Annonces de l'ArchLord ; fenêtres de l'intendant (`UI_TaxSteward`, `UI_TaxModify`, `UI_TaxView`).
+                archlord_glue::panel(ctx, &mut self.archlord, &mut self.hud, &self.assets);
+                tax_glue::panel(ctx, &mut self.tax, &mut self.hud, &self.assets, self.net.as_ref());
                 // Comme dans WoW, l'interface des AddOns n'apparaît qu'en jeu.
                 self.addon_glue
                     .ui

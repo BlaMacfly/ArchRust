@@ -269,10 +269,11 @@ pub fn encode_fields(
                 let Value::Block(b) = v else {
                     return Err(bad());
                 };
-                w.put_u32_le(b.len() as u32);
+                // Comme le client : un bloc vide n'active pas le drapeau, et rien n'est écrit (pas même sa
+                // longueur, que le décodeur ne lirait pas : les champs suivants seraient décalés).
                 if !b.is_empty() {
+                    w.put_u32_le(b.len() as u32);
                     w.put_slice(b);
-                    // Comme le client : un bloc vide n'active pas le drapeau.
                     flags |= bit;
                 }
             }
@@ -518,7 +519,7 @@ pub fn hex_dump(buf: &[u8], max: usize) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::schema::main::{LOGIN, STARTUP_ENCRYPTION};
+    use crate::schema::main::{CHARACTER, LOGIN, STARTUP_ENCRYPTION};
     use crate::schema::mini::CHAR_MOVE;
 
     #[test]
@@ -555,6 +556,19 @@ mod tests {
         let bytes = build_packet(STARTUP_ENCRYPTION, &values).unwrap();
         let pkt = decode_packet(STARTUP_ENCRYPTION, &bytes).unwrap();
         assert_eq!(pkt.flags, 1);
+    }
+
+    #[test]
+    fn empty_block_keeps_next_fields_aligned() {
+        // Nom vide (champ 3) suivi du statut (champ 4) : le statut doit se relire intact.
+        let values = sparse(
+            CHARACTER,
+            &[(0, Value::I8(1)), (1, Value::I32(7)), (3, Value::Block(vec![])), (4, Value::I8(3))],
+        );
+        let bytes = build_packet(CHARACTER, &values).unwrap();
+        let pkt = decode_packet(CHARACTER, &bytes).unwrap();
+        assert_eq!(pkt.flags, 0b1_0011);
+        assert_eq!(pkt.values[4].as_ref().and_then(Value::as_i64), Some(3));
     }
 
     #[test]

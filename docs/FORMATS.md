@@ -1109,6 +1109,84 @@ Relevées dans Archonia (`summons.rs` d'`archrust-netclient`, `app_summons.rs` d
   Messages système 10-13, 15-17 : clés de `systemmsgformat.xml` (`TameFailure*`, `FixedFailureMaxCount`,
   `SummonsFailureMaxCount`, `SummonsLevelLimitRegion`).
 
+## Shrines, Battleground et fenêtre des boss
+
+Relevés dans Archonia (`shrine.rs`, `battleground.rs`, `boss.rs` d'`archrust-netclient` ; `app_shrine.rs`,
+`app_boss.rs`, `hud_shrine.rs`, `hud_boss.rs` du moteur).
+
+- **AgpmShrineBattle 0x62**, structure brute (pas d'AuPacket) : en-tête de 19 o, `0x13` = 1, `0x14` u16 op,
+  corps en `0x18`, pied `0x6B`, taille = structure + 1. Du serveur : 1 état (`0x18` Id, Shrine en `0x20`),
+  2 liste (10 entrées de 0xF0 dès `0x20`, Shrine à +0x20), 3 jauge (`0x18` Id, `0x1C` ≠ 0 affichée), 4 mise à
+  jour, 6 gravure d'un joueur, 7 message (`0x1C` `MessageTid`, `0x20` race, `0x24` nom de 52 o), 10 ouverture
+  dans N minutes, 11 / 12 victoires-défaites (joueur / race). Du client : op 0 `{0, CID}` (liste, à l'ouverture
+  d'`UI_Shrine_info`), op 9 `{Id, CID}` (entrer). Shrine de 0xD0 : Id, nom (30), nom (49), 5 × i64, état
+  (0 fermé, 1 ouvert, 2 gravure, 3 fin de gravure, 4 occupation, 6 terminé), race occupante, race du graveur
+  (`+0x88`, clé de `RaceCode`), 5 × i64, CID du graveur (`+0xB8`). Jauge : `+0xA8` / (`+0x70` en gravure,
+  `+0x78` sinon), en ms. Entrée sans bouton de déplacement si `+0x68 − +0xB0 < 300 000`.
+- **Messages** (`ini/shrinemessage.xml`) : seuls 6, 9-12, 16, 20, 22 sont affichés à réception, avec 5, 14, 15,
+  23, 26, 27 à leur suite ; 3 et 13 viennent des ops 10 et 6. Couleurs des noms en Shrine : `[SHRINE]
+  SH_*_NAME` de color.ini pour les autres races.
+- **Battleground 0x58**, structure brute du serveur : `0x13` op (1), texte de 1024 o en `0x14`, couleur ARGB en
+  `0x414`, type en `0x418` (2 début : sysstr 780 / 782 ; 4 fin : 781 / 783 ; 5 texte au centre), variante en
+  `0x41C`.
+- **AgpmBoss 0x64** (drapeaux 1) : `UINT8 op, INT8, PACKET[32] A, PACKET B, INT32 TID, PACKET C, PACKET F` ;
+  A = `CHAR[48]` (TID, prochaine apparition u64 en `+0x18`, heure / minute en `+0x20`, vivant en `+0x28`),
+  B = `CHAR[196]` (boss, 16 TID d'objet, 16 entiers, 16 quantités), C = `INT8 page, INT8 pages, INT8 rang,
+  CHAR[49] nom, INT32 victoires, PACKET[16] D`, D = `INT8 rang, CHAR[49] nom, INT32`, F = `INT32 boss, INT8
+  nombre, PACKET[20] E`, E = `CHAR[49] nom, INT32 TID, INT32 niveau, CHAR[33] guilde, INT32 marque, INT32,
+  INT64 dégâts`. Ops 1, 3, 5, 7 reçues ; 4 (TID) et 6 (TID, C{page}) envoyées.
+- **AgpmTimer 0x11** champs 2 (heure du serveur, s Unix) et 3 (fuseau, s) : un champ nul est ignoré, chaque
+  paquet remet à zéro le décompte. Compte à rebours des boss : champ 2 + écoulé ; « Server Time: » : + champ 3.
+
+## Guerres de siège et tableau des guerres
+
+Relevés dans Archonia (`siege.rs` d'`archrust-netclient` ; `app_siege.rs`, `hud_siege.rs` du moteur).
+
+- **AgpmSiegeWar 0x49** (drapeaux 2) : `INT8 op, INT8 résultat, PACKET château, INT32 CID, PACKET page, INT32 objet,
+  PACKET fiche, INT32 IID, PACKET message, UINT64 (jamais lu), PACKET temps`. Château (drapeaux 2) : `MB nom, MB
+  propriétaire, MB guilde, UINT8 membres, UINT64 dernier siège, UINT64 prochain siège (FILETIME locaux), UINT8 statut
+  (0 rien, 1 déclaré, 2 candidatures closes, 3 combat, 4 trône levé, 5 Yeux ouverts, 6 fin, 7, 8), UINT8 × 3
+  (résurrection assaillants, défenseurs, +0xd7c ; 2 = absent), MB carve guild`. Page (drapeaux 1) : `INT16 page,
+  INT16 pages, PACKET[15]` de `MB guilde, MB chef, UINT32 points`. Fiche (drapeaux 2) : `UINT8 réparations, INT32
+  coût, UINT8 minutes, UINT8, INT32 × 8 TID chargés, UINT8 secondes de réparation, MB utilisateur`. Message
+  (drapeaux 1) : `UINT8 code, MB château, MB guilde, MB nom, UINT8 type d'objet, UINT32, UINT8 côté`. Temps :
+  `UINT8 genre (1 début, 2 fin), UINT16 secondes`. Un bloc vide ne doit pas être écrit (sa longueur serait lue).
+- **Ops** : client 1 déclarer `{nom, prochain}`, 3/4 défense, 5/6 attaque, 7/8 page `{page}`, 0xB défenseur
+  `{nom, guilde}`, 0xC/0xD listes, 0x10 / 0x12 / 0x14 / 0x1B objet (champ 5), 0x16 / 0x17 objet d'inventaire
+  (champs 5 et 7) ; serveur 0 château, 2 résultat, 9/10 pages, 0xE/0xF guildes retenues (page de noms), 0x11 /
+  0x13 / 0x15 réponses (0x13 + 0x0E ouvre la fenêtre de l'objet), 0x18, 0x1A fiche, 0x1C message, 0x1D temps.
+  Résultats : 3-6, 8-0xB, 0xF, 0x14 boîtes de l'`[EventMap]` ; 0xC, 0xD, 0x10-0x13, 0x15 phrases d'uimessage.
+- **AgpmEventSiegeWarNPC 0x50** (drapeaux 1) : `INT8 op, PACKET EVENT_BASE (fonction 33), INT32 CID` ; op 1 demande,
+  op 2 accord (`UI_SiegeWarMain` du château de la région du PNJ).
+- **AgpmWarInfo 0x61** : schéma `INT8 × 4` (drapeaux 0x0F) mais lecture brute : `0x14` op, `0x15` guerre (0 siège,
+  1 Battleground, 2 Shrine, 3 Archlord), `0x16` étape, `0x17` paramètre ; op 2 compteur (`0x16`), op 3 message
+  central (`0x16`), op 4 / 5 deux INT32 en `0x18` / `0x1C`, op 6 effacer, op 7 trois chaînes de 0x21 o en `0x16`,
+  `0x37`, `0x58`. Textes : `ini/warinfodata.txt`.
+- **Résurrection de siège** : AgpmCharacter op 0x13 (intérieur) / 0x14 (extérieur), champ 1 = CID.
+- **Données** : `ini/SiegeWar.txt` (châteaux, régions « château/abords »), `SiegeWarCharType` de
+  CharacterDataTable.txt (1 tour de garde … 6 trône, 9 camp, 10 catapulte), `ini/siegewarobject.txt`.
+
+## ArchLord et taxes des régions
+
+Relevés dans Archonia (`archlord.rs`, `tax.rs` d'`archrust-netclient` ; `app_archlord.rs`, `app_tax.rs`,
+`hud_tax.rs` du moteur).
+
+- **AgpmArchlord 0x55** (drapeaux 2) : `INT8 op, CHAR[32] ArchLord, CHAR[32] garde, INT8 résultat, INT32 étape,
+  INT32 gardes actifs, INT32 gardes max, INT32 message`. Reçus : 0 ArchLord (`sysstr` 630, annonce au centre sur
+  `RegionInfo.png`), 1 fin (631), 2 / 3 garde activé / retiré (nom vide = échec : 638-641), 4 gardes (650), 5 étape
+  1-4 (642-645, annonce et message système), 6 message 0-4 (646-649, 656). Envoyé : op 7 **seule** (drapeaux
+  0x0001) au clic sur un événement de fonction 36 (bouton `sysstr` 672). `IsArchlord` = nom égal (exact).
+- **AgpmTax 0x53** (drapeaux 2) : `INT8 op, INT32 CID, INT32 résultat, PACKET château | EVENT_BASE, PACKET région × 4`.
+  Château (drapeaux 2) : `CHAR[128] nom, INT64 recette, UINT64 dernier versement, UINT64 dernière modification`
+  (time_t). Région (drapeaux 2) : `CHAR[33] nom traduit, INT64 recette, INT32 taux`. Ops : 0 demande (EVENT_BASE de
+  la fonction 34, bouton `sysstr` 609), 1 accord (`UI_TaxSteward` pour le maître du château), 2 taux `{château
+  {nom}, régions {nom, taux 0-50}}` → résultat 0 `TAX_MODIFY_SUCCESS`, 1 (muet), 2 `TAX_MODIFY_F_NOT_TIME`, 3
+  `TAX_MODIFY_F_EX_RANGE` ; 3 consultation `{château {nom}}` → château et régions (`UI_TaxModify` / `UI_TaxView`) ;
+  4 taux d'une région (champ 4) reçu par tous. Un CID inconnu du client fait ignorer le paquet.
+- **Prix** : `prix + prix × taux / 100` (division entière, taux ≤ 0 : rien), taux de la région du joueur cherchée par
+  son nom `RegionTemplate.ini` traduit par `RegionGlossary.txt` de la langue du client. Tribut à l'ArchLord : 20 %
+  des recettes des régions (ligne 5 de `UI_TaxView`).
+
 ## Inconnues
 
 * association des équipements `d%07x` aux objets portés ;

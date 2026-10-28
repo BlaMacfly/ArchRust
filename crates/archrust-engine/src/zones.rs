@@ -132,11 +132,16 @@ pub struct GameClock {
     speed: u32,
     at: Instant,
     from_server: bool,
+    /// Heure du serveur (champ 2, s Unix, 0 = inconnue), fuseau (champ 3, s) et réception du dernier paquet.
+    server_unix: u32,
+    server_zone: i32,
+    server_at: Instant,
 }
 
 impl Default for GameClock {
     fn default() -> Self {
-        Self { base_ms: DEFAULT_GAME_MS, speed: DEFAULT_TIME_SPEED, at: Instant::now(), from_server: false }
+        let now = Instant::now();
+        Self { base_ms: DEFAULT_GAME_MS, speed: DEFAULT_TIME_SPEED, at: now, from_server: false, server_unix: 0, server_zone: 0, server_at: now }
     }
 }
 
@@ -189,6 +194,29 @@ impl GameClock {
     /// Heure du jeu (0–23).
     pub fn hour(&self) -> u32 {
         hour_of_ms(self.now_ms())
+    }
+
+    /// Champs 2 (heure du serveur, s Unix) et 3 (fuseau, s) d'un paquet `AGPMTIMER` : un champ nul est
+    /// ignoré, et chaque paquet remet le départ du décompte à l'instant de réception, même sans champ 2
+    /// (`FUN_14022e800`).
+    pub fn receive_server_at(&mut self, unix: Option<u32>, zone: Option<i32>, now: Instant) {
+        if let Some(u) = unix.filter(|&u| u != 0) {
+            self.server_unix = u;
+        }
+        if let Some(z) = zone.filter(|&z| z != 0) {
+            self.server_zone = z;
+        }
+        self.server_at = now;
+    }
+
+    /// Heure du serveur en secondes Unix (champ 2 + secondes écoulées, `FUN_1401a6fd0`) ; `None` sans champ 2.
+    pub fn server_unix_at(&self, now: Instant) -> Option<u64> {
+        (self.server_unix != 0).then(|| self.server_unix as u64 + now.saturating_duration_since(self.server_at).as_secs())
+    }
+
+    /// Heure du serveur affichée (« Server Time: », `FUN_140677c90`) : champ 2 + champ 3 + écoulé.
+    pub fn server_display_at(&self, now: Instant) -> Option<i64> {
+        self.server_unix_at(now).map(|u| u as i64 + self.server_zone as i64)
     }
 }
 
@@ -403,6 +431,21 @@ mod tests {
         // ×6 : une heure de jeu = 10 minutes réelles.
         clock.receive_at(Some(6), Some(3_600_000), t0);
         assert_eq!(hour_of_ms(clock.ms_at(t0 + std::time::Duration::from_secs(600))), 2);
+    }
+
+    #[test]
+    fn game_clock_keeps_the_server_unix_time() {
+        let t0 = Instant::now();
+        let s = std::time::Duration::from_secs;
+        let mut clock = GameClock::default();
+        assert_eq!(clock.server_unix_at(t0), None);
+        clock.receive_server_at(Some(1_000), Some(3_600), t0);
+        assert_eq!(clock.server_unix_at(t0 + s(5)), Some(1_005));
+        assert_eq!(clock.server_display_at(t0 + s(5)), Some(4_605));
+        // Paquet sans champ 2 : valeurs gardées, mais le décompte repart (comme Archonia).
+        clock.receive_server_at(None, None, t0 + s(5));
+        assert_eq!(clock.server_unix_at(t0 + s(6)), Some(1_001));
+        assert_eq!(clock.server_display_at(t0 + s(6)), Some(4_601));
     }
 
     #[test]

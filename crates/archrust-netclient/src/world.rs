@@ -299,6 +299,19 @@ pub enum WorldEvent {
     Wanted(crate::wanted::WantedEvent),
     /// Invocations (AgpmSummons 0x4F) et état spécial des personnages (voir `summons`).
     Summons(crate::summons::SummonsEvent),
+    /// Combats de Shrine (AgpmShrineBattle 0x62, structure brute, voir `shrine`).
+    Shrine(crate::shrine::ShrineEvent),
+    /// Annonce du Battleground (0x58, structure brute, voir `battleground`).
+    Battleground(crate::battleground::BattlegroundEvent),
+    /// Fenêtre des boss (AgpmBoss 0x64, voir `boss`).
+    Boss(crate::boss::BossEvent),
+    /// Guerres de siège (AgpmSiegeWar 0x49, AgpmEventSiegeWarNPC 0x50) et tableau des guerres (AgpmWarInfo 0x61,
+    /// brut), voir `siege`.
+    Siege(crate::siege::SiegeEvent),
+    /// Titre d'ArchLord (AgpmArchlord 0x55, voir `archlord`).
+    Archlord(crate::archlord::ArchlordEvent),
+    /// Taxes des régions (AgpmTax 0x53, voir `tax`).
+    Tax(crate::tax::TaxEvent),
     Disconnected(String),
 }
 
@@ -383,6 +396,16 @@ pub enum Command {
     Wanted(crate::wanted::WantedCommand),
     /// Propension d'une invocation (voir `summons`).
     Summons(crate::summons::SummonsCommand),
+    /// Liste des Shrines, entrée dans un Shrine (voir `shrine`).
+    Shrine(crate::shrine::ShrineCommand),
+    /// Boss choisi, page du classement (voir `boss`).
+    Boss(crate::boss::BossCommand),
+    /// Guerres de siège : Siege Commander, déclaration, candidatures, objets de siège (voir `siege`).
+    Siege(crate::siege::SiegeCommand),
+    /// Demande d'événement ArchLord (voir `archlord`).
+    Archlord(crate::archlord::ArchlordCommand),
+    /// Intendant, changement et consultation des taxes (voir `tax`).
+    Tax(crate::tax::TaxCommand),
     Quit,
 }
 
@@ -656,6 +679,36 @@ pub fn translate(p: &Incoming) -> WorldEvent {
     }
     if let Some(ev) = p.packet.as_ref().and_then(|packet| crate::wanted::translate(p.packet_type, &packet.values)) {
         return WorldEvent::Wanted(ev);
+    }
+    // Shrines (0x62) et Battleground (0x58) : structures brutes ; fenêtre des boss (0x64).
+    if p.packet_type == crate::shrine::PACKET_TYPE {
+        if let Some(ev) = crate::shrine::decode(&p.raw) {
+            return WorldEvent::Shrine(ev);
+        }
+    }
+    if p.packet_type == crate::battleground::PACKET_TYPE {
+        if let Some(ev) = crate::battleground::decode(&p.raw) {
+            return WorldEvent::Battleground(ev);
+        }
+    }
+    if let Some(ev) = p.packet.as_ref().and_then(|packet| crate::boss::translate(p.packet_type, &packet.values)) {
+        return WorldEvent::Boss(ev);
+    }
+    // Titre d'ArchLord (0x55) et taxes des régions (0x53).
+    if let Some(ev) = p.packet.as_ref().and_then(|packet| crate::archlord::translate(p.packet_type, &packet.values)) {
+        return WorldEvent::Archlord(ev);
+    }
+    if let Some(ev) = p.packet.as_ref().and_then(|packet| crate::tax::translate(p.packet_type, &packet.values)) {
+        return WorldEvent::Tax(ev);
+    }
+    // Guerres de siège (0x49 / 0x50) et tableau des guerres (0x61, brut).
+    if let Some(ev) = p.packet.as_ref().and_then(|packet| crate::siege::translate(p.packet_type, &packet.values)) {
+        return WorldEvent::Siege(ev);
+    }
+    if p.packet_type == packet_type::WAR_INFO {
+        if let Some(ev) = crate::siege::decode_war_info(&p.raw) {
+            return WorldEvent::Siege(crate::siege::SiegeEvent::WarInfo(ev));
+        }
     }
     // Heure du monde et météo (voir `nature`).
     if let Some(ev) = p.packet.as_ref().and_then(|packet| crate::nature::translate(p.packet_type, &packet.values)) {
@@ -1367,6 +1420,23 @@ impl WorldClient {
                         }
                         Some(Command::Summons(c)) => {
                             let (schema, values) = crate::summons::command_packet(&c, self.cid);
+                            self.conn.send(schema, &values).await
+                        }
+                        Some(Command::Shrine(c)) => self.conn.send_raw(&crate::shrine::command_packet(&c, self.cid)).await,
+                        Some(Command::Siege(c)) => {
+                            let (schema, values) = crate::siege::command_packet(&c, self.cid);
+                            self.conn.send(schema, &values).await
+                        }
+                        Some(Command::Archlord(c)) => {
+                            let (schema, values) = crate::archlord::command_packet(&c);
+                            self.conn.send(schema, &values).await
+                        }
+                        Some(Command::Tax(c)) => {
+                            let (schema, values) = crate::tax::command_packet(&c, self.cid);
+                            self.conn.send(schema, &values).await
+                        }
+                        Some(Command::Boss(c)) => {
+                            let (schema, values) = crate::boss::command_packet(&c);
                             self.conn.send(schema, &values).await
                         }
                         Some(Command::Wanted(c)) => {

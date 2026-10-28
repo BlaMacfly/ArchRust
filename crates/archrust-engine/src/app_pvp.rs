@@ -31,6 +31,9 @@ fn murderer_level(points: i32) -> usize {
 /// Textes d'un message système (code de l'op 18), dans l'ordre d'affichage.
 fn message_keys(code: i64) -> &'static [&'static str] {
     match code {
+        // Entrée dans une zone dangereuse (Battle Square, `FUN_1406acbf0` cas 2) : `_2` / `_3` (pas de perte d'objet
+        // à la mort en PK) quand le drapeau de perte d'AgpmConfig est nul, ce qu'ArchRust suppose.
+        2 => &["PvP_Msg_EnterCombatArea", "PvP_Msg_EnterCombatArea_2", "PvP_Msg_EnterCombatArea_3", "PvP_Msg_EnterCombatArea_4", "PvP_Msg_EnterCombatArea_5"],
         3 => &["PvP_Msg_NowPvPStatus"],
         4 => &["PvP_Msg_NonePvPStatus"],
         5 => &["PvP_Msg_Dead"],
@@ -320,6 +323,10 @@ impl App {
 
     /// Couleur du nom d'un joueur selon son statut (format `0xAABBGGRR`), sinon `None`.
     pub(super) fn pvp_name_color(&mut self, cid: i32) -> Option<u32> {
+        // Combat de Shrine : couleur de race, avant celles du statut (`FUN_140825a20`, voir `app_shrine.rs`).
+        if let Some(color) = self.shrine_name_color(cid) {
+            return color;
+        }
         let (criminal, points) = self.pvp.marks.get(&cid).copied()?;
         let assets = self.assets.clone();
         let colors = *self.pvp.colors.get_or_insert_with(|| {

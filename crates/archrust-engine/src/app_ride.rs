@@ -185,6 +185,8 @@ pub struct RideGlue {
     transformed: HashSet<i32>,
     /// CID du joueur, pour les demandes de l'interface.
     me: i32,
+    /// Le joueur est l'ArchLord (`AgpmArchlord`, voir `app_archlord.rs`) : potions d'usage 12 permises.
+    pub archlord: bool,
 }
 
 impl RideGlue {
@@ -242,11 +244,13 @@ impl RideGlue {
     }
 }
 
-/// Objet consommable refusé à cheval ou métamorphosé (FUN_14053d0b0) : texte `sysstr`.
-fn refused_item(d: &RideData, tid: Option<i32>) -> Option<u32> {
+/// Objet consommable refusé à cheval ou métamorphosé (FUN_14053d0b0) : texte `sysstr`. Les potions d'usage 12
+/// sont permises à l'ArchLord (`FUN_1402944c0`, nom comparé à celui d'AgpmArchlord).
+fn refused_item(d: &RideData, tid: Option<i32>, archlord: bool) -> Option<u32> {
     let row = d.item(tid);
     match (row.item_type, row.kind_type, row.sub_type) {
         (1, 7, _) => Some(346),
+        (1, 12, _) if archlord => None,
         (1, 12, 1) => Some(347),
         (1, 12, 2) => Some(348),
         _ => None,
@@ -260,10 +264,11 @@ pub fn item_requests(glue: &mut RideGlue, items: &HashMap<i32, ItemRecord>, requ
     if !glue.riding(me) && !glue.transformed.contains(&me) {
         return;
     }
+    let archlord = glue.archlord;
     let d = glue.data(assets);
     requests.retain(|r| {
         let ItemUi::Activate { iid, worn: false } = *r else { return true };
-        let Some(id) = items.get(&iid).and_then(|i| refused_item(d, i.template_id)) else { return true };
+        let Some(id) = items.get(&iid).and_then(|i| refused_item(d, i.template_id, archlord)) else { return true };
         let text = d.sys(id);
         hud.push_system(&text);
         ui.push_chat(format!("[monture] {text}"));
@@ -499,10 +504,12 @@ mod tests {
         d.items.insert(596, ItemRow { item_type: 1, kind_type: 12, sub_type: 1, ..Default::default() });
         d.items.insert(3, ItemRow { item_type: 1, kind_type: 12, sub_type: 2, ..Default::default() });
         d.items.insert(4, ItemRow { item_type: 1, kind_type: 0, ..Default::default() });
-        assert_eq!(refused_item(&d, Some(1)), Some(346));
-        assert_eq!(refused_item(&d, Some(596)), Some(347));
-        assert_eq!(refused_item(&d, Some(3)), Some(348));
-        assert_eq!(refused_item(&d, Some(4)), None);
+        assert_eq!(refused_item(&d, Some(1), false), Some(346));
+        assert_eq!(refused_item(&d, Some(596), false), Some(347));
+        assert_eq!(refused_item(&d, Some(3), false), Some(348));
+        assert_eq!(refused_item(&d, Some(4), false), None);
+        // L'ArchLord : potions d'usage 12 permises, pas la potion de métamorphose.
+        assert_eq!((refused_item(&d, Some(1), true), refused_item(&d, Some(596), true), refused_item(&d, Some(3), true)), (Some(346), None, None));
     }
 
     /// Avec les données du client (`ARCHRUST_GAME_DIR`) : White Horse (3002) → monture 567, dont le

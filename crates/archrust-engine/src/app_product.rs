@@ -26,8 +26,7 @@
 //!   (`FUN_1402a8540`, `FUN_1402a8640`).
 //!
 //! Écarts : ni sons (`U_CR_*.wav`), ni animation de la compétence pendant la fabrication, ni infobulles ;
-//! la taxe de région n'est pas ajoutée au prix d'apprentissage d'une compétence (le client ne la connaît
-//! pas) ; le titre requis d'une recette (colonne `UsingMonster`, vide partout) refuse la fabrication,
+//! le titre requis d'une recette (colonne `UsingMonster`, vide partout) refuse la fabrication,
 //! ArchRust ne suivant pas le titre actif.
 
 use super::App;
@@ -451,6 +450,8 @@ impl ProductGlue {
         // Compétences (`FUN_1402d0900` : niveau du personnage, puis gelds).
         for tid in &category_skills {
             let (need, cost) = d.learn.get(tid).copied().unwrap_or((0, 0));
+            // Taxe de la région du joueur (`FUN_1402d0900`…, voir `app_tax.rs`).
+            let cost = super::tax_glue::taxed(cost);
             let state = if level_of(*tid).is_some() {
                 learn_result::ALREADY
             } else if level < need {
@@ -472,12 +473,12 @@ impl ProductGlue {
                 learn_result::NO_SKILL
             } else if skill_level.unwrap_or(0) < r.level {
                 learn_result::LOW_LEVEL
-            } else if money < r.price {
+            } else if money < super::tax_glue::taxed(r.price) {
                 learn_result::NOT_ENOUGH_MONEY
             } else {
                 learn_result::SUCCESS
             };
-            let price = if state == learn_result::ALREADY { d.sys(426) } else { format!("{}{:2} {}{:4}{}", d.sys(4), r.level, d.sys(3), r.price, d.sys(10)) };
+            let price = if state == learn_result::ALREADY { d.sys(426) } else { format!("{}{:2} {}{:4}{}", d.sys(4), r.level, d.sys(3), super::tax_glue::taxed(r.price), d.sys(10)) };
             out.push(PdBuyEntry { skill_tid: None, item_tid: Some(r.result), name: r.name.clone(), price, state });
         }
         out.truncate(BUY_ENTRIES);

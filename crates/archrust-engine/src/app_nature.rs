@@ -126,8 +126,10 @@ impl App {
     /// Paquets AgpmTimer, AgpmEventNature, AgpmNatureEffect.
     pub(super) fn nature_event(&mut self, ev: NatureEvent) {
         match ev {
-            NatureEvent::Timer { speed, time_ms } => {
+            NatureEvent::Timer { speed, time_ms, unix, zone } => {
                 self.game_clock.receive(speed, time_ms);
+                // Heure du serveur (champs 2 et 3) : fenêtre des boss (voir `app_boss.rs`).
+                self.game_clock.receive_server_at(unix, zone, std::time::Instant::now());
                 let t = self.game_clock.now_ms();
                 log::info!(
                     "heure du jeu : {t} ms (vitesse ×{}), soit {} h (tranche skyset « {} »)",

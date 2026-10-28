@@ -12,7 +12,7 @@
 //!   op 7) ;
 //! * noms : `RegionGlossary.txt` du dossier de langue (FUN_14048d970), le nom coréen sinon ;
 //! * prix : `TeleportFee.txt` (« départ-arrivée », FUN_1402e9a00), affiché « %d %s » avec `Money_Name` ;
-//!   la taxe de siège qui s'y ajoute dans Archonia n'est pas envoyée par ArchCore (0) ;
+//!   plus la taxe de la région du joueur (FUN_1402e79a0, voir `app_tax.rs`) ;
 //! * statut d'une ligne : `NoMoney` si le prix dépasse l'or porté, `Normal` sinon ; `Disable` pour un
 //!   point désactivé par le serveur (champ 5, qu'ArchCore n'envoie pas) — ArchRust y met aussi les
 //!   points dont `UseType` n'admet pas la race du joueur, qu'ArchCore refuse ;
@@ -79,8 +79,9 @@ impl PortalData {
     fn message(&self, key: &str) -> String {
         self.messages.get(key).cloned().unwrap_or_default()
     }
+    /// Prix d'un trajet, taxe de la région du joueur comprise.
     fn fee(&self, from: &str, to: &str) -> i64 {
-        self.fees.get(&(from.to_string(), to.to_string())).copied().unwrap_or(0)
+        super::tax_glue::taxed(self.fees.get(&(from.to_string(), to.to_string())).copied().unwrap_or(0))
     }
     /// Destinations du point `from`, dans l'ordre d'Archonia.
     fn targets(&self, from: &str) -> Vec<String> {
@@ -104,7 +105,7 @@ fn key_values(text: &str) -> HashMap<String, String> {
 }
 
 /// `RegionGlossary.txt` du dossier de langue : clé en CP949, nom traduit dans la page du dossier.
-fn load_glossary(assets: &Assets) -> HashMap<String, String> {
+pub(super) fn load_glossary(assets: &Assets) -> HashMap<String, String> {
     for dir in crate::assets::text_dirs() {
         let text = super::npc_glue::client_text_in(assets, dir, "regionglossary.txt");
         if text.is_empty() {

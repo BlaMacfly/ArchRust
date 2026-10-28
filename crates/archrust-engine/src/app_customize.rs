@@ -9,7 +9,7 @@
 //!   149 unités (`FUN_1406bda30`) ;
 //! * textes (`FUN_1406be6a0`, `FUN_1406be930`, `FUN_1406bebc0`) : « Level : n » en rouge (16711680) si le niveau
 //!   manque, sinon 16773320 ; « Cost : n Gold » en rouge si l'or porté manque ; total de la coiffure et du visage ;
-//!   prix + prix × taxe / 100 (taxe 0 : ArchCore n'en a pas) ;
+//!   prix + prix × taxe / 100 (taux de la région du joueur, voir `app_tax.rs`) ;
 //! * « Purchase » (`FUN_1406bdf40`) : une sélection, or ≥ total, niveau ≥ niveau requis (coiffure seule : le
 //!   sien ; les deux : le plus petit ; visage seul : 0, incohérence d'Archonia gardée) → `UI_CustomizeBuyConfirm`
 //!   (« Cost : %d Gold ») ; « Confirm » envoie l'op 2 (-1 pour ce qui n'est pas choisi) et ferme les fenêtres ;
@@ -32,8 +32,6 @@ use glam::{Mat4, Vec3};
 
 /// Déplacement au-delà duquel la fenêtre se ferme (`FUN_1406bda30`).
 const CLOSE_MOVE: f32 = 149.0;
-/// Taux de taxe de la région : ArchCore n'en applique pas.
-const TAX_PERCENT: i64 = 0;
 const RED: &str = "16711680";
 const CREAM: &str = "16773320";
 
@@ -80,7 +78,7 @@ pub fn lists_for(table: &[Entry], tid: i32, head: Head) -> (Vec<Entry>, Vec<Entr
 }
 
 fn taxed(price: i64) -> i64 {
-    price + price * TAX_PERCENT / 100
+    super::tax_glue::taxed(price)
 }
 
 /// Total et niveau requis d'une sélection (`FUN_1406bdf40`).

@@ -3,8 +3,10 @@
 //! jamais (Archonia ne fait que les recevoir).
 //!
 //! * **AgpmTimer** (drapeaux 1) : champ 0 `UINT8` vitesse du temps (multiplicateur), champ 1
-//!   `UINT64` temps du jeu en millisecondes ; un champ à 0 est ignoré (`FUN_14022e800`). Champs 2
-//!   et 3 (`UINT32`) sans lecteur connu.
+//!   `UINT64` temps du jeu en millisecondes, champ 2 `UINT32` heure du serveur (secondes Unix), champ 3
+//!   `UINT32` décalage d'affichage (fuseau, secondes) ; un champ à 0 est ignoré (`FUN_14022e800`). La
+//!   fenêtre des boss compte avec le champ 2 + les secondes écoulées depuis le dernier AgpmTimer
+//!   (`FUN_1401a6fd0`) et affiche champ 2 + champ 3 (« Server Time: », `FUN_140677c90`).
 //! * **AgpmEventNature** (drapeaux 1) : champ 0 `INT8` météo (−1 absent ; AgcmEventNature :
 //!   0 = fin en fondu, 3 = pluie → effet 1, 5 = neige → effet 0, autres valeurs sans effet
 //!   visible), champs 1 et 2 `INT64` non lus.
@@ -30,7 +32,7 @@ pub const EFFECT_STOP: i32 = -1;
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum NatureEvent {
     /// AgpmTimer : `None` = champ absent ou nul (valeur précédente conservée).
-    Timer { speed: Option<u8>, time_ms: Option<u64> },
+    Timer { speed: Option<u8>, time_ms: Option<u64>, unix: Option<u32>, zone: Option<i32> },
     /// AgpmEventNature : météo (champ 0, présent et ≠ −1).
     Weather(i8),
     /// AgpmNatureEffect : effet de nature (−1 = arrêt).
@@ -52,7 +54,10 @@ pub fn translate(ptype: u8, values: &[Option<Value>]) -> Option<NatureEvent> {
                 Value::U64(t) => Some(*t),
                 other => other.as_i64().map(|t| t as u64),
             });
-            Some(NatureEvent::Timer { speed: speed.filter(|&s| s != 0), time_ms: time.filter(|&t| t != 0) })
+            // Champs 2 et 3 (UINT32) : le fuseau peut être négatif, relu en entier signé.
+            let unix = int(values, 2).map(|v| v as u32).filter(|&v| v != 0);
+            let zone = int(values, 3).map(|v| v as u32 as i32).filter(|&v| v != 0);
+            Some(NatureEvent::Timer { speed: speed.filter(|&s| s != 0), time_ms: time.filter(|&t| t != 0), unix, zone })
         }
         packet_type::EVENT_NATURE => {
             let w = int(values, 0)? as i8;
@@ -67,6 +72,12 @@ pub fn translate(ptype: u8, values: &[Option<Value>]) -> Option<NatureEvent> {
 pub fn timer_packet(speed: u8, time_ms: u64) -> (&'static Schema, Vec<Option<Value>>) {
     let s = main::TIMER;
     (s, sparse(s, &[(0, Value::U8(speed)), (1, Value::U64(time_ms))]))
+}
+
+/// Paquet AgpmTimer complet : vitesse, temps du jeu, heure du serveur (Unix, s) et fuseau (s).
+pub fn server_time_packet(speed: u8, time_ms: u64, unix: u32, zone: i32) -> (&'static Schema, Vec<Option<Value>>) {
+    let s = main::TIMER;
+    (s, sparse(s, &[(0, Value::U8(speed)), (1, Value::U64(time_ms)), (2, Value::U32(unix)), (3, Value::U32(zone as u32))]))
 }
 
 /// Paquet AgpmEventNature (météo seule).
@@ -96,15 +107,20 @@ mod tests {
     fn timer_vitesse_et_temps() {
         let (s, v) = timer_packet(6, 43_200_000);
         assert_eq!(s.id, 0x11);
-        assert_eq!(round_trip(s, &v), Some(NatureEvent::Timer { speed: Some(6), time_ms: Some(43_200_000) }));
+        assert_eq!(round_trip(s, &v), Some(NatureEvent::Timer { speed: Some(6), time_ms: Some(43_200_000), unix: None, zone: None }));
         // Champs nuls ou absents : ignorés, comme Archonia.
         let v = sparse(s, &[(0, Value::U8(0)), (1, Value::U64(5))]);
-        assert_eq!(round_trip(s, &v), Some(NatureEvent::Timer { speed: None, time_ms: Some(5) }));
+        assert_eq!(round_trip(s, &v), Some(NatureEvent::Timer { speed: None, time_ms: Some(5), unix: None, zone: None }));
         let v = sparse(s, &[(0, Value::U8(1))]);
-        assert_eq!(round_trip(s, &v), Some(NatureEvent::Timer { speed: Some(1), time_ms: None }));
+        assert_eq!(round_trip(s, &v), Some(NatureEvent::Timer { speed: Some(1), time_ms: None, unix: None, zone: None }));
         // Temps au-delà de i64::MAX : lu tel quel en UINT64.
         let v = sparse(s, &[(1, Value::U64(u64::MAX - 1))]);
-        assert_eq!(round_trip(s, &v), Some(NatureEvent::Timer { speed: None, time_ms: Some(u64::MAX - 1) }));
+        assert_eq!(round_trip(s, &v), Some(NatureEvent::Timer { speed: None, time_ms: Some(u64::MAX - 1), unix: None, zone: None }));
+        // Heure du serveur et fuseau (négatif : UINT32 relu en entier signé) ; nuls : ignorés.
+        let (s, v) = server_time_packet(6, 1, 1_793_000_000, -3600);
+        assert_eq!(round_trip(s, &v), Some(NatureEvent::Timer { speed: Some(6), time_ms: Some(1), unix: Some(1_793_000_000), zone: Some(-3600) }));
+        let (s, v) = server_time_packet(6, 1, 0, 0);
+        assert_eq!(round_trip(s, &v), Some(NatureEvent::Timer { speed: Some(6), time_ms: Some(1), unix: None, zone: None }));
     }
 
     #[test]

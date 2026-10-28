@@ -8,7 +8,10 @@
 //!
 //! Le moteur graphique consomme les [`world::WorldEvent`] et envoie des [`world::Command`].
 
+pub mod archlord;
 pub mod auction;
+pub mod battleground;
+pub mod boss;
 pub mod buddy;
 pub mod chat;
 pub mod combat;
@@ -31,8 +34,11 @@ pub mod refinery;
 pub mod remission;
 pub mod repair;
 pub mod ride;
+pub mod shrine;
+pub mod siege;
 pub mod skills;
 pub mod summons;
+pub mod tax;
 pub mod teleport;
 pub mod ui_status;
 pub mod wanted;

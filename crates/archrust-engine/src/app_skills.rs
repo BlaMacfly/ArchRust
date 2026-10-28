@@ -69,6 +69,8 @@ struct SkillData {
     name: String,
     /// Niveaux 1, 2… dans l'ordre.
     levels: Vec<Level>,
+    /// `skill_type` de SKILL_CONST (9 : compétence d'ArchLord, `FUN_1402fa5c0`).
+    kind: i32,
 }
 
 #[derive(Default)]
@@ -91,6 +93,7 @@ fn load_tables(assets: &Assets) -> SkillTables {
     let class_cols: Vec<Option<usize>> = CLASS_COLUMNS.iter().map(|c| col(&format!("require_class_{c}"))).collect();
     let (c_level, c_point, c_cost, c_up) = (col("require_level"), col("require_point"), col("skill_cost"), col("skill_upgrade_cost"));
     let mut by_name: HashMap<String, Vec<Level>> = HashMap::new();
+    let mut kinds: HashMap<String, i32> = HashMap::new();
     let mut current: Option<String> = None;
     for line in lines {
         let f: Vec<&str> = line.split('\t').collect();
@@ -99,6 +102,7 @@ fn load_tables(assets: &Assets) -> SkillTables {
         let name = f.first().map(|s| s.trim()).unwrap_or("");
         if !name.is_empty() {
             current = Some(name.to_string());
+            kinds.entry(name.to_string()).or_insert(num(col("skill_type")) as i32);
         }
         let Some(n) = &current else { continue };
         if get(col("skill_level")).is_empty() {
@@ -126,7 +130,8 @@ fn load_tables(assets: &Assets) -> SkillTables {
             let (Ok(tid), Some(name)) = (s.name.parse::<i32>(), name_col.as_deref().and_then(|c| s.get(c))) else { continue };
             let name = name.trim().to_string();
             let levels = by_name.get(&name).cloned().unwrap_or_default();
-            tables.by_tid.insert(tid, SkillData { name, levels });
+            let kind = kinds.get(&name).copied().unwrap_or(0);
+            tables.by_tid.insert(tid, SkillData { name, levels, kind });
         }
     }
     log::info!("compétences : {} modèle(s), {} décrite(s) par SKILL_CONST", tables.by_tid.len(), by_name.len());
@@ -351,6 +356,11 @@ impl App {
         }
         let Some(me) = self.player.as_ref().map(|p| p.cid) else { return };
         let target = self.addons.target_cid().unwrap_or(me);
+        // Compétence d'ArchLord (`skill_type` 9) : réservée à l'ArchLord (`FUN_1402fa5c0`, voir `app_archlord.rs`).
+        if self.skills.tables(&assets).by_tid.get(&tid).is_some_and(|d| d.kind == 9) && !self.archlord_is_me() {
+            log::info!("compétence {tid} ({name}) : réservée à l'ArchLord, non envoyée");
+            return;
+        }
         // À cheval : `auto_attack` seulement (voir `app_ride.rs`).
         if !self.ride_allows_skill(tid) {
             return;
@@ -580,7 +590,8 @@ impl App {
                 }
                 let owned = known.iter().find(|(_, (t, _))| *t == tid).map(|(_, (_, l))| *l).unwrap_or(0);
                 let next = d.levels.get(owned as usize);
-                let cost = next.map(|l| if owned == 0 { l.cost } else { l.upgrade_cost }).unwrap_or(0);
+                // Prix de l'instructeur avec la taxe de la région (`FUN_1402b8aa0`…, voir `app_tax.rs`).
+                let cost = super::tax_glue::taxed(next.map(|l| if owned == 0 { l.cost } else { l.upgrade_cost }).unwrap_or(0));
                 let require_level = next.map(|l| l.require_level).unwrap_or(0);
                 let possible = next.is_some_and(|l| level >= l.require_level && points >= l.require_point && money >= cost);
                 entries.push(TrainerEntry { tid, name: d.name.clone(), level: owned, max_level: d.levels.len() as i32, require_level, cost, possible });

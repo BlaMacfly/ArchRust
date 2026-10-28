@@ -12,7 +12,7 @@
 //!   (`FUN_1407579b0`) ;
 //! * infobulle : « Repair Cost : %I64d Gold » (`sysstr` 416, chaîne `"%s : %I64d %s"`) pour les armes,
 //!   armures, boucliers, montures et armes montées (`itemtooltip.txt`), sauf objet inusable ; prix
-//!   `FUN_1402b43a0` avec la taxe de la région (0 : ArchCore n'en a pas) ;
+//!   `FUN_1402b43a0` avec la taxe de la région du joueur (voir `app_tax.rs`) ;
 //! * PNJ de fonction 17 : bouton « Repair » (`sysstr` 325, FUN_1406ca6a0) → op 3 ; l'accord (op 4,
 //!   `FUN_1406ac0a0`) ouvre `UI_Repair` et l'inventaire (`ItemRepair_UIOpen_Event`, grille et coût à
 //!   zéro, `FUN_1406519b0`) et retient la position ; la fenêtre se ferme si le joueur s'en éloigne de
@@ -46,8 +46,6 @@ const STATUS_EQUIP: i8 = 3;
 const REPAIR_COST_KINDS: [i64; 4] = [1, 2, 4, 32];
 /// Durabilité des objets inusables (`@` dans la colonne `DUR`).
 const UNBREAKABLE: i32 = 50_000;
-/// Taux de taxe de la région : ArchCore n'en applique pas.
-const TAX_PERCENT: i64 = 0;
 
 /// Colonnes utiles d'itemdatatable.txt.
 #[derive(Debug, Clone, Copy, Default)]
@@ -144,7 +142,7 @@ impl RepairGlue {
     fn cost_of(&mut self, assets: &Assets, item: &ItemRecord) -> i64 {
         let (cur, max) = self.current_max(assets, item);
         let price = self.data(assets).item(item.template_id).price;
-        repair_cost(cur, max, price, TAX_PERCENT)
+        repair_cost(cur, max, price, super::tax_glue::rate() as i64)
     }
 
     fn total_cost(&mut self, assets: &Assets, items: &HashMap<i32, ItemRecord>) -> i64 {

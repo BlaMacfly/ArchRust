@@ -130,6 +130,22 @@ pub mod packet_type {
     pub const WANTED_CRIMINAL: u8 = 0x46;
     /// AgpmSummons : invocations (esprits, pièges, familiers).
     pub const SUMMONS: u8 = 0x4f;
+    /// AgcmBattleGround : annonces du Battleground, structure brute (serveur → client).
+    pub const BATTLEGROUND: u8 = 0x58;
+    /// AgpmShrineBattle : combats de Shrine de l'épisode 8, structure brute.
+    pub const SHRINE_BATTLE: u8 = 0x62;
+    /// AgpmBoss (Archonia) : fenêtre des boss, butin, classement, compteur de dégâts.
+    pub const BOSS: u8 = 0x64;
+    /// AgpmSiegeWar : guerres de siège des châteaux, drapeaux 2 octets.
+    pub const SIEGE_WAR: u8 = 0x49;
+    /// AgpmArchlord : titre d'ArchLord, gardes, étapes de la guerre de l'ArchLord, drapeaux 2 octets.
+    pub const ARCHLORD: u8 = 0x55;
+    /// AgpmTax : taxes des régions (intendant « Grand Advisor », fonction de PNJ 34), drapeaux 2 octets.
+    pub const TAX: u8 = 0x53;
+    /// AgpmEventSiegeWarNPC : dialogue du « Siege Commander » (fonction de PNJ 33).
+    pub const EVENT_SIEGEWAR_NPC: u8 = 0x50;
+    /// AgpmWarInfo : tableau d'information des guerres (siège, Battleground, Shrine, Archlord), lu en brut.
+    pub const WAR_INFO: u8 = 0x61;
 }
 
 /// Schémas des paquets principaux.
@@ -641,9 +657,76 @@ pub mod main {
         f!(UInt8),          // 8 « forcée » : hors limite (toujours posé par le client)
     ]);
 
+    // AgpmBoss (0x64, constructeur d'Archonia FUN_1402ed3e0) — drapeaux 1 : fenêtre des boss.
+    // AgpmSiegeWar (0x49, FUN_14020fe90, réception FUN_140213fc0) — drapeaux 2 : guerres de siège.
+    schema!(pub SIEGE_WAR = "AGPMSIEGEWAR", T::SIEGE_WAR, 2, [
+        f!(Int8),           // 0 opération (0 à 0x1D)
+        f!(Int8),           // 1 résultat (op 2) ou drapeau (ops 0x11/0x13/0x15)
+        f!(Packet),         // 2 château (mini SIEGE_CASTLE)
+        f!(Int32),          // 3 CID du personnage
+        f!(Packet),         // 4 page de guildes (mini SIEGE_GUILD_PAGE)
+        f!(Int32),          // 5 CID de l'objet de siège visé
+        f!(Packet),         // 6 fiche de l'objet (mini SIEGE_OBJECT_INFO)
+        f!(Int32),          // 7 IID d'un objet d'inventaire
+        f!(Packet),         // 8 message de siège (mini SIEGE_STATUS_MSG)
+        f!(UInt64),         // 9 jamais lu ni écrit par le client
+        f!(Packet),         // 10 compte à rebours (mini SIEGE_TIME)
+    ]);
+
+    // AgpmEventSiegeWarNPC (0x50, FUN_140284d60) — drapeaux 1 : op 1 demande, op 2 accord.
+    schema!(pub EVENT_SIEGEWAR_NPC = "AGPMEVENTSIEGEWARNPC", T::EVENT_SIEGEWAR_NPC, 1, [
+        f!(Int8),           // 0 opération
+        f!(Packet),         // 1 événement (EVENT_BASE, fonction 33)
+        f!(Int32),          // 2 CID du joueur
+    ]);
+
+    // AgpmWarInfo (0x61, FUN_140309760) — drapeaux 1 : schéma déclaré ; les rappels lisent le paquet brut
+    // (données ajoutées après ces 4 octets, voir `archrust-netclient::siege`).
+    schema!(pub WAR_INFO = "AGPMWARINFO", T::WAR_INFO, 1, [f!(Int8), f!(Int8), f!(Int8), f!(Int8)]);
+
+    // AgpmArchlord (0x55, constructeur d'Archonia FUN_140293b50, réception FUN_140293eb0) — drapeaux 2.
+    schema!(pub ARCHLORD = "AGPMARCHLORD", T::ARCHLORD, 2, [
+        f!(Int8),           // 0 opération (0 à 6 reçues, 7 envoyée)
+        f!(Char, 32),       // 1 nom de l'ArchLord
+        f!(Char, 32),       // 2 nom du garde
+        f!(Int8),           // 3 résultat (lu, non affiché)
+        f!(Int32),          // 4 étape de la guerre de l'ArchLord (1 à 4)
+        f!(Int32),          // 5 gardes actifs
+        f!(Int32),          // 6 gardes maximum
+        f!(Int32),          // 7 identifiant de message (op 6)
+    ]);
+
+    // AgpmTax (0x53, FUN_14026c110, réception FUN_14026c7b0) — drapeaux 2.
+    schema!(pub TAX = "AGPMTAX", T::TAX, 2, [
+        f!(Int8),           // 0 opération
+        f!(Int32),          // 1 CID du personnage concerné
+        f!(Int32),          // 2 résultat
+        f!(Packet),         // 3 EVENT_BASE (ops 0 et 1) ou château (mini TAX_CASTLE, ops 2 et 3)
+        f!(Packet),         // 4 région 1 (mini TAX_REGION ; seule lue à l'op 4)
+        f!(Packet),         // 5 région 2
+        f!(Packet),         // 6 région 3
+        f!(Packet),         // 7 région 4
+    ]);
+
+    schema!(pub BOSS = "AGPMBOSS", T::BOSS, 1, [
+        f!(UInt8),          // 0 opération (1 liste, 3 butin, 4 boss choisi, 5 classement, 6 page, 7 dégâts)
+        f!(Int8),           // 1 octet recopié à l'op 1 (aucun lecteur)
+        f!(Packet, 32),     // 2 boss suivis (mini BOSS_SPAWN), op 1
+        f!(Packet),         // 3 butin d'un boss (mini BOSS_DROP), op 3
+        f!(Int32),          // 4 TID du boss (ops 4 et 6)
+        f!(Packet),         // 5 classement (mini BOSS_RANK), op 5 ; page demandée à l'op 6
+        f!(Packet),         // 6 compteur de dégâts (mini BOSS_DPS), op 7
+    ]);
+
     /// Schéma principal d'un type de paquet, s'il est connu.
     pub fn by_id(id: u8) -> Option<&'static Schema> {
         Some(match id {
+            T::BOSS => BOSS,
+            T::ARCHLORD => ARCHLORD,
+            T::TAX => TAX,
+            T::SIEGE_WAR => SIEGE_WAR,
+            T::EVENT_SIEGEWAR_NPC => EVENT_SIEGEWAR_NPC,
+            T::WAR_INFO => WAR_INFO,
             T::SUMMONS => SUMMONS,
             T::AREA_CHATTING => AREA_CHATTING,
             T::CHANNEL => CHANNEL,
@@ -713,6 +796,44 @@ pub mod mini {
     // Criminel d'un avis de recherche (AgpmWantedCriminal champ 5 hors ops 0 et 1) — drapeaux 2 : nom, montant
     // (prime cumulée, prime posée, or gagné ou expérience perdue), niveau, TID du modèle, en ligne.
     schema!(pub WANTED_CRIMINAL = "AGPMWANTEDCRIMINAL_MINI", 210, 2, [f!(Char, 33), f!(Int64), f!(Int32), f!(Int32), f!(Int32)]);
+    // Fenêtre des boss (AgpmBoss 0x64, FUN_1402ed3e0) — drapeaux 1 partout.
+    // A : `stAgpmBossSpawnData` brut de 48 o (+0 TID, +0x18 prochaine apparition s Unix, +0x20 heure, +0x21 minute,
+    // +0x28 vivant).
+    schema!(pub BOSS_SPAWN = "AGPMBOSS_SPAWN", 230, 1, [f!(Char, 48)]);
+    // B : butin brut de 196 o (+0 TID du boss, +4 16 TID d'objet, +0x44 16 entiers ignorés, +0x84 16 quantités).
+    schema!(pub BOSS_DROP = "AGPMBOSS_DROP", 231, 1, [f!(Char, 196)]);
+    // C : page demandée, nombre de pages, rang du joueur, nom du joueur, boss tués par le joueur, 16 lignes D.
+    schema!(pub BOSS_RANK = "AGPMBOSS_RANK", 232, 1, [f!(Int8), f!(Int8), f!(Int8), f!(Char, 49), f!(Int32), f!(Packet, 16)]);
+    // D : rang, nom, victoires sur le boss.
+    schema!(pub BOSS_RANK_ROW = "AGPMBOSS_RANK_ROW", 233, 1, [f!(Int8), f!(Char, 49), f!(Int32)]);
+    // F : TID du boss, nombre d'entrées (20 au plus), 20 lignes E.
+    schema!(pub BOSS_DPS = "AGPMBOSS_DPS", 234, 1, [f!(Int32), f!(Int8), f!(Packet, 20)]);
+    // E : nom, TID du modèle, niveau, guilde, marque de guilde, (inconnu), dégâts.
+    schema!(pub BOSS_DPS_ROW = "AGPMBOSS_DPS_ROW", 235, 1, [f!(Char, 49), f!(Int32), f!(Int32), f!(Char, 33), f!(Int32), f!(Int32), f!(Int64)]);
+    // Guerres de siège (AgpmSiegeWar 0x49). Château (+0x5d24) — drapeaux 2 : nom, nom du propriétaire (≤ 0x30),
+    // guilde propriétaire (≤ 0x20), membres de la guilde, dernier siège, prochain siège (FILETIME locaux), statut,
+    // résurrection des assaillants, des défenseurs (0/1, 2 absent), drapeau +0xd7c, guilde du dernier carving.
+    schema!(pub SIEGE_CASTLE = "AGPMSIEGEWAR_CASTLE", 240, 2, [
+        f!(MemoryBlock), f!(MemoryBlock), f!(MemoryBlock), f!(UInt8), f!(UInt64), f!(UInt64), f!(UInt8), f!(UInt8), f!(UInt8), f!(UInt8), f!(MemoryBlock),
+    ]);
+    // Page de guildes (+0x5eb0) — drapeaux 1 : page (1-based), nombre de pages, 15 lignes SIEGE_GUILD_ENTRY.
+    schema!(pub SIEGE_GUILD_PAGE = "AGPMSIEGEWAR_GUILD_PAGE", 241, 1, [f!(Int16), f!(Int16), f!(Packet, 15)]);
+    // Ligne (+0x603c) — drapeaux 1 : nom de guilde, nom du chef, points de guilde.
+    schema!(pub SIEGE_GUILD_ENTRY = "AGPMSIEGEWAR_GUILD_ENTRY", 242, 1, [f!(MemoryBlock), f!(MemoryBlock), f!(UInt32)]);
+    // Fiche d'un objet de siège (+0x61c8) — drapeaux 2 : réparations restantes, coût, durée d'une réparation (min),
+    // inconnu, 8 TID chargés (-1 vide), secondes de réparation écoulées, utilisateur ou réparateur.
+    schema!(pub SIEGE_OBJECT_INFO = "AGPMSIEGEWAR_OBJECT_INFO", 243, 2, [
+        f!(UInt8), f!(Int32), f!(UInt8), f!(UInt8), f!(Int32), f!(Int32), f!(Int32), f!(Int32), f!(Int32), f!(Int32), f!(Int32), f!(Int32), f!(UInt8), f!(MemoryBlock),
+    ]);
+    // Message de siège (+0x6354) — drapeaux 1 : code, château, guilde, 2e nom, type d'objet, inconnu, côté.
+    schema!(pub SIEGE_STATUS_MSG = "AGPMSIEGEWAR_STATUS_MSG", 244, 1, [f!(UInt8), f!(MemoryBlock), f!(MemoryBlock), f!(MemoryBlock), f!(UInt8), f!(UInt32), f!(UInt8)]);
+    // Compte à rebours (+0x64e0) — drapeaux 1 : genre (1 avant le début, 2 avant la fin), secondes.
+    schema!(pub SIEGE_TIME = "AGPMSIEGEWAR_TIME", 245, 1, [f!(UInt8), f!(UInt16)]);
+    // Taxes (AgpmTax 0x53). Château (+0x1874) — drapeaux 2 : nom, recette totale, date du dernier versement
+    // (time_t), date de la dernière modification des taux (time_t).
+    schema!(pub TAX_CASTLE = "AGPMTAX_CASTLE", 246, 2, [f!(Char, 128), f!(Int64), f!(UInt64), f!(UInt64)]);
+    // Région (+0x1a00) — drapeaux 2 : nom (traduit par le glossaire du joueur), recette, taux (%).
+    schema!(pub TAX_REGION = "AGPMTAX_REGION", 247, 2, [f!(Char, 33), f!(Int64), f!(Int32)]);
     // Maison des ventes (AgpmAuction champ 2, constructeur FUN_140268eb0 d'Archonia).
     // Vente du joueur — drapeaux 2 : salesID, docID, n° d'objet en base, IID, prix or, prix CC, quantité, statut
     // (0 en vente, 1 vendu), date d'enregistrement, TID.

@@ -630,8 +630,10 @@ pub fn panel(ctx: &egui::Context, glue: &mut GuildGlue, hud: &mut HudState, asse
         let mut v = GuildView::default();
         match win {
             Win::Main => {
-                v.texts.insert("GD_Main_Edit_Info", printf(&d.msg("Guild_Main_Text"), &[&CREATE_LEVEL, &d.create_price]));
-                if info.is_some() || money < d.create_price {
+                // Prix de création avec la taxe de la région du joueur (`FUN_1408c6ad0`, voir `app_tax.rs`).
+                let create_price = super::tax_glue::taxed(d.create_price);
+                v.texts.insert("GD_Main_Edit_Info", printf(&d.msg("Guild_Main_Text"), &[&CREATE_LEVEL, &create_price]));
+                if info.is_some() || money < create_price {
                     v.disabled.insert("GD_Main_Button_1");
                 }
                 if !(master && rows.len() == 1) {
