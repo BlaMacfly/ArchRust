@@ -23,6 +23,7 @@ pub mod assets;
 pub mod audio;
 pub mod boards;
 pub mod camera;
+pub mod catalog;
 pub mod gltf_model;
 pub mod hud;
 pub mod login_settings;

@@ -44,11 +44,16 @@
 //! du contenu. `min_archrust` est comparé à la version du client : un pack trop récent est signalé.
 //!
 //! Les clés de correspondance sont insensibles à la casse ; `/` et `\` sont équivalents.
+//!
+//! Les dossiers `assets/textures/` et `assets/sounds/` acceptent aussi des packs **sans manifeste** :
+//! le nom de chaque fichier y est l'ID de l'asset remplacé (voir [`assets_dir`]).
 
+pub mod assets_dir;
 pub mod manifest;
 pub mod settings;
 pub mod stack;
 
+pub use assets_dir::{load_asset_dir, signature, ASSET_FOLDERS};
 pub use manifest::{Category, Manifest, PatchInfo};
 pub use settings::{PackChoice, PackSettings};
 pub use stack::{PatchSource, PatchStack, Resolved, ResourceKind, CLIENT_VERSION};

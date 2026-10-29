@@ -395,7 +395,13 @@ impl PatchStack {
                 .find(|(pat, _, _)| if pat.contains('*') { glob_match(pat, key) } else { norm(pat) == wanted })
                 .map(|(_, file, scale)| (file.to_string(), *scale))
                 // Un son (`[[sounds]]`) est un fichier du client sous `sound/`, essayé après `[[files]]`.
-                .or_else(|| (kind == ResourceKind::File).then(|| m.sounds.iter().find(|s| norm(&s.client_path()) == wanted).map(|s| (s.file.clone(), 1.0))).flatten());
+                .or_else(|| {
+                    let sound = |s: &&crate::manifest::SoundOverride| {
+                        let path = s.client_path();
+                        if path.contains('*') { glob_match(&path, key) } else { norm(&path) == wanted }
+                    };
+                    (kind == ResourceKind::File).then(|| m.sounds.iter().find(sound).map(|s| (s.file.clone(), 1.0))).flatten()
+                });
             if let Some((file, scale)) = hit {
                 out.push(Resolved { patch_id: m.patch.id.clone(), file, scale, patch_index: i });
             }

@@ -386,6 +386,13 @@ const MINIMAP_PX_PER_UNIT: f32 = 0.003_769_531_1;
 const MINIMAP_RASTER: f32 = 237.0;
 
 impl HudState {
+    /// Oublie les images d'interface et la minicarte déjà chargées : elles sont relues à leur
+    /// prochain affichage (packs rechargés en cours de jeu).
+    pub fn forget_images(&mut self) {
+        self.images.clear();
+        self.minimap = MinimapState::default();
+    }
+
     pub fn merge_stats(&mut self, s: &CharacterStats) {
         let st = &mut self.stats;
         st.level = s.level.or(st.level);

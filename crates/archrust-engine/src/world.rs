@@ -283,6 +283,13 @@ impl Terrain {
     }
 
     /// Charge progressivement les secteurs autour de `center`, décharge les lointains.
+    /// Oublie les maillages des secteurs (leurs textures sont liées au GPU à la construction) : ils se
+    /// reconstruisent au fil des images suivantes, avec les textures des packs rechargés.
+    pub fn rebuild_meshes(&mut self) {
+        self.sectors.clear();
+        self.failed.clear();
+    }
+
     pub fn update(&mut self, renderer: &mut Renderer, assets: &Assets, center: Vec3) {
         let (cx, cy) = sector_of(center.x, center.z);
         if self.last_center != Some((cx, cy)) {

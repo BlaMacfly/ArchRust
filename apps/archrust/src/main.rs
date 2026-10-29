@@ -44,6 +44,10 @@ struct Cli {
     /// Dossier des patchs HD (`.ahp` ou dossiers).
     #[arg(long, global = true, default_value = "patches")]
     patches: PathBuf,
+    /// Dossier des assets déposés (`textures/`, `sounds/`) : packs avec ou sans manifeste, appliqués
+    /// en cours de jeu.
+    #[arg(long, global = true, default_value = "assets")]
+    assets: PathBuf,
     #[command(subcommand)]
     cmd: Cmd,
 }
@@ -115,6 +119,20 @@ enum Cmd {
     Patch {
         #[command(subcommand)]
         op: PatchOp,
+    },
+    /// Assets du client et leurs IDs.
+    Assets {
+        #[command(subcommand)]
+        op: AssetsOp,
+    },
+}
+
+#[derive(Subcommand)]
+enum AssetsOp {
+    /// Écrit le catalogue des IDs (`textures.csv`, `sons.csv`) : les noms à donner aux fichiers d'un pack.
+    Catalogue {
+        #[arg(default_value = "assets/catalogue")]
+        out: PathBuf,
     },
 }
 
@@ -198,7 +216,7 @@ fn main() -> Result<()> {
     } else {
         archrust_engine::assets::find_client_dir(cli.game.as_deref())
     };
-    let patch_dirs = vec![cli.free_assets.clone(), cli.patches.clone()];
+    let patch_dirs = vec![cli.free_assets.clone(), cli.patches.clone(), cli.assets.clone()];
     let require_client = |what: &str| -> Result<PathBuf> {
         game_dir.clone().ok_or_else(|| anyhow!("{what} demande un client ArchLord : --game <Game>, ou le client dans assets-archonia/ (voir assets-archonia/README.md)"))
     };
@@ -210,18 +228,23 @@ fn main() -> Result<()> {
             screenshot_after,
             exec,
             login_exec,
-        } => archrust_engine::run(Config {
-            game_dir,
-            addons_dir: cli.addons,
-            patch_dirs,
-            saved_dir: PathBuf::from("saved-variables"),
-            title: "ArchRust".into(),
-            preview_model: preview,
-            auto_connect: connect,
-            screenshot: screenshot.map(|p| (p, screenshot_after)),
-            exec_on_enter: exec,
-            login_exec,
-        }),
+        } => {
+            if let Err(e) = archrust_patch::assets_dir::ensure_asset_dirs(&cli.assets) {
+                log::warn!("dossier {} : {e}", cli.assets.display());
+            }
+            archrust_engine::run(Config {
+                game_dir,
+                addons_dir: cli.addons,
+                patch_dirs,
+                saved_dir: PathBuf::from("saved-variables"),
+                title: "ArchRust".into(),
+                preview_model: preview,
+                auto_connect: connect,
+                screenshot: screenshot.map(|p| (p, screenshot_after)),
+                exec_on_enter: exec,
+                login_exec,
+            })
+        }
         Cmd::Login {
             host,
             port,
@@ -291,6 +314,12 @@ fn main() -> Result<()> {
                         .unwrap_or_default()
                 );
             }
+            Ok(())
+        }
+        Cmd::Assets { op: AssetsOp::Catalogue { out } } => {
+            let assets = Assets::new(Some(require_client("assets catalogue")?), &[]);
+            let (textures, sounds) = archrust_engine::catalog::write(&assets, &out)?;
+            println!("{textures} textures et {sounds} sons → {}", out.display());
             Ok(())
         }
         Cmd::Patch { op } => {

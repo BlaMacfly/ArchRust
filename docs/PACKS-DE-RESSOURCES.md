@@ -18,12 +18,31 @@ Un pack peut aussi mêler les deux (catégorie « mixte » : il figure alors dan
 
 | Dossier | Contenu |
 |---|---|
-| `patches/` | Packs de la communauté : un dossier par pack, ou une archive `.ahp` |
+| `assets/textures/` | Textures et images d'interface : fichiers seuls, dossiers ou archives `.zip` / `.ahp`, **avec ou sans** `patch.toml` |
+| `assets/sounds/` | Sons : mêmes règles |
+| `patches/` | Packs de la communauté avec manifeste : un dossier par pack, ou une archive `.ahp` |
 | `free-assets/` | Pack **officiel** d'ArchRust |
 
-`patches/` et `free-assets/` sont à côté de l'exécutable `ArchRust.exe` (dans le dossier `Game` du
-client, ou dans le dépôt pour les développeurs). Pour installer un pack, on dépose son dossier ou son
-archive `.ahp` dans `patches/`, puis on relance le client.
+Ces dossiers sont à côté de l'exécutable `ArchRust.exe` (dans le dossier du client, ou dans le dépôt
+pour les développeurs) ; `assets/` est créé au premier lancement. **Le client surveille `assets/` et
+`patches/` pendant la partie** : un pack déposé, modifié ou retiré s'applique tout seul en quelques
+secondes, sans relancer le jeu (un message l'annonce dans la discussion).
+
+### Sans manifeste : le nom du fichier est l'ID de l'asset
+
+Dans `assets/`, un fichier remplace l'asset qui porte son nom (voir [§ 4](#4-trouver-le-nom-dune-ressource)) :
+
+| Dépôt | Effet |
+|---|---|
+| `assets/textures/b00060aa.png` | remplace la texture `b00060aa` (armure par défaut du guerrier humain) |
+| `assets/textures/mon-pack/sol/a0057aab.dds` | un dossier = un pack ; les sous-dossiers ne servent qu'à ranger |
+| `assets/textures/ac_base.png` | remplace l'image d'interface `texture/ui/ac_base.png` (même nom, même extension) |
+| `assets/sounds/ui/click.wav` | remplace `sound/ui/click.wav` (`bgm/`, `effect/`, `stream/`, `ui/` sont les dossiers du client) |
+| `assets/sounds/mes-sons/bip.wav` | dans un pack, un son posé à sa racine remplace `bip.wav` dans n'importe quel dossier |
+| `assets/textures/mon-pack.zip` | une archive = un pack, mêmes règles qu'un dossier |
+
+Avec un `patch.toml`, un dossier ou une archive de `assets/` suit son manifeste (section 3), comme
+dans `patches/`.
 
 ## 2. Structure d'un pack
 
@@ -89,9 +108,17 @@ répétée autant que voulu.
 | Effets sonores | `sound/effect/<nom>.wav` (rangés dans des packs `.pk`) | `[[sounds]] path = "effect/<nom>.wav"` |
 | Musique | `sound/bgm/<nom>.mp3` | `[[sounds]] path = "bgm/<nom>.mp3"` |
 
+Le **catalogue des IDs** liste tout ce qu'un pack peut remplacer (environ 26 800 textures et 4 800
+sons pour le client Archonia) :
+
+```bash
+archrust assets catalogue                      # écrit assets/catalogue/textures.csv et sons.csv
+```
+
 Commandes utiles (depuis le dossier d'ArchRust) :
 
 ```bash
+archrust inspect model character b0000060.ecl  # textures (matériaux) d'un modèle
 archrust inspect pack sound/ui                 # liste les fichiers d'un pack du client
 archrust extract texture a0057aab a0057aab.png # extrait une texture (telle que le client la voit, packs compris)
 archrust extract sound sound/ui/block.wav x.wav # extrait un son (packs compris)
@@ -150,7 +177,10 @@ extraits du client ArchLord.
 | Tables `ini` | format d'origine, par `[[files]]` | à manier avec prudence : une table incohérente gêne le jeu |
 | Shaders `[[shaders]]` | WGSL | **déclarés mais pas encore appliqués** par le moteur |
 
-Pas de rechargement à chaud : un changement de pack s'applique au redémarrage du client.
+Rechargement à chaud : un pack déposé, modifié ou retiré dans `assets/` ou `patches/` s'applique en
+cours de jeu (textures, sol, images d'interface, sons) ; une musique déjà lancée continue jusqu'à son
+prochain changement, et un modèle glTF remplacé n'est repris qu'au prochain chargement du personnage.
+Les réglages de la fenêtre Options s'appliquent, eux, au redémarrage.
 
 ## 9. Exemples fournis
 

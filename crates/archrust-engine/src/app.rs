@@ -125,6 +125,9 @@ mod archlord_glue;
 #[path = "app_tax.rs"]
 mod tax_glue;
 
+#[path = "app_assets.rs"]
+mod assets_glue;
+
 /// Configuration du client.
 #[derive(Debug, Clone)]
 pub struct Config {
@@ -308,6 +311,8 @@ pub struct App {
     archlord: archlord_glue::ArchlordGlue,
     /// Taxes des régions et intendants (0x53), voir `app_tax.rs`.
     tax: tax_glue::TaxGlue,
+    /// Surveillance des dossiers de packs (`assets/`, `patches/`), voir `app_assets.rs`.
+    assets_watch: assets_glue::AssetsWatch,
 }
 
 impl App {
@@ -315,7 +320,7 @@ impl App {
         // Packs de ressources, avec les préférences du joueur (`saved-variables/packs.toml`).
         let pack_settings = archrust_patch::PackSettings::load(&config.saved_dir);
         let assets = Arc::new(Assets::new(config.game_dir.clone(), &config.patch_dirs).with_pack_settings(&pack_settings));
-        let packs = assets.patches.clone();
+        let packs = assets.pack_stack();
         // Comme sous WoW, les AddOns se chargent à l'entrée en jeu (voir `enter_world_addons`).
         let addons = Self::new_addon_manager(&config)?;
         log::info!(
@@ -433,6 +438,7 @@ impl App {
             siege: Default::default(),
             archlord: Default::default(),
             tax: Default::default(),
+            assets_watch: Default::default(),
         })
     }
 
@@ -2398,6 +2404,8 @@ impl App {
         // Heure, ciel, brouillard, lumières et météo (`app_nature.rs`), après les CVars.
         self.update_nature(dt as f32);
         self.update_audio(dt as f32);
+        // Packs déposés dans assets/ ou patches/ en cours de jeu (`app_assets.rs`).
+        self.watch_packs();
         self.save_options_if_needed(false);
         // Fenêtre du groupe (`app_party.rs`) : membres, PV, cible.
         let party_view = self.party_view();

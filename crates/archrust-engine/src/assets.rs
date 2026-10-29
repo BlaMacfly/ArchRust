@@ -34,7 +34,7 @@ use archrust_patch::{PatchStack, Resolved, ResourceKind};
 use std::collections::HashMap;
 use std::fs::File;
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, RwLock};
 
 /// Image RGBA8 décodée.
 #[derive(Debug, Clone)]
@@ -231,7 +231,10 @@ pub fn find_client_dir(explicit: Option<&Path>) -> Option<PathBuf> {
 pub struct Assets {
     /// Dossier `Game` du client, ou `None` en mode sans client (substituts et patchs seulement).
     pub game_dir: Option<PathBuf>,
-    pub patches: PatchStack,
+    /// Pile des packs ; remplacée en cours de jeu par [`Assets::reload_packs`].
+    patches: RwLock<PatchStack>,
+    /// Dossiers de packs donnés à la création, relus par [`Assets::reload_packs`].
+    patch_dirs: Vec<PathBuf>,
     /// Qualité des textures lue dans `ini/COption.ini` du client.
     pub quality: TextureQuality,
     /// Packs ouverts (ou absents : `None`), indexés par dossier normalisé.
@@ -247,28 +250,11 @@ pub struct Assets {
 
 impl Assets {
     /// `patch_dirs` : un dossier contenant `patch.toml` est chargé comme un patch (ex. `free-assets/`),
-    /// sinon comme un dossier de patchs (`patches/`). La pile reste triée par priorité.
+    /// un dossier d'assets (`assets/`, avec `textures/` et `sounds/`) comme des packs avec ou sans
+    /// manifeste ([`archrust_patch::assets_dir`]), sinon comme un dossier de patchs (`patches/`). La
+    /// pile reste triée par priorité.
     pub fn new(game_dir: Option<PathBuf>, patch_dirs: &[PathBuf]) -> Self {
-        let mut patches = PatchStack::new();
-        for dir in patch_dirs {
-            if dir.join("patch.toml").is_file() {
-                match PatchStack::load_one(dir) {
-                    Ok(mut p) => {
-                        for problem in &p.problems {
-                            log::warn!("patch {} : {problem}", p.manifest.patch.id);
-                        }
-                        // Un dossier qui est lui-même un pack (`free-assets/`) : pack officiel du projet.
-                        p.official = true;
-                        patches.push(p);
-                    }
-                    Err(e) => log::warn!("patch {} ignoré : {e}", dir.display()),
-                }
-            } else if dir.is_dir() {
-                for p in PatchStack::load_dir(dir).patches {
-                    patches.push(p);
-                }
-            }
-        }
+        let patches = Self::load_packs(patch_dirs);
         log_packs(&patches);
         match &game_dir {
             Some(g) => log::info!("client : {}", g.display()),
@@ -289,7 +275,8 @@ impl Assets {
         }
         Self {
             game_dir,
-            patches,
+            patches: RwLock::new(patches),
+            patch_dirs: patch_dirs.to_vec(),
             quality,
             packs: Mutex::new(HashMap::new()),
             textures: Mutex::new(HashMap::new()),
@@ -301,13 +288,79 @@ impl Assets {
         }
     }
 
+    /// Pile des packs des dossiers donnés (sans les préférences du joueur).
+    fn load_packs(patch_dirs: &[PathBuf]) -> PatchStack {
+        let mut patches = PatchStack::new();
+        for dir in patch_dirs {
+            let asset_folders = archrust_patch::ASSET_FOLDERS.iter().filter(|(sub, _)| dir.join(sub).is_dir()).count();
+            if asset_folders > 0 && !dir.join("patch.toml").is_file() {
+                for (sub, category) in archrust_patch::ASSET_FOLDERS {
+                    for p in archrust_patch::load_asset_dir(&dir.join(sub), category) {
+                        patches.push(p);
+                    }
+                }
+            } else if dir.join("patch.toml").is_file() {
+                match PatchStack::load_one(dir) {
+                    Ok(mut p) => {
+                        for problem in &p.problems {
+                            log::warn!("patch {} : {problem}", p.manifest.patch.id);
+                        }
+                        // Un dossier qui est lui-même un pack (`free-assets/`) : pack officiel du projet.
+                        p.official = true;
+                        patches.push(p);
+                    }
+                    Err(e) => log::warn!("patch {} ignoré : {e}", dir.display()),
+                }
+            } else if dir.is_dir() {
+                for p in PatchStack::load_dir(dir).patches {
+                    patches.push(p);
+                }
+            }
+        }
+        patches
+    }
+
     /// Applique les préférences du joueur sur les packs (`packs.toml`), avant toute lecture.
-    pub fn with_pack_settings(mut self, settings: &archrust_patch::PackSettings) -> Self {
+    pub fn with_pack_settings(self, settings: &archrust_patch::PackSettings) -> Self {
         if !settings.packs.is_empty() {
-            self.patches.apply_settings(settings);
-            log_packs(&self.patches);
+            let mut patches = self.patches.write().unwrap();
+            patches.apply_settings(settings);
+            log_packs(&patches);
         }
         self
+    }
+
+    /// Copie de la pile des packs (liste des Options, contrôle d'un pack).
+    pub fn pack_stack(&self) -> PatchStack {
+        self.patches.read().unwrap().clone()
+    }
+
+    /// Empreinte des dossiers de packs des joueurs (`patches/`, `assets/`) : elle change quand un pack
+    /// y est déposé, modifié ou retiré. Le pack officiel (`free-assets/`, avec son `patch.toml`) n'est
+    /// pas surveillé : son atelier compte des milliers de fichiers.
+    pub fn pack_signature(&self) -> u64 {
+        let watched: Vec<PathBuf> = self.patch_dirs.iter().filter(|d| !d.join("patch.toml").is_file()).cloned().collect();
+        archrust_patch::signature(&watched)
+    }
+
+    /// Relit les dossiers de packs en cours de jeu, avec les préférences du joueur. Les textures et
+    /// modèles déjà décodés sont oubliés ; rend les motifs de textures fournis avant ou après le
+    /// rechargement, pour que l'appelant renvoie au GPU les textures concernées.
+    pub fn reload_packs(&self, settings: &archrust_patch::PackSettings) -> Vec<String> {
+        let mut fresh = Self::load_packs(&self.patch_dirs);
+        fresh.apply_settings(settings);
+        log_packs(&fresh);
+        let texture_patterns = |s: &PatchStack| -> Vec<String> {
+            s.patches.iter().filter(|p| p.enabled).flat_map(|p| p.manifest.textures.iter().map(|t| t.pattern.clone())).collect()
+        };
+        let mut touched = texture_patterns(&self.patches.read().unwrap());
+        touched.extend(texture_patterns(&fresh));
+        touched.sort();
+        touched.dedup();
+        *self.patches.write().unwrap() = fresh;
+        self.textures.lock().unwrap().clear();
+        self.models.lock().unwrap().clear();
+        touched
     }
 
     /// Jeux d'effets du client (`effect/ini/new/efffile_set.eff` + `efffile_var.eff`), en cache.
@@ -467,6 +520,12 @@ impl Assets {
             .ok_or_else(|| anyhow!("{name} absent du pack {rel_dir}"))
     }
 
+    /// Entrées (nom, taille) d'un pack du client ; `None` si le dossier n'a pas de pack.
+    pub fn pack_listing(&self, rel_dir: &str) -> Option<Vec<(String, u64)>> {
+        let pack = self.pack_opt(rel_dir).ok()??;
+        Some(pack.index.entries.iter().map(|e| (e.name.clone(), e.size)).collect())
+    }
+
     /// Noms des entrées d'un pack.
     pub fn list_packed(&self, rel_dir: &str) -> Result<Vec<String>> {
         Ok(self
@@ -493,8 +552,9 @@ impl Assets {
     /// absent ou que `decode` refuse est signalé dans le journal, et le pack suivant est essayé.
     /// `None` : aucun pack ne la fournit utilisablement (l'appelant passe aux données d'origine).
     fn from_packs<T>(&self, kind: ResourceKind, key: &str, decode: impl Fn(Vec<u8>, &Resolved) -> Result<T>) -> Option<(T, Resolved)> {
-        for r in self.patches.candidates(kind, key) {
-            match self.patches.read_resolved(&r).map_err(anyhow::Error::from).and_then(|b| decode(b, &r)) {
+        let patches = self.patches.read().unwrap();
+        for r in patches.candidates(kind, key) {
+            match patches.read_resolved(&r).map_err(anyhow::Error::from).and_then(|b| decode(b, &r)) {
                 Ok(v) => return Some((v, r)),
                 Err(e) => log::warn!("pack {} : {key} inutilisable ({e:#}), essai du suivant", r.patch_id),
             }
@@ -699,7 +759,8 @@ impl Assets {
     /// `None` si rien ne remplace le modèle ; `Some(Err)` si le fichier est illisible ou invalide.
     /// Le résultat est mis en cache.
     pub fn patched_model(&self, key: &str) -> Option<Result<Arc<PatchedModel>>> {
-        if let Some(res) = self.patches.resolve(ResourceKind::Model, key).cloned() {
+        let resolved = self.patches.read().unwrap().resolve(ResourceKind::Model, key).cloned();
+        if let Some(res) = resolved {
             let cache_key = format!("{}:{}", res.patch_id, res.file).to_ascii_lowercase();
             if let Some(m) = self.models.lock().unwrap().get(&cache_key) {
                 return Some(Ok(m.clone()));
@@ -765,7 +826,7 @@ impl Assets {
     }
 
     fn load_patched_model(&self, res: &Resolved) -> Result<PatchedModel> {
-        let patch = &self.patches.patches[res.patch_index];
+        let patch = self.patches.read().unwrap().patches[res.patch_index].clone();
         let bytes = patch.read(&res.file).map_err(|e| anyhow!("{e}"))?;
         // Les tampons et images d'un `.gltf` JSON sont lus à côté de lui, dans le même patch.
         let dir = res
@@ -965,7 +1026,8 @@ mod tests {
         pack(&root.join("patches/bas"), "bas", 1, &png);
         pack(&root.join("officiel"), "officiel", 1000, &png);
         let assets = Assets::new(None, &[root.join("officiel"), root.join("patches")]);
-        let ids: Vec<_> = assets.patches.patches.iter().map(|p| p.manifest.patch.id.as_str()).collect();
+        let stack = assets.pack_stack();
+        let ids: Vec<_> = stack.patches.iter().map(|p| p.manifest.patch.id.as_str()).collect();
         assert_eq!(ids, ["haut", "bas", "officiel"], "le pack officiel passe après la communauté");
         let t = assets.texture("a0057aab").unwrap();
         assert_eq!((t.from_patch.as_deref(), t.data.as_slice()), (Some("bas"), &[1u8, 2, 3, 255][..]), "« haut » illisible : pack suivant");
@@ -974,6 +1036,19 @@ mod tests {
         settings.packs.push(archrust_patch::PackChoice { id: "bas".into(), enabled: false, priority: None });
         let assets = Assets::new(None, &[root.join("officiel"), root.join("patches")]).with_pack_settings(&settings);
         assert_eq!(assets.texture("a0057aab").unwrap().from_patch.as_deref(), Some("officiel"));
+
+        // Dossier `assets/` : une texture déposée en cours de jeu s'applique au rechargement.
+        let dirs = [root.join("officiel"), root.join("patches"), root.join("assets")];
+        std::fs::create_dir_all(root.join("assets/textures")).unwrap();
+        std::fs::create_dir_all(root.join("assets/sounds")).unwrap();
+        let assets = Assets::new(None, &dirs).with_pack_settings(&settings);
+        assert_eq!(assets.texture("a0057aab").unwrap().from_patch.as_deref(), Some("officiel"));
+        let before = assets.pack_signature();
+        std::fs::write(root.join("assets/textures/A0057AAB.png"), &png).unwrap();
+        assert_ne!(before, assets.pack_signature(), "dépôt détecté");
+        let touched = assets.reload_packs(&settings);
+        assert!(touched.iter().any(|t| t.eq_ignore_ascii_case("a0057aab")), "{touched:?}");
+        assert_eq!(assets.texture("a0057aab").unwrap().from_patch.as_deref(), Some("assets-textures"));
         let _ = std::fs::remove_dir_all(&root);
     }
 
