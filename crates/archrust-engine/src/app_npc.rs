@@ -725,6 +725,10 @@ impl App {
             return false;
         }
         self.addons.set_target(Some(cid));
+        // Métamorphosé : ni approche ni dialogue, sans message, sauf pour l'ArchLord (voir `app_morph.rs`).
+        if !self.morph_allows_npc() {
+            return true;
+        }
         let (Some(npc), Some(me)) = (self.npc_position(cid), self.player.as_ref().map(|p| p.position)) else { return true };
         let gap = Vec3::new(npc.x - me.x, 0.0, npc.z - me.z);
         if gap.length() <= TALK_RANGE {

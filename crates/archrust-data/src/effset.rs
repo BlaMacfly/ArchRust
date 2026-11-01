@@ -153,9 +153,275 @@ pub struct EffBase {
     pub clump: Option<(String, u32)>,
     /// Effet son : fichier, fichier mono, nombre de boucles, volume.
     pub sound: Option<(u32, String, String, u32, f32)>,
-    /// Octets propres au type non décodés (particules, traînée, lumière, cadre mobile).
+    /// Octets propres au type (particules, traînée, lumière, cadre mobile), tels que lus.
     pub extra: Vec<u8>,
+    /// Paramètres des systèmes de particules (types 1 et 2), décodés depuis `extra`.
+    pub particles: Option<Particles>,
+    /// Paramètres d'une traînée (type 3), décodés depuis `extra`.
+    pub tail: Option<TailParams>,
     pub anims: Vec<EffAnim>,
+}
+
+/// Paramètres d'un système de particules.
+#[derive(Debug, Clone, PartialEq)]
+pub enum Particles {
+    /// Type 1 (`AgcdEffParticleSystem`).
+    System(PsysParams),
+    /// Type 2 (`AgcdEffParticleSys_SimpleBlackHole`).
+    BlackHole(SbhParams),
+}
+
+/// Drapeaux de base des particules (champ « drapeaux » de l'en-tête, relevés dans Archonia :
+/// émission FUN_1408f9a30 / FUN_1408fb5f0, mise à jour FUN_14083dc30, rendu FUN_14083e4a0 ; trou
+/// noir : FUN_1408f9110, FUN_14083dff0, FUN_1408397b0).
+pub mod psys_flag {
+    /// Couleur tirée au hasard à la naissance (alpha 255), puis alpha décroissant sur la vie ; les
+    /// animations de couleur sont ignorées.
+    pub const RANDOM_COLOR: u32 = 0x1_0000;
+    /// Repère local : particules dans le repère de l'émetteur (suivent l'effet), orientées sur ses axes.
+    pub const LOCAL_FRAME: u32 = 0x4_0000;
+    /// Planche face à la caméra (matrice +0x80 de la caméra des effets : droite et haut de l'écran).
+    pub const BILLBOARD: u32 = 0x8_0000;
+    /// Planche verticale tournée vers la caméra (matrice +0xc0 : droite RenderWare de la caméra, haut = Y).
+    pub const BILLBOARD_Y: u32 = 0x10_0000;
+    /// Émission sur un anneau horizontal de rayon `offset` (au lieu du décalage le long de la direction).
+    pub const RING: u32 = 0x20_0000;
+    /// Avec `RING` : rayon tiré entre 0 et `offset`.
+    pub const RING_RANDOM_RADIUS: u32 = 0x40_0000;
+    /// Plafond strict du nombre de particules vivantes (sinon les plus anciennes sont remplacées).
+    pub const CAPPED: u32 = 0x80_0000;
+}
+
+/// Drapeaux de direction d'émission (`dir_flags`, FUN_1408fad00).
+pub mod psys_dir {
+    /// Direction tirée au hasard sur la sphère.
+    pub const RANDOM: u32 = 0x1;
+    /// Direction tirée dans un cône d'axe Y de demi-angle `cone` (degrés), puis inclinée vers `dir`.
+    pub const CONE: u32 = 0x2;
+    /// Pas de rotation de l'émetteur appliquée à la direction.
+    pub const NO_FRAME: u32 = 0x40;
+    /// Aucune direction : vitesse et décalage nuls.
+    pub const NONE: u32 = 0x80;
+}
+
+/// Système de particules (type 1), 204 octets après la partie de rendu (lecteur FUN_1408f8f30,
+/// écrivain FUN_1408fa2a0 ; décalages mémoire 0x128 à 0x204 d'`AgcdEffParticleSystem`).
+#[derive(Debug, Clone, PartialEq)]
+pub struct PsysParams {
+    /// 0x00 : nombre maximal de particules vivantes.
+    pub max: u32,
+    /// 0x04 : intervalle d'émission (ms ; 0 lu comme 1 ; 30 ms si nul à l'exécution).
+    pub interval: u32,
+    /// 0x08 : 64 octets non lus par l'émission ni le rendu (nom de l'émetteur ?).
+    pub reserved: [u8; 64],
+    /// 0x48, 0x4c : vitesse initiale (unités/s) et écart (tirage uniforme ±).
+    pub speed: f32,
+    pub speed_var: f32,
+    /// 0x50, 0x54 : décalage de départ le long de la direction (ou rayon de l'anneau) et écart.
+    pub offset: f32,
+    pub offset_var: f32,
+    /// 0x58, 0x5c : particules par émission + `count_var × hasard[0, 1)`.
+    pub count: i32,
+    pub count_var: u32,
+    /// 0x60, 0x64 : vitesses angulaires (degrés/s) des deux angles d'émission ; 0x68–0x74 : bornes
+    /// (min, max) de chaque angle (l'angle vaut `t × vitesse` borné, `min` si min = max).
+    pub angle_rate: [f32; 2],
+    pub angle1: [f32; 2],
+    pub angle2: [f32; 2],
+    /// 0x78 : direction d'émission ; 0x84 : axe du second angle.
+    pub dir: [f32; 3],
+    pub axis: [f32; 3],
+    /// 0x90 : demi-angle du cône (degrés, avec [`psys_dir::CONE`]).
+    pub cone: f32,
+    /// 0x94 : drapeaux de direction ([`psys_dir`]).
+    pub dir_flags: u32,
+    /// 0x98 : forme de l'émetteur (0 point, 1 boîte ±dims, 2 cercle de rayon dims.x et hauteur ±dims.y,
+    /// 3 sphère de rayon dims.x) ; 0x9c : dimensions.
+    pub shape: u32,
+    pub dims: [f32; 3],
+    /// 0xa8, 0xac : vitesse de rotation propre (degrés/s) et écart.
+    pub spin: f32,
+    pub spin_var: f32,
+    /// 0xb0, 0xb4 : vie d'une particule (ms, 0 = sans fin) + écart × hasard[0, 1).
+    pub life: u32,
+    pub life_var: u32,
+    /// 0xb8, 0xbc : coefficients de gravité (× (0, −980, 0)) et de vent (× (1, 0, 0)) ; 0xc0, 0xc4 : écarts.
+    pub gravity: f32,
+    pub wind: f32,
+    pub gravity_var: f32,
+    pub wind_var: f32,
+    /// 0xc8 : non utilisé par la simulation.
+    pub reserved2: u32,
+}
+
+/// Particules « trou noir simple » (type 2), onze mots (lecteur FUN_1408f8d50).
+#[derive(Debug, Clone, PartialEq)]
+pub struct SbhParams {
+    /// Nombre maximal, particules par émission (+ écart × hasard), intervalle (ms), vie (ms).
+    pub max: u32,
+    pub count: i32,
+    pub count_var: i32,
+    pub interval: u32,
+    pub life: u32,
+    /// Vitesse et écart (±).
+    pub speed: f32,
+    pub speed_var: f32,
+    /// Angle d'émission (degrés) tiré entre `angle_min` et `angle_max`.
+    pub angle_min: f32,
+    pub angle_max: f32,
+    /// Rayon de l'anneau de départ (drapeau 0x800000).
+    pub ring: f32,
+}
+
+/// Drapeaux de base du trou noir (FUN_1408f9110, FUN_1408397b0).
+pub mod sbh_flag {
+    pub const RANDOM_COLOR: u32 = 0x1_0000;
+    /// Avec `SCREEN` : positions relatives à l'émetteur, qui les emmène (sinon fixées dans le monde).
+    pub const LOCAL_FRAME: u32 = 0x4_0000;
+    /// Départ à `−vitesse × vie` : la particule arrive au centre à sa mort (« trou noir »).
+    pub const INWARD: u32 = 0x8_0000;
+    /// Angles successifs (pas = (max − min) / nombre maximal) au lieu d'un tirage.
+    pub const SEQUENTIAL: u32 = 0x10_0000;
+    pub const CAPPED: u32 = 0x20_0000;
+    /// Vitesse dans le plan de l'écran, positions dans le monde ; planches selon les drapeaux 1 et 2.
+    pub const SCREEN: u32 = 0x40_0000;
+    /// Départ sur un anneau horizontal de rayon `ring`.
+    pub const RING: u32 = 0x80_0000;
+    pub const RING_RANDOM_RADIUS: u32 = 0x100_0000;
+    /// Pas d'angle : vitesse le long de Y.
+    pub const NO_ANGLE: u32 = 0x200_0000;
+}
+
+/// Spline RenderWare (`RpSpline`, fichiers `effect/animation/*.ESP` de l'animation 6) : morceau
+/// 0x0C = char[32] nom, i32 nombre de points, i32 type (1 ouverte, 2 fermée), points vec3.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Spline {
+    pub points: Vec<[f32; 3]>,
+    pub closed: bool,
+}
+
+impl Spline {
+    /// Lit le premier morceau 0x0C d'un flux RenderWare (morceaux de tête sautés).
+    pub fn parse(b: &[u8]) -> Option<Spline> {
+        let mut o = 0;
+        while o + 12 <= b.len() {
+            let (kind, size) = (u32_at(b, o)?, u32_at(b, o + 4)? as usize);
+            if kind == 0x0c {
+                let d = b.get(o + 12..o + 12 + size)?;
+                let n = u32_at(d, 32)? as usize;
+                let closed = u32_at(d, 36)? == 2;
+                let points = (0..n).map(|i| vec3_at(d, 40 + i * 12)).collect::<Option<Vec<_>>>()?;
+                return (n >= 4).then_some(Spline { points, closed });
+            }
+            o += 12 + size;
+        }
+        None
+    }
+
+    /// Position au paramètre `w` ∈ [0, 1] sur le chemin « lisse » (RpSplineFindMatrix, chemin 10,
+    /// FUN_1403734c0) : segment `⌊(n − 3)·w⌋`, B-spline cubique uniforme sur quatre points (bases
+    /// tabulées par Archonia, supposées être les bases uniformes classiques).
+    pub fn position(&self, w: f32) -> [f32; 3] {
+        let n = self.points.len();
+        let mut w = w.abs();
+        if self.closed && w > 1.0 {
+            w -= w.trunc();
+        }
+        let (seg, u) = if w >= 1.0 {
+            (n - 4, 1.0)
+        } else {
+            let x = (n - 3) as f32 * w;
+            ((x as usize).min(n - 4), x.fract())
+        };
+        let (u2, u3) = (u * u, u * u * u);
+        let b = [(1.0 - u).powi(3) / 6.0, (3.0 * u3 - 6.0 * u2 + 4.0) / 6.0, (-3.0 * u3 + 3.0 * u2 + 3.0 * u + 1.0) / 6.0, u3 / 6.0];
+        let mut out = [0.0; 3];
+        for (k, bk) in b.iter().enumerate() {
+            let p = self.points[(seg + k) % n];
+            for (o, c) in out.iter_mut().zip(p) {
+                *o += bk * c;
+            }
+        }
+        out
+    }
+}
+
+fn psys_params(x: &[u8]) -> Option<PsysParams> {
+    let f = |o: usize| f32_at(x, o);
+    let u = |o: usize| u32_at(x, o);
+    let v3 = |o: usize| vec3_at(x, o);
+    Some(PsysParams {
+        max: u(0)?,
+        // Le lecteur remplace un intervalle nul par 1 (FUN_1408f8f30).
+        interval: u(4)?.max(1),
+        reserved: x.get(8..72)?.try_into().ok()?,
+        speed: f(0x48)?,
+        speed_var: f(0x4c)?,
+        offset: f(0x50)?,
+        offset_var: f(0x54)?,
+        count: u(0x58)? as i32,
+        count_var: u(0x5c)?,
+        angle_rate: [f(0x60)?, f(0x64)?],
+        angle1: [f(0x68)?, f(0x6c)?],
+        angle2: [f(0x70)?, f(0x74)?],
+        dir: v3(0x78)?,
+        axis: v3(0x84)?,
+        cone: f(0x90)?,
+        dir_flags: u(0x94)?,
+        shape: u(0x98)?,
+        dims: v3(0x9c)?,
+        spin: f(0xa8)?,
+        spin_var: f(0xac)?,
+        life: u(0xb0)?,
+        life_var: u(0xb4)?,
+        gravity: f(0xb8)?,
+        wind: f(0xbc)?,
+        gravity_var: f(0xc0)?,
+        wind_var: f(0xc4)?,
+        reserved2: u(0xc8)?,
+    })
+}
+
+/// Traînée (type 3), cinq mots (lecteur FUN_140903e30, ajout des points FUN_14083f2f0, bords
+/// FUN_14083d8b0).
+#[derive(Debug, Clone, PartialEq)]
+pub struct TailParams {
+    /// Nombre maximal de points (Archonia en garde au plus 5 pour la courbe).
+    pub max: u32,
+    /// Intervalle d'ajout d'un point (ms) et vie d'un point (ms).
+    pub interval: u32,
+    pub life: u32,
+    /// Distances des deux bords le long de l'axe de l'émetteur (haut, bas).
+    pub top: f32,
+    pub bottom: f32,
+}
+
+/// Drapeaux de base de la traînée (FUN_14083d8b0) : axe des bords = axe Y de l'émetteur, tourné de
+/// 45° (0x10000) ou 135° (0x40000) autour de son axe Z, ou son axe X (0x20000).
+pub mod tail_flag {
+    pub const TILT_45: u32 = 0x1_0000;
+    pub const AXIS_X: u32 = 0x2_0000;
+    pub const TILT_135: u32 = 0x4_0000;
+}
+
+fn tail_params(x: &[u8]) -> Option<TailParams> {
+    Some(TailParams { max: u32_at(x, 0)?, interval: u32_at(x, 4)?, life: u32_at(x, 8)?, top: f32_at(x, 12)?, bottom: f32_at(x, 16)? })
+}
+
+fn sbh_params(x: &[u8]) -> Option<SbhParams> {
+    Some(SbhParams {
+        max: u32_at(x, 0)?,
+        count: u32_at(x, 4)? as i32,
+        count_var: u32_at(x, 8)? as i32,
+        // Le lecteur remplace un intervalle nul par 1 (FUN_1408f8d50).
+        interval: u32_at(x, 12)?.max(1),
+        life: u32_at(x, 16)?,
+        speed: f32_at(x, 20)?,
+        speed_var: f32_at(x, 24)?,
+        angle_min: f32_at(x, 28)?,
+        angle_max: f32_at(x, 32)?,
+        ring: f32_at(x, 40)?,
+    })
 }
 
 /// Jeu d'effets décodé.
@@ -314,7 +580,17 @@ pub fn decode_block(block: &[u8], textures: usize, bases: usize, deps: usize) ->
             base_kind::SOUND => {
                 base.sound = Some((u32_at(extra, 0)?, text_at(extra, 4, 64)?, text_at(extra, 68, 64)?, u32_at(extra, 132)?, f32_at(extra, 136)?))
             }
-            _ => base.extra = extra.to_vec(),
+            _ => {
+                base.extra = extra.to_vec();
+                base.particles = match kind {
+                    base_kind::PSYS => psys_params(extra).map(Particles::System),
+                    base_kind::PSYS_SBH => sbh_params(extra).map(Particles::BlackHole),
+                    _ => None,
+                };
+                if kind == base_kind::TAIL {
+                    base.tail = tail_params(extra);
+                }
+            }
         }
         o += extra_len;
         for _ in 0..anims {
@@ -516,6 +792,27 @@ mod tests {
         let mut long = b.clone();
         long.push(0);
         assert!(decode_block(&long, 1, 3, 0).is_none());
+    }
+
+    #[test]
+    fn spline_chunk_and_bspline_position() {
+        // Morceau de tête 0x24 (sauté), puis morceau 0x0C : nom, 5 points, type 1 (ouverte).
+        let mut b = Vec::new();
+        put(&mut b, &[0x24, 4, 0x1803_ffff, 0]);
+        let pts = [[0.0, 0.0, 0.0], [0.0, 60.0, 0.0], [0.0, 120.0, 0.0], [0.0, 180.0, 0.0], [0.0, 240.0, 0.0]];
+        put(&mut b, &[0x0c, 32 + 8 + 60, 0x1803_ffff]);
+        b.extend([0u8; 32]);
+        put(&mut b, &[5, 1]);
+        for p in pts {
+            put(&mut b, &p.map(f32::to_bits));
+        }
+        let s = Spline::parse(&b).expect("spline");
+        assert_eq!((s.points.len(), s.closed), (5, false));
+        // Points alignés et réguliers : la B-spline uniforme va de 60 à 180 linéairement.
+        assert!((s.position(0.0)[1] - 60.0).abs() < 1e-3);
+        assert!((s.position(0.5)[1] - 120.0).abs() < 1e-3);
+        assert!((s.position(1.0)[1] - 180.0).abs() < 1e-3);
+        assert!(Spline::parse(&b[..b.len() - 1]).is_none());
     }
 
     /// Avec les données du client (`ARCHRUST_GAME_DIR`) : tous les jeux se décodent exactement.

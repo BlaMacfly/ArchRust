@@ -17,17 +17,21 @@
 //! FUN_1408d2e20, face à la caméra si le drapeau 1 de la base est mis — déduit des données), planches au
 //! sol, objets (`effect/clump/K*.ECL`), sons ; animations couleur, échelle, rotation (vitesse en
 //! degrés par seconde, cumulée comme FUN_1408f4020), déplacement linéaire, coordonnées de texture
-//! (image par paliers, FUN_1408f45b0). Mélanges : `sky_render::EffectBlend`. Les systèmes de
-//! particules, traînées, lumières et cadres mobiles ne sont pas encore dessinés.
+//! (image par paliers, FUN_1408f45b0), spline (`effect/animation/*.ESP`, position seulement).
+//! Mélanges : `sky_render::EffectBlend`. Systèmes de particules (types 1 et 2) : `effect_particles.rs`.
+//! Traînées (type 3) : `effect_particles.rs`. Lumières et cadres mobiles ne sont pas encore rendus.
 //!
 //! Options GFX (`OP_Effect`, `OP_TurnOffAllEffects`) : niveau 0 = aucun effet ; l'interface (montée de
 //! niveau, apprentissage) demande `EffectUI` ≥ 1 ; les compétences des autres joueurs se masquent.
+
+#[path = "effect_particles.rs"]
+mod particles;
 
 use super::App;
 use crate::assets::Assets;
 use crate::render::{EffectDraw, Vertex};
 use crate::sky_render::EffectBlend;
-use archrust_data::effset::{anim_kind, base_kind, AnimKeys, EffAnim, EffBase, EffectSetData};
+use archrust_data::effset::{anim_kind, base_kind, AnimKeys, EffAnim, EffBase, EffectSetData, Spline};
 use archrust_data::rw::Clump;
 use archrust_netclient::skills::{learn_result, SkillEvent};
 use archrust_netclient::WorldEvent;
@@ -41,25 +45,45 @@ use std::time::Instant;
 const BOARD_HALF: f32 = 7.064;
 /// Durée d'un jeu sans durée propre ni base bornée.
 const DEFAULT_LIFE_MS: u32 = 3000;
-/// Au plus autant d'effets joués à la fois (les plus anciens partent).
-const MAX_ACTIVE: usize = 64;
-/// Drapeaux de condition d'`AgcmEventEffect` (déduits des données, voir l'en-tête).
+/// Au plus autant d'effets joués à la fois (les plus anciens partent, permanents en dernier).
+const MAX_ACTIVE: usize = 128;
+/// Drapeaux de condition d'`AgcmEventEffect` (filtre FUN_1405748b0 : condition de l'événement ET
+/// condition de la donnée) : 0x1 apparition du personnage ou de l'objet (FUN_14056a0e0, effets
+/// permanents), 0x40 attaque (personnage et objets équipés, FUN_140568e80), 0x100 coup reçu
+/// (FUN_140571d80, appelée par FUN_140573960 qui journalise « Attacker/Target TID ») ; 0x200 (mort)
+/// reste déduit des noms des jeux.
+const COND_SPAWN: u32 = 0x1;
+const COND_ATTACK: u32 = 0x40;
 const COND_STRUCK: u32 = 0x100;
 const COND_DEAD: u32 = 0x200;
 
-/// Effet placé : jeu, décalage dans le repère du personnage, échelle.
+/// Effet placé : jeu, décalage dans le repère du personnage (ou de son nœud), échelle, nœud
+/// d'attache et délai de départ.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Placed {
     pub eid: u32,
     pub offset: Vec3,
     pub scale: f32,
+    /// Nœud HAnim du modèle (`NODE_ID` d'`ee_common_char.txt`, 7ᵉ champ `%d` des données
+    /// `AGCMEVENTEFFECT_EFFECT_DATA`, FUN_140575aa0) ; 0 = repère du personnage. Les valeurs
+    /// négatives des données (−1, −2, −4) ne sont pas relevées : repère du personnage.
+    pub node: i32,
+    /// Délai de départ en ms (`GAP`, 8ᵉ champ).
+    pub delay: u32,
 }
 
-/// Lit `EID:x:y:z:échelle[:…]` (le début d'une donnée d'effet après ses indices).
+/// Lit `EID:x:y:z:échelle[:nœud:délai]` (une donnée d'effet après ses indices).
 fn placed_from(fields: &[&str]) -> Option<Placed> {
     let num = |i: usize| fields.get(i).and_then(|v| v.trim().parse::<f32>().ok());
+    let int = |i: usize| fields.get(i).and_then(|v| v.trim().parse::<i64>().ok()).unwrap_or(0);
     let eid = fields.first()?.trim().parse::<u32>().ok().filter(|e| *e > 0)?;
-    Some(Placed { eid, offset: Vec3::new(num(1).unwrap_or(0.0), num(2).unwrap_or(0.0), num(3).unwrap_or(0.0)), scale: num(4).filter(|s| *s > 0.0).unwrap_or(1.0) })
+    Some(Placed {
+        eid,
+        offset: Vec3::new(num(1).unwrap_or(0.0), num(2).unwrap_or(0.0), num(3).unwrap_or(0.0)),
+        scale: num(4).filter(|s| *s > 0.0).unwrap_or(1.0),
+        node: int(5) as i32,
+        delay: int(6).clamp(0, 60_000) as u32,
+    })
 }
 
 /// Catégorie d'un effet, pour les niveaux d'`OP_Effect`.
@@ -85,6 +109,15 @@ struct Instance {
     scale: f32,
     sounded: Vec<bool>,
     life: u32,
+    /// Nœud HAnim d'attache (0 : repère du personnage) et délai de départ (ms).
+    node: i32,
+    delay: u32,
+    /// Effet d'apparition (condition 0x1) : joué tant que le personnage est en vue.
+    permanent: bool,
+    /// Émetteurs des bases de particules (types 1 et 2), par indice de base.
+    emitters: Vec<Option<particles::Emitter>>,
+    /// Traînées (type 3), par indice de base.
+    trails: Vec<Option<particles::Trail>>,
 }
 
 #[derive(Default)]
@@ -92,12 +125,21 @@ pub struct EffectsGlue {
     active: Vec<Instance>,
     sets: HashMap<u32, Option<Arc<EffectSetData>>>,
     clumps: HashMap<String, Option<Arc<Clump>>>,
+    /// Splines des animations 6 (`effect/animation/*.ESP`).
+    splines: HashMap<String, Option<Arc<Spline>>>,
+    /// Graine des émetteurs.
+    seed: u32,
     common: Option<HashMap<String, Vec<Placed>>>,
     skill_cache: HashMap<(i32, i32, u32), Vec<Placed>>,
     event_cache: HashMap<(i32, u32), Vec<Placed>>,
+    /// Personnages apparus dont les effets d'apparition restent à lancer (l'entité n'existe qu'après
+    /// le traitement de l'événement).
+    pending_spawn: Vec<i32>,
+    /// Les effets lancés en ce moment sont des effets d'apparition.
+    spawning: bool,
 }
 
-/// `ee_common_char.txt` : NAME → effets (EID, OFFSET_X/Y/Z, SCALE).
+/// `ee_common_char.txt` : NAME → effets (EID, OFFSET_X/Y/Z, SCALE, NODE_ID, GAP).
 fn load_common(assets: &Assets) -> HashMap<String, Vec<Placed>> {
     let text = super::npc_glue::client_text_in(assets, "ini", "ee_common_char.txt");
     let mut lines = text.lines();
@@ -105,11 +147,12 @@ fn load_common(assets: &Assets) -> HashMap<String, Vec<Placed>> {
     let col = |n: &str| header.iter().position(|h| h.eq_ignore_ascii_case(n));
     let (Some(name), Some(eid)) = (col("NAME"), col("EID")) else { return HashMap::new() };
     let (x, y, z, s) = (col("OFFSET_X"), col("OFFSET_Y"), col("OFFSET_Z"), col("SCALE"));
+    let (node, gap) = (col("NODE_ID"), col("GAP"));
     let mut out: HashMap<String, Vec<Placed>> = HashMap::new();
     for l in lines {
         let c: Vec<&str> = l.split('\t').collect();
         let get = |i: Option<usize>| i.and_then(|i| c.get(i)).copied().unwrap_or("");
-        if let Some(p) = placed_from(&[get(Some(eid)), get(x), get(y), get(z), get(s)]) {
+        if let Some(p) = placed_from(&[get(Some(eid)), get(x), get(y), get(z), get(s), get(node), get(gap)]) {
             out.entry(get(Some(name)).trim().to_ascii_uppercase()).or_default().push(p);
         }
     }
@@ -183,12 +226,24 @@ pub fn event_effects(assets: &Assets, char_tid: i32, flag: u32) -> Vec<Placed> {
         .collect()
 }
 
-/// Valeur d'une animation à l'instant `t` (ms depuis le début de la base).
+/// Temps d'une animation à l'instant `t` (ms depuis le début de la base), selon son mode de boucle
+/// (FUN_1408ec780) : 0 une fois (bornée à sa durée), 1 sans boucle (temps tel quel), 2 en boucle,
+/// 3 aller-retour.
 fn anim_time(a: &EffAnim, t: u32) -> u32 {
-    match (a.life, a.loop_opt) {
-        (0, _) => t,
-        (life, 2) => t % life,
-        (life, _) => t.min(life),
+    loop_time(a.loop_opt, t, a.life)
+}
+
+fn loop_time(opt: u32, t: u32, life: u32) -> u32 {
+    match opt {
+        0 => t.min(life),
+        2 if life == 0 => 0,
+        2 => t % life,
+        3 if life == 0 || t <= life => t,
+        3 => {
+            let (n, r) = (t / life, t % life);
+            if n % 2 == 0 { r } else { (n + 1) * life - t }
+        }
+        _ => t,
     }
 }
 
@@ -258,14 +313,22 @@ fn base_state(base: &EffBase, t: u32) -> State {
     s
 }
 
-/// Matrice locale d'une base : position, rotation de la base (x, puis y, puis z, en degrés),
-/// rotations animées, échelle.
+/// Rotation propre d'une base (degrés), relevée dans FUN_1408f83d0 : le premier angle tourne autour
+/// de Y, le deuxième autour de X, le troisième autour de Z ; ordre (RenderWare, vecteurs lignes)
+/// Z puis Y puis X, et X puis Y puis Z pour les objets (type 4).
+fn base_rotation(base: &EffBase) -> Mat4 {
+    let [a, b, c] = base.rotation;
+    let (ry, rx, rz) = (Mat4::from_rotation_y(a.to_radians()), Mat4::from_rotation_x(b.to_radians()), Mat4::from_rotation_z(c.to_radians()));
+    if base.kind == base_kind::OBJECT {
+        rz * ry * rx
+    } else {
+        rx * ry * rz
+    }
+}
+
+/// Matrice locale d'une base : position, rotation de la base, rotations animées, échelle.
 fn base_matrix(base: &EffBase, st: &State) -> Mat4 {
-    let [rx, ry, rz] = base.rotation;
-    let mut m = Mat4::from_translation(Vec3::from(base.position) + st.offset)
-        * Mat4::from_rotation_z(rz.to_radians())
-        * Mat4::from_rotation_y(ry.to_radians())
-        * Mat4::from_rotation_x(rx.to_radians());
+    let mut m = Mat4::from_translation(Vec3::from(base.position) + st.offset) * base_rotation(base);
     for (axis, deg) in &st.spins {
         m *= Mat4::from_axis_angle(*axis, deg.to_radians());
     }
@@ -305,6 +368,33 @@ impl EffectsGlue {
             })
             .clone()
     }
+
+    fn spline(&mut self, assets: &Assets, file: &str) -> Option<Arc<Spline>> {
+        self.splines
+            .entry(file.to_ascii_lowercase())
+            .or_insert_with(|| match assets.read_packed("effect/animation", file) {
+                Ok(b) => Spline::parse(&b).map(Arc::new),
+                Err(e) => {
+                    log::debug!("effet : spline {file} : {e:#}");
+                    None
+                }
+            })
+            .clone()
+    }
+
+    /// Déplacement de la base par ses animations spline (type 6) à l'instant `tb` : position sur la
+    /// spline au temps de boucle rapporté à la durée (FUN_1408f4210, FUN_1408f0f70). L'orientation
+    /// le long de la courbe n'est pas appliquée.
+    fn spline_offset(&mut self, assets: &Assets, base: &EffBase, tb: u32) -> Vec3 {
+        let mut out = Vec3::ZERO;
+        for a in base.anims.iter().filter(|a| a.kind == anim_kind::RP_SPLINE && a.life > 0) {
+            let AnimKeys::File(file) = &a.keys else { continue };
+            if let Some(s) = self.spline(assets, file) {
+                out += Vec3::from(s.position(anim_time(a, tb) as f32 / a.life as f32));
+            }
+        }
+        out
+    }
 }
 
 impl App {
@@ -322,6 +412,12 @@ impl App {
         self.player.as_ref().filter(|p| p.cid == cid).or_else(|| self.entities.iter().find(|e| e.cid == cid)).map(|e| (e.position, e.turn_y))
     }
 
+    /// Matrice (espace du modèle) du nœud HAnim `node` du personnage `cid`, dans sa pose animée.
+    fn effects_node_matrix(&self, cid: i32, node: u32) -> Option<Mat4> {
+        let animator = if self.player.as_ref().is_some_and(|p| p.cid == cid) { self.player_animator.as_ref() } else { self.animators.get(&cid) };
+        animator?.1.as_ref()?.node_matrix(node)
+    }
+
     fn effects_tid_of(&self, cid: i32) -> Option<i32> {
         self.player.as_ref().filter(|p| p.cid == cid).or_else(|| self.entities.iter().find(|e| e.cid == cid)).map(|e| e.tid)
     }
@@ -333,8 +429,31 @@ impl App {
         }
         let Some(at) = self.effects_anchor_of(cid) else { return };
         for p in placed {
-            self.effects_spawn(*p, Anchor::Character(cid), at);
+            let p = self.effects_resolve_node(cid, *p);
+            self.effects_spawn(p, Anchor::Character(cid), at);
         }
+    }
+
+    /// Hauteur du modèle (`HEIGHT` de `charactertemplateclient.ini`).
+    fn effects_height_of(&self, cid: i32) -> f32 {
+        let Some(tid) = self.effects_tid_of(cid) else { return 0.0 };
+        let Ok(t) = self.assets.table("ini", "charactertemplateclient.ini") else { return 0.0 };
+        column(&t, "HEIGHT").and_then(|c| t.section(&tid.to_string())?.get(&c)?.trim().parse().ok()).unwrap_or(0.0)
+    }
+
+    /// Nœuds spéciaux (négatifs) des données d'effet, comme FUN_140573480 : −1 au pied du personnage
+    /// sans le suivre, −2 au-dessus de sa tête (hauteur + 50, × échelle) en le suivant, −4 à sa
+    /// hauteur sans le suivre, −5 décalage tourné par sa direction sans le suivre ; −3 (nœud tiré au
+    /// hasard dans le squelette) est ramené au repère du personnage. Le décalage d'un effet qui ne
+    /// suit pas est pris dans les axes du monde (sauf −5).
+    fn effects_resolve_node(&self, cid: i32, mut p: Placed) -> Placed {
+        match p.node {
+            -2 => p.offset.y = (self.effects_height_of(cid) + 50.0) * p.scale,
+            -4 => p.offset.y += self.effects_height_of(cid),
+            -3 => p.node = 0,
+            _ => {}
+        }
+        p
     }
 
     fn effects_spawn(&mut self, p: Placed, anchor: Anchor, at: (Vec3, f32)) {
@@ -345,10 +464,17 @@ impl App {
         };
         log::debug!("effet {} « {} » : {} base(s)", p.eid, set.name, set.bases.len());
         if self.effects.active.len() >= MAX_ACTIVE {
-            self.effects.active.remove(0);
+            let i = self.effects.active.iter().position(|i| !i.permanent).unwrap_or(0);
+            self.effects.active.remove(i);
         }
         let life = set_life(&set);
-        self.effects.active.push(Instance { sounded: vec![false; set.bases.len()], set, born: Instant::now(), anchor, last: at, offset: p.offset, scale: p.scale, life });
+        let mut emitters = Vec::with_capacity(set.bases.len());
+        for b in &set.bases {
+            self.effects.seed = self.effects.seed.wrapping_add(1);
+            emitters.push(b.particles.is_some().then(|| particles::Emitter::new(self.effects.seed)));
+        }
+        let trails = set.bases.iter().map(|b| b.tail.is_some().then(particles::Trail::default)).collect();
+        self.effects.active.push(Instance { sounded: vec![false; set.bases.len()], set, born: Instant::now(), anchor, last: at, offset: p.offset, scale: p.scale, life, node: p.node, delay: p.delay, permanent: self.effects.spawning, emitters, trails });
     }
 
     /// Effets d'un ensemble nommé d'`ee_common_char.txt` (`LV_UP`, `LEARN_SK`…).
@@ -363,6 +489,14 @@ impl App {
         let assets = self.assets.clone();
         let list = self.effects.event_cache.entry((tid, flag)).or_insert_with(|| event_effects(&assets, tid, flag)).clone();
         self.effects_play_on(cid, &list, Class::Combat);
+    }
+
+    /// Effets d'apparition (condition 0x1) d'un personnage entré dans la vue : remplacent les siens.
+    fn effects_spawn_permanent(&mut self, cid: i32) {
+        self.effects.active.retain(|i| !(i.permanent && matches!(i.anchor, Anchor::Character(c) if c == cid)));
+        self.effects.spawning = true;
+        self.effects_event(cid, COND_SPAWN);
+        self.effects.spawning = false;
     }
 
     /// Relevé des événements qui déclenchent un effet (avant leur traitement).
@@ -384,7 +518,10 @@ impl App {
                 let list = self.effects.skill_cache.entry((char_tid, *tid, equip)).or_insert_with(|| skill_effects(&assets, char_tid, *tid, equip)).clone();
                 self.effects_play_on(*caster, &list, Class::Skill);
             }
-            WorldEvent::CharacterAction { target_cid, result, .. } => {
+            WorldEvent::CharacterSeen(s) => self.effects.pending_spawn.push(s.cid),
+            WorldEvent::CharacterRemoved { cid, .. } => self.effects.active.retain(|i| !(i.permanent && matches!(i.anchor, Anchor::Character(c) if c == *cid))),
+            WorldEvent::CharacterAction { cid, target_cid, result, .. } => {
+                self.effects_event(*cid, COND_ATTACK);
                 if matches!(result, Some(archrust_netclient::combat::outcome::SUCCESS | archrust_netclient::combat::outcome::CRITICAL)) {
                     self.effects_event(*target_cid, COND_STRUCK);
                 }
@@ -405,7 +542,7 @@ impl App {
         match self.effects.set(&assets, eid) {
             Some(set) => {
                 let msg = format!("Effet {eid} « {} » : {} base(s), {} ms.", set.name, set.bases.len(), set_life(&set));
-                self.effects_spawn(Placed { eid, offset: Vec3::ZERO, scale: 1.0 }, Anchor::Character(cid), at);
+                self.effects_spawn(Placed { eid, offset: Vec3::ZERO, scale: 1.0, node: 0, delay: 0 }, Anchor::Character(cid), at);
                 msg
             }
             None => format!("Effet {eid} introuvable."),
@@ -417,27 +554,48 @@ impl App {
         if self.options.video.effect == 0 {
             self.effects.active.clear();
         }
+        for cid in std::mem::take(&mut self.effects.pending_spawn) {
+            if self.effects_anchor_of(cid).is_some() {
+                self.effects_spawn_permanent(cid);
+            }
+        }
         let now = Instant::now();
         let view = self.camera.view();
         // Axes de la caméra dans le monde (lignes de la vue).
         let right = Vec3::new(view.x_axis.x, view.y_axis.x, view.z_axis.x);
         let up = Vec3::new(view.x_axis.y, view.y_axis.y, view.z_axis.y);
+        let cam = particles::CameraAxes { right, up };
         let mut sounds: Vec<String> = Vec::new();
         let mut batches: HashMap<(Option<String>, EffectBlend), Vec<Vertex>> = HashMap::new();
         let assets = self.assets.clone();
         let mut active = std::mem::take(&mut self.effects.active);
-        active.retain(|i| (now - i.born).as_millis() as u32 <= i.life);
+        active.retain(|i| i.permanent || (now - i.born).as_millis() as u32 <= i.delay + i.life);
         for inst in active.iter_mut() {
+            // Délai de départ (`GAP`) : rien n'est joué avant.
+            let Some(t) = ((now - inst.born).as_millis() as u32).checked_sub(inst.delay) else { continue };
             let Anchor::Character(cid) = inst.anchor;
-            if let Some(at) = self.effects_anchor_of(cid) {
-                inst.last = at;
+            // Nœuds 0, positifs et −2 : l'effet suit le personnage (drapeau 1 de FUN_140573480) ;
+            // −1, −4, −5 : posé à sa position du départ.
+            let follows = inst.node >= 0 || inst.node == -2;
+            if follows {
+                if let Some(at) = self.effects_anchor_of(cid) {
+                    inst.last = at;
+                }
             }
             let (pos, turn) = inst.last;
-            let root = Mat4::from_translation(pos) * Mat4::from_rotation_y(turn.to_radians()) * Mat4::from_translation(inst.offset) * Mat4::from_scale(Vec3::splat(inst.scale));
-            let t = (now - inst.born).as_millis() as u32;
+            // Nœud d'attache : repère de l'os dans la pose courante (repli : repère du personnage).
+            let node = u32::try_from(inst.node).ok().filter(|n| *n > 0).and_then(|n| self.effects_node_matrix(cid, n)).unwrap_or(Mat4::IDENTITY);
+            let turn = Mat4::from_rotation_y(turn.to_radians());
+            let root = if follows || inst.node == -5 {
+                Mat4::from_translation(pos) * turn * node * Mat4::from_translation(inst.offset) * Mat4::from_scale(Vec3::splat(inst.scale))
+            } else {
+                Mat4::from_translation(pos + inst.offset) * turn * Mat4::from_scale(Vec3::splat(inst.scale))
+            };
             let set = inst.set.clone();
             for (bi, base) in set.bases.iter().enumerate() {
-                if t < base.delay || (base.life > 0 && t >= base.delay + base.life) {
+                // Fin d'une base (FUN_14083ff40) : seule une base sans boucle (mode 0) s'arrête à la fin
+                // de sa durée ; les autres vivent jusqu'à la fin du jeu.
+                if t < base.delay || (base.loop_opt == 0 && base.life > 0 && t > base.delay + base.life) {
                     continue;
                 }
                 let tb = t - base.delay;
@@ -449,11 +607,41 @@ impl App {
                     continue;
                 }
                 let blend = EffectBlend::from_data(base.blend.unwrap_or(0));
-                let st = base_state(base, tb);
+                let mut st = base_state(base, tb);
+                st.offset += self.effects.spline_offset(&assets, base, tb);
+                let texture = usize::try_from(base.texture).ok().and_then(|i| set.textures.get(i)).map(|t| t.1.clone()).filter(|n| !n.is_empty());
+                if let Some(Some(emitter)) = inst.emitters.get_mut(bi) {
+                    // Particules : les animations 0, 1, 8 et 9 portent sur les particules, les autres
+                    // déplacent l'émetteur.
+                    st.scale = Vec3::ONE;
+                    let (_, rotation, position) = (root * base_matrix(base, &st)).to_scale_rotation_translation();
+                    let frame = particles::Frame { position, rotation };
+                    emitter.emit(base, t, &frame, &cam);
+                    let out = batches.entry((texture, blend)).or_default();
+                    for s in emitter.sprites(base, t, &frame, &cam, inst.scale) {
+                        quad(out, s.corners, s.uv, s.color);
+                    }
+                    continue;
+                }
+                if let (Some(p), Some(Some(trail))) = (&base.tail, inst.trails.get_mut(bi)) {
+                    // Traînée : bords sur le repère de l'émetteur, couleur des animations de la base.
+                    let color = st.color;
+                    st.scale = Vec3::ONE;
+                    let (_, rotation, position) = (root * base_matrix(base, &st)).to_scale_rotation_translation();
+                    let edges = particles::Trail::edges(base, p, &particles::Frame { position, rotation }, inst.scale);
+                    trail.update(p, t, edges);
+                    let out = batches.entry((texture, blend)).or_default();
+                    for q in trail.ribbon(edges) {
+                        for i in [0usize, 1, 2, 2, 1, 3] {
+                            let (pos, uv, alpha) = q[i];
+                            out.push(Vertex { position: pos.to_array(), normal: [0.0, 1.0, 0.0], uv, color: [color[0], color[1], color[2], color[3] * alpha] });
+                        }
+                    }
+                    continue;
+                }
                 if st.color[3] <= 0.0 {
                     continue;
                 }
-                let texture = usize::try_from(base.texture).ok().and_then(|i| set.textures.get(i)).map(|t| t.1.clone()).filter(|n| !n.is_empty());
                 let m = root * base_matrix(base, &st);
                 match base.kind {
                     base_kind::BOARD | base_kind::TERRAIN_BOARD => {
@@ -518,7 +706,7 @@ impl App {
                             }
                         }
                     }
-                    // Particules, traînées, lumières, cadres mobiles : pas encore dessinés.
+                    // Lumières, cadres mobiles : pas encore rendus.
                     _ => {}
                 }
             }
@@ -548,13 +736,19 @@ mod tests {
     #[test]
     fn effect_data_fields_and_anim_time() {
         // `0:150:0:1` après l'EID (données de compétence `0:1:0:5001:0:150:0:1:0:0`).
-        assert_eq!(placed_from(&["5001", "0", "150", "0", "1", "0", "0"]), Some(Placed { eid: 5001, offset: Vec3::new(0.0, 150.0, 0.0), scale: 1.0 }));
-        assert_eq!(placed_from(&["3478", "4", "0", "-4", "0.7", "1", "500"]).unwrap().scale, 0.7);
+        assert_eq!(placed_from(&["5001", "0", "150", "0", "1", "0", "0"]), Some(Placed { eid: 5001, offset: Vec3::new(0.0, 150.0, 0.0), scale: 1.0, node: 0, delay: 0 }));
+        let p = placed_from(&["3478", "4", "0", "-4", "0.7", "101", "500"]).unwrap();
+        assert_eq!((p.scale, p.node, p.delay), (0.7, 101, 500));
         assert_eq!(placed_from(&["0"]), None);
         let a = EffAnim { kind: anim_kind::SCALE, flags: 0, life: 1000, loop_opt: 1, keys: AnimKeys::Vec3(vec![(0, [1.0; 3]), (1000, [3.0; 3])]) };
-        assert_eq!(anim_time(&a, 1500), 1000);
+        // Modes de boucle (FUN_1408ec780) : 1 temps tel quel, 0 borné, 2 répété, 3 aller-retour.
+        assert_eq!(anim_time(&a, 1500), 1500);
+        assert_eq!(anim_time(&EffAnim { loop_opt: 0, ..a.clone() }, 1500), 1000);
         let looped = EffAnim { loop_opt: 2, ..a.clone() };
         assert_eq!(anim_time(&looped, 1500), 500);
+        assert_eq!(loop_time(3, 1500, 1000), 500);
+        assert_eq!(loop_time(3, 2300, 1000), 300);
+        assert_eq!(loop_time(3, 800, 1000), 800);
         let base = EffBase { anims: vec![a], ..Default::default() };
         assert_eq!(base_state(&base, 500).scale, Vec3::splat(2.0));
         // Couleur RwRGBA et rotation cumulée (165 °/s pendant 2 s).
@@ -586,9 +780,19 @@ mod tests {
         assert_eq!(common["LV_UP"].iter().map(|p| p.eid).collect::<Vec<_>>(), vec![3610, 3611]);
         assert_eq!(common["LEARN_SK"][0].eid, 3614);
         assert!(event_effects(&assets, 96, COND_STRUCK).iter().any(|p| p.eid == 3551));
+        // Effets d'apparition (0x1) et d'attaque (0x40) : présents pour une partie des modèles.
+        let t = assets.table("ini", "charactertemplateeventeffect.ini").unwrap();
+        let tids: Vec<i32> = t.sections.iter().filter_map(|s| s.name.parse().ok()).take(400).collect();
+        assert!(tids.iter().any(|&tid| !event_effects(&assets, tid, COND_SPAWN).is_empty()));
+        assert!(tids.iter().any(|&tid| !event_effects(&assets, tid, COND_ATTACK).is_empty()));
         // Ressources de la montée de niveau : modèle d'effet et texture de planche du pack d'effets.
         let clump = assets.clump("effect/clump", "K0004300.ECL").expect("K0004300.ECL");
         assert!(clump.geometries.iter().any(|g| !g.triangles.is_empty() || !g.meshes.is_empty()));
         assert!(assets.texture_found("S0000102"));
+        // Spline de l'émetteur des particules de la montée de niveau (jeu 3611, animation 6).
+        let spline = Spline::parse(&assets.read_packed("effect/animation", "G00e1b00.ESP").expect("G00e1b00.ESP")).expect("spline");
+        assert_eq!((spline.points.len(), spline.closed), (5, false));
+        let (start, end) = (spline.position(0.0), spline.position(1.0));
+        assert!(start[1] < 80.0 && end[1] > 200.0, "{start:?} → {end:?}");
     }
 }

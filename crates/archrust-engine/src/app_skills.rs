@@ -438,6 +438,11 @@ impl App {
         }
     }
 
+    /// Identifiant de la compétence possédée de TID `tid` (annulation de l'évolution, voir `app_morph.rs`).
+    pub(super) fn skills_id_of(&self, tid: i32) -> Option<i32> {
+        self.skills.id_of(tid)
+    }
+
     /// Race et classe enseignées par un PNJ (fonction 25 de sa vue).
     fn npc_teach(&self, npc: i32) -> Option<(i32, i32)> {
         self.npc_functions(npc).iter().find(|f| f.function == function::SKILL_MASTER).and_then(|f| f.teach)
@@ -457,7 +462,12 @@ impl App {
             return;
         }
         let Some(me) = self.player.as_ref().map(|p| p.cid) else { return };
-        let target = self.addons.target_cid().unwrap_or(me);
+        // Compétences d'évolution du Dragon Scion (`target` 100 de SKILL_SPEC) : sur soi, quelle que soit la cible.
+        let target = if self.morph_is_evolution_skill(tid) { me } else { self.addons.target_cid().unwrap_or(me) };
+        // Métamorphosé : aucune compétence, sauf pour l'ArchLord (voir `app_morph.rs`).
+        if !self.morph_allows_skill(tid) {
+            return;
+        }
         // Compétence d'ArchLord (`skill_type` 9) : réservée à l'ArchLord (`FUN_1402fa5c0`, voir `app_archlord.rs`).
         if self.skills.tables(&assets).by_tid.get(&tid).is_some_and(|d| d.kind == 9) && !self.archlord_is_me() {
             log::info!("compétence {tid} ({name}) : réservée à l'ArchLord, non envoyée");
@@ -488,6 +498,10 @@ impl App {
             }
             Some(Shortcut::Skill(tid)) => self.skills_cast(tid),
             Some(Shortcut::Item(tid)) => {
+                // Refus du client métamorphosé ou évolué (FUN_14053d0b0, voir `app_morph.rs`).
+                if self.morph_refuses_item(tid) {
+                    return;
+                }
                 let item = self.items.values().filter(|i| i.template_id == Some(tid) && i.status == Some(2)).min_by_key(|i| i.id).map(|i| i.id);
                 match (item, &self.net) {
                     (Some(iid), Some(net)) => net.send(Command::Item(ItemCommand::Use(iid))),
@@ -743,7 +757,9 @@ impl App {
                 }
                 Shortcut::Item(t) => {
                     let n: i32 = self.items.values().filter(|it| it.template_id == Some(*t) && it.status == Some(2)).map(|it| it.count.unwrap_or(1)).sum();
-                    (Some(n), 0.0, 0)
+                    // Potion de métamorphose : recharge commune de 10 min (AgpmItem op 19, voir `app_morph.rs`).
+                    let (cooldown, left_s) = self.morph_item_cooldown(*t).unwrap_or((0.0, 0));
+                    (Some(n), cooldown, left_s)
                 }
             };
             // Infobulle : compétence au niveau connu ; objet : celle du premier exemplaire du sac.

@@ -267,7 +267,8 @@ impl App {
                     self.customize.info = events.get("CustomizeNeedDismountRide").cloned();
                     return;
                 }
-                if self.customize.transformed {
+                // Métamorphosé ou évolué (`+0x600` / `+0x604`, voir `app_morph.rs`).
+                if self.customize.transformed || self.morph_changed_form() {
                     self.customize.info = events.get("CustomizeNeedRestoreTransform").cloned();
                     return;
                 }

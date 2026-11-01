@@ -507,6 +507,15 @@ impl Animator {
         let clip = self.clip.as_ref()?;
         clip.sample(self.time).get(track).map(|s| Vec3::from_array(s.translation))
     }
+
+    /// Matrice du nœud HAnim `node_id` (espace du modèle) dans la pose courante : point d'attache
+    /// des effets (`NODE_ID` des données d'effet, voir `app_effects.rs`).
+    pub fn node_matrix(&self, node_id: u32) -> Option<glam::Mat4> {
+        let clip = self.clip.as_ref()?;
+        let clump = &self.parts.first()?.1.clump;
+        let frame = clump.frames.iter().position(|f| f.hanim.as_ref().is_some_and(|h| h.node_id == node_id))?;
+        clump.world_matrices_with_pose(&clip.sample(self.time)).get(frame).copied()
+    }
 }
 
 /// Identité d'un ensemble de maillages (adresses des `Arc`).

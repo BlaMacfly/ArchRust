@@ -125,6 +125,9 @@ mod archlord_glue;
 #[path = "app_tax.rs"]
 mod tax_glue;
 
+#[path = "app_morph.rs"]
+mod morph_glue;
+
 #[path = "app_assets.rs"]
 mod assets_glue;
 
@@ -322,6 +325,8 @@ pub struct App {
     archlord: archlord_glue::ArchlordGlue,
     /// Taxes des régions et intendants (0x53), voir `app_tax.rs`.
     tax: tax_glue::TaxGlue,
+    /// Métamorphose et évolution du Dragon Scion : modèles, icônes d'annulation, refus, voir `app_morph.rs`.
+    morph: morph_glue::MorphGlue,
     /// Surveillance des dossiers de packs (`assets/`, `patches/`), voir `app_assets.rs`.
     assets_watch: assets_glue::AssetsWatch,
     /// Curseurs de la souris d'Archonia, voir `app_cursor.rs`.
@@ -454,6 +459,7 @@ impl App {
             siege: Default::default(),
             archlord: Default::default(),
             tax: Default::default(),
+            morph: Default::default(),
             assets_watch: Default::default(),
             cursor: Default::default(),
             worldmap: Default::default(),
@@ -1306,6 +1312,8 @@ impl App {
         // ArchLord et taxes : remises à zéro (voir `app_archlord.rs`, `app_tax.rs`).
         self.archlord_observe(&ev);
         self.tax_observe(&ev);
+        // Métamorphose : remises à zéro, effet d'évolution, compte à rebours des potions (voir `app_morph.rs`).
+        self.morph_observe(&ev);
         match ev {
             WorldEvent::Connected => {
                 // Nouvelle connexion au monde : les instantanés d'objets qui suivent repartent de zéro.
@@ -1623,6 +1631,8 @@ impl App {
             WorldEvent::Teleport(ev) => self.on_teleport_event(ev),
             // Métamorphose : relevée par `portal_observe` (refus des portails).
             WorldEvent::Transformed { .. } => {}
+            // Métamorphose et évolution (AGPMCHARACTER ops 11, 12, 26, 27 ; AGPMITEM ops 19, 20, 27), voir `app_morph.rs`.
+            WorldEvent::Morph(ev) => self.on_morph_event(ev),
             // Reconnexion automatique (0x63), voir `app_reconnect.rs`.
             WorldEvent::Reconnecting => self.reconnect_event(true),
             WorldEvent::Reconnected => self.reconnect_event(false),
@@ -1726,6 +1736,7 @@ impl App {
                     self.hud.remove_buff(skill_tid);
                 }
             }
+            WorldEvent::CharacterProperties { op, values } => self.hud.set_character_properties(op, &values),
             WorldEvent::Unhandled { packet_type, op } => {
                 log::debug!("paquet non géré 0x{packet_type:02x} op {op:?}")
             }
@@ -2440,6 +2451,7 @@ impl App {
         // Droits de l'ArchLord ; taux de taxe de la région du joueur, fenêtres de l'intendant fermées en
         // s'éloignant (voir `app_archlord.rs`, `app_tax.rs`).
         self.archlord_frame();
+        self.morph_frame();
         self.tax_frame();
         // Curseur d'Archonia selon ce qui est sous la souris (voir `app_cursor.rs`).
         self.cursor_update();
@@ -2665,6 +2677,8 @@ impl App {
                 repair_glue::panel(ctx, &mut self.repair, &self.items, &mut self.hud, &self.assets, self.net.as_ref(), &mut self.ui);
                 // Potions refusées à cheval ou métamorphosé.
                 ride_glue::item_requests(&mut self.ride, &self.items, &mut item_requests, &mut self.hud, &self.assets, &mut self.ui);
+                // Passeports métamorphosé, objet d'oubli des compétences évolué (voir `app_morph.rs`).
+                morph_glue::item_requests(&mut self.morph, &self.items, &mut item_requests, &mut self.hud, &self.assets, &mut self.ui);
                 // Fabrication, PNJ et compétences de production, barre de la récolte.
                 product_glue::panel(ctx, &mut self.product, &self.items, &mut self.hud, &self.assets, self.net.as_ref(), &mut self.ui);
                 // Amis, ignorés, menu d'un joueur ciblé (voir `app_buddy.rs`) ; courrier (voir `app_mail.rs`).
@@ -2692,6 +2706,8 @@ impl App {
                 chat_glue::panel(ctx, &mut self.chat, &mut self.hud, &self.assets, self.net.as_ref(), &mut self.ui, &player_name);
                 customize_glue::panel(ctx, &mut self.customize, &mut self.hud, &self.assets, self.net.as_ref());
                 wanted_glue::panel(ctx, &mut self.wanted, &mut self.hud, &self.assets, self.net.as_ref(), &mut self.ui);
+                // Icônes d'annulation de la métamorphose et de l'évolution (`UI_SystemMessageGrid`).
+                morph_glue::panel(ctx, &mut self.morph, self.wanted.alarm_shown(), &mut self.hud, &self.assets);
                 // Menu d'une invocation ciblée (`UI_TargetSummonsMenu*`, voir `app_summons.rs`).
                 summons_glue::panel(ctx, &mut self.summons, self.addons.target_cid(), me, &mut self.hud, &self.assets, self.net.as_ref());
                 // Shrines (`UI_Shrine_info`, jauge, messages du centre) et fenêtre des boss.

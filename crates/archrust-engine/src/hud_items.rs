@@ -303,6 +303,9 @@ pub fn draw_character(
                 }
             }
             // Caractéristiques, onglets et propriétés (voir `hud_status.rs`).
-            super::status_ui::draw_status(ctx, ui, hud, assets, &painter, &layout, origin, &w, &stats, font);
+            // Arme portée (main droite, sinon gauche) pour la vitesse d'attaque.
+            let weapon = [10, 9].into_iter().find_map(|part| equipped.iter().find(|e| e.part == Some(part)).and_then(|e| e.item.template_id));
+            let basis = super::status_ui::Basis::load(assets, stats.tid, weapon);
+            super::status_ui::draw_status(ctx, ui, hud, assets, &painter, &layout, origin, &w, &stats, &basis, font);
         });
 }

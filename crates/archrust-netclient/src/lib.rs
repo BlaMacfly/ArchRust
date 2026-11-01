@@ -24,6 +24,7 @@ pub mod items;
 pub mod itemset;
 pub mod login;
 pub mod mail;
+pub mod morph;
 pub mod nature;
 pub mod npc;
 pub mod party;

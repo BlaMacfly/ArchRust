@@ -28,6 +28,12 @@ pub mod op {
     pub const CAST_RESULT: i64 = 8;
 }
 
+/// Types d'action du mini SKILL_ACTION (champ 0) : 0 lancer, 4 annuler le lancement.
+pub mod action_type {
+    pub const CAST: i8 = 0;
+    pub const CANCEL: i8 = 4;
+}
+
 /// Opérations d'AGPMEVENTSKILLMASTER (0x3B).
 pub mod master_op {
     pub const LEARN: i8 = 1;
@@ -78,6 +84,9 @@ pub enum SkillCommand {
     /// `forced` : attaque forcée (Ctrl, champ 4 du mini SKILL_ACTION), nécessaire contre un joueur qui n'est pas
     /// un ennemi déclaré.
     Cast { id: i32, target: i32, forced: bool },
+    /// Annuler une compétence en cours (action de type 4, cible = soi) : clic sur l'icône d'annulation de
+    /// l'évolution (`FUN_1404b6ee0` → `FUN_14033c440`), avec l'identifiant de la compétence possédée.
+    CancelCast { id: i32 },
     /// Ouvrir la fenêtre d'un instructeur.
     MasterOpen(i32),
     /// Apprendre une compétence (TID) auprès d'un instructeur.
@@ -102,6 +111,11 @@ pub fn command_packet(cmd: &SkillCommand, me: i32) -> (&'static Schema, Vec<Opti
         SkillCommand::Cast { id, target, forced } => {
             let a = mini::SKILL_ACTION;
             let action = Value::Packet(build_mini(a, &sparse(a, &[(0, Value::I8(0)), (1, base(*target)), (4, Value::I8(*forced as i8))])).unwrap_or_default());
+            (main::SKILL, sparse(main::SKILL, &[(0, Value::I8(op::CAST as i8)), (1, Value::I32(*id)), (2, base(me)), (6, action)]))
+        }
+        SkillCommand::CancelCast { id } => {
+            let a = mini::SKILL_ACTION;
+            let action = Value::Packet(build_mini(a, &sparse(a, &[(0, Value::I8(action_type::CANCEL)), (1, base(me))])).unwrap_or_default());
             (main::SKILL, sparse(main::SKILL, &[(0, Value::I8(op::CAST as i8)), (1, Value::I32(*id)), (2, base(me)), (6, action)]))
         }
         SkillCommand::MasterOpen(npc) => master(master_op::OPEN, *npc, &[]),
@@ -275,6 +289,10 @@ mod tests {
         assert_eq!(s.id, packet_type::SKILL);
         let (_, a) = decode_mini(mini::SKILL_ACTION, bytes(&v, 6).unwrap()).unwrap();
         assert_eq!((int(&v, 0), int(&v, 1), base_cid(bytes(&a, 1))), (Some(7), Some(2), Some(77)));
+        // Annulation de l'évolution : action de type 4 sur la compétence possédée, cible = soi.
+        let (_, v) = command_packet(&SkillCommand::CancelCast { id: 5 }, 42);
+        let (_, a) = decode_mini(mini::SKILL_ACTION, bytes(&v, 6).unwrap()).unwrap();
+        assert_eq!((int(&v, 0), int(&v, 1), base_cid(bytes(&v, 2)), int(&a, 0), base_cid(bytes(&a, 1))), (Some(7), Some(5), Some(42), Some(4), Some(42)));
         let (s, v) = command_packet(&SkillCommand::Learn { npc: 9, tid: 57 }, 42);
         assert_eq!((s.id, int(&v, 0), int(&v, 4)), (0x3b, Some(1), Some(57)));
     }

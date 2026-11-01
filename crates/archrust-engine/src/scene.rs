@@ -561,6 +561,68 @@ pub fn item_name_for_tid(assets: &Assets, tid: i32) -> Option<String> {
         .map(str::to_owned)
 }
 
+/// Race et classe d'un modèle de personnage (facteurs `Race`, `Class` de `CharacterTemplatePublic.ini`) :
+/// Archonia les recopie dans les facteurs du personnage à l'évolution (`FUN_14019e640`, type 2).
+pub fn template_race_class(assets: &Assets, tid: i32) -> Option<(i32, i32)> {
+    let table = assets.table("ini", "CharacterTemplatePublic.ini").ok()?;
+    let header = table.section("")?;
+    let sec = table.section(&tid.to_string())?;
+    let get = |name: &str| {
+        let key = header.entries.iter().find(|(_, v)| v.eq_ignore_ascii_case(name)).map(|(k, _)| k.as_str())?;
+        sec.get(key)?.trim().parse::<i32>().ok()
+    };
+    Some((get("Race")?, get("Class")?))
+}
+
+/// `ItemEvolutionTable.txt` (`slayer | orbiter | scion | summoner`, AgcmItem `FUN_1408ad360`) : par objet du
+/// Scion (colonne `scion`, la clé ; première ligne gardée), ses apparences rangées par classe comme
+/// `FUN_1408ad2e0` les rend : `[scion (3), slayer (1), orbiter (2), summoner (4)]`, 0 pour une case vide.
+pub fn parse_evolution_table(text: &str) -> HashMap<i32, [i32; 4]> {
+    let mut out = HashMap::new();
+    for line in text.lines() {
+        // L'en-tête et les lignes sans nombre en tête sont ignorés (une première case vide vaut 0), comme dans
+        // Archonia.
+        if !line.starts_with(|c: char| c.is_ascii_digit() || c == '\t') {
+            continue;
+        }
+        let cells: Vec<i32> = line.trim_end_matches('\r').split('\t').take(4).map(|c| c.trim().parse::<i32>().unwrap_or(0)).collect();
+        let [slayer, orbiter, scion, summoner] = [0, 1, 2, 3].map(|i| cells.get(i).copied().unwrap_or(0));
+        out.entry(scion).or_insert([scion, slayer, orbiter, summoner]);
+    }
+    out
+}
+
+/// Apparence d'un objet porté par un personnage DragonScion (race 4) de classe `class` (`FUN_140751d70`) :
+/// l'objet de sa forme dans `ItemEvolutionTable.txt`, sinon l'objet lui-même (case vide ou objet absent).
+pub fn evolution_item(table: &HashMap<i32, [i32; 4]>, class: i32, item_tid: i32) -> i32 {
+    let slot = match class {
+        3 => 0,
+        1 => 1,
+        2 => 2,
+        4 => 3,
+        _ => return item_tid,
+    };
+    table.get(&item_tid).map(|row| row[slot]).filter(|t| *t > 0).unwrap_or(item_tid)
+}
+
+/// Table d'évolution du client, lue une fois par dossier de jeu.
+fn evolution_table(assets: &Assets) -> Arc<HashMap<i32, [i32; 4]>> {
+    static CACHE: std::sync::Mutex<Option<(Option<std::path::PathBuf>, Arc<HashMap<i32, [i32; 4]>>)>> = std::sync::Mutex::new(None);
+    let mut cache = CACHE.lock().unwrap();
+    if let Some((_, table)) = cache.as_ref().filter(|(d, _)| *d == assets.game_dir) {
+        return table.clone();
+    }
+    let text = assets.read_file("ini/itemevolutiontable.txt").map(|raw| {
+        let cp = archrust_data::ini::CodePage::for_dir("ini");
+        let plain = raw.iter().take(256).filter(|&&b| b < 0x20 && b != b'\r' && b != b'\n' && b != b'\t').count() * 20 < raw.len().min(256);
+        if plain { archrust_data::ini::decode_text(&raw, cp) } else { archrust_data::ini::decrypt_ini_with(&raw, cp) }
+    });
+    let table = Arc::new(text.map(|t| parse_evolution_table(&t)).unwrap_or_default());
+    log::info!("ItemEvolutionTable : {} objet(s) du Scion", table.len());
+    *cache = Some((assets.game_dir.clone(), table.clone()));
+    table
+}
+
 /// Charge le corps du personnage puis les modèles statiques des objets dans sa vue réseau.
 pub fn entity_meshes_with_equipment(
     renderer: &mut Renderer,
@@ -571,7 +633,16 @@ pub fn entity_meshes_with_equipment(
     fallback: &Arc<Mesh>,
 ) -> Result<Vec<(Arc<Mesh>, Mat4)>> {
     let mut meshes = entity_pieces(renderer, assets, tid, head, fallback)?;
-    for item in equipment {
+    // DragonScion : les objets portés prennent l'apparence de la forme courante (AgcmItem, rappels 0x79 / 0x7B
+    // d'AgpmCharacter à l'évolution et à son retour ; classe du modèle courant).
+    let equipment: Vec<EquipmentView> = match template_race_class(assets, tid) {
+        Some((4, class)) => {
+            let table = evolution_table(assets);
+            equipment.iter().map(|e| EquipmentView { template_id: evolution_item(&table, class, e.template_id), ..e.clone() }).collect()
+        }
+        _ => equipment.to_vec(),
+    };
+    for item in &equipment {
         // Monture (partie 14) et arme montée (15) : pas des vêtements ; la monture est un personnage à
         // part (voir `app_ride.rs`).
         if matches!(item_part_for_tid(assets, item.template_id), Some(14 | 15)) {
@@ -808,6 +879,20 @@ fn entity_pieces(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn apparence_des_objets_a_l_evolution() {
+        // En-tête, ligne complète, case slayer vide (Xenon) : clé = colonne scion.
+        let t = parse_evolution_table("slayer\torbiter\tscion\tsummoner\r\n6661\t6686\t7829\t\r\n\t6696\t7900\t8276\r\n");
+        assert_eq!(t.len(), 2);
+        assert_eq!(evolution_item(&t, 1, 7829), 6661, "Slayer");
+        assert_eq!(evolution_item(&t, 2, 7829), 6686, "Orbiter");
+        assert_eq!(evolution_item(&t, 4, 7829), 7829, "case vide : l'objet lui-même");
+        assert_eq!(evolution_item(&t, 3, 7829), 7829, "Scion");
+        assert_eq!(evolution_item(&t, 1, 7900), 7900, "Xenon sans apparence Slayer");
+        assert_eq!(evolution_item(&t, 4, 7900), 8276);
+        assert_eq!(evolution_item(&t, 1, 1), 1, "objet absent de la table");
+    }
 
     #[test]
     fn vitesses_comme_archonia() {

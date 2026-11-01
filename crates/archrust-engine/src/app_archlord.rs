@@ -13,9 +13,9 @@
 //!   (`FUN_14053d0b0`, voir `app_ride.rs`). Les effets des compétences 472-476, 478, 522, 523 viennent du serveur
 //!   (météo 0x30, monture Alcadia 1295 par 0x4D, gardes royaux en invocations 0x4F).
 //!
-//! Écarts : ArchRust n'a ni menu « Cancel Metamorphosis » (`sysstr` 665), ni refus de parler aux PNJ ou d'utiliser
-//! un parchemin de téléportation métamorphosé : les exceptions d'Archonia pour l'ArchLord n'y ont pas d'objet.
-//! Archonia ne colore pas le nom de l'ArchLord et n'affiche pas de titre : rien d'ajouté aux panneaux de nom.
+//! Les exceptions de l'ArchLord sous métamorphose (icônes d'annulation absentes, PNJ, passeports, compétences)
+//! sont dans `app_morph.rs`. Archonia ne colore pas le nom de l'ArchLord et n'affiche pas de titre : rien d'ajouté
+//! aux panneaux de nom.
 
 use super::App;
 use crate::assets::Assets;

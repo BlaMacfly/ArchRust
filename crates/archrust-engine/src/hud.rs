@@ -103,7 +103,7 @@ pub use customize_ui::{draw_customize_confirm, draw_customizing, CustomizeUi, Cu
 
 #[path = "hud_wanted.rs"]
 mod wanted_ui;
-pub use wanted_ui::{draw_arrange, draw_wanted_alarm, draw_wanted_board, ArrangeView, WantedBoardView, WantedRow, WantedUi};
+pub use wanted_ui::{draw_arrange, draw_system_grid_icon, draw_wanted_alarm, draw_wanted_board, ArrangeView, WantedBoardView, WantedRow, WantedUi};
 
 #[path = "hud_summons.rs"]
 mod summons_ui;
@@ -424,6 +424,16 @@ impl HudState {
         st.murderer = s.murderer.or(st.murderer);
         st.criminal_left = s.criminal_left.or(st.criminal_left);
         st.murderer_left = s.murderer_left.or(st.murderer_left);
+        st.tid = s.tid.or(st.tid);
+        st.properties.extend(s.properties.iter().map(|(k, v)| (*k, *v)));
+        st.pvp = s.pvp.or(st.pvp);
+    }
+
+    /// Valeurs des opérations 34 à 36 d'AGPMCHARACTER (ignorés, ténacités, dégâts dans la durée).
+    pub fn set_character_properties(&mut self, op: i8, values: &[i32]) {
+        for (i, v) in values.iter().enumerate() {
+            self.stats.properties.insert((op, i as u8), *v);
+        }
     }
 
     pub fn add_buff(&mut self, skill_tid: i32, duration_ms: u64) {

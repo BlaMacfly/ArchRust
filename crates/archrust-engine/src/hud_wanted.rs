@@ -150,6 +150,38 @@ pub fn draw_arrange(ctx: &egui::Context, hud: &mut HudState, assets: &Assets, vi
     }
 }
 
+/// Icône de la case `index` de la grille `SystemMessage_Grid` (`UI_SystemMessageGrid`, cases 32 × 32 espacées de
+/// `Grid` : 3) : annulation de la métamorphose (`Cancel_Transform.png`) ou de l'évolution
+/// (`UI_MainGrid_BtnRestoreEvolution.png`). Infobulle au survol (`QB_Open_System_Grid_Tooltip`) ; rend `true` au
+/// clic (`QB_Click_System_Grid`).
+pub fn draw_system_grid_icon(ctx: &egui::Context, hud: &mut HudState, assets: &Assets, index: usize, texture: &str, tooltip: &[(String, Color32)]) -> bool {
+    let Some(w) = window(hud, assets, "UI_SystemMessageGrid") else { return false };
+    let Some(grid) = w.control("CONTROL_32129") else { return false };
+    let layout = Layout::new(ctx.screen_rect());
+    let origin = layout.window_origin(&w);
+    let [gx, _, cw, ch] = grid.grid.unwrap_or([3.0, 0.0, 32.0, 32.0]);
+    let pos = [grid.pos[0] + index as f32 * (cw + gx), grid.pos[1]];
+    let cell = layout.rect(origin, pos, [cw, ch]);
+    let mut clicked = false;
+    egui::Area::new(egui::Id::new(("archonia-system-grid", index))).fixed_pos(cell.min).order(egui::Order::Middle).show(ctx, |ui| {
+        let (r, resp) = ui.allocate_exact_size(cell.size(), egui::Sense::click());
+        let painter = ui.painter().clone();
+        match hud.image(ctx, assets, texture) {
+            Some(_) => control_image(ctx, hud, assets, &painter, r, [cw, ch], texture, 1.0),
+            None => {
+                painter.rect_filled(r, 3.0, Color32::from_rgb(90, 60, 140));
+            }
+        }
+        if resp.hovered() {
+            if let Some(p) = resp.hover_pos() {
+                crate::hud::item_tooltip_at(ctx, p, tooltip, "");
+            }
+        }
+        clicked = resp.clicked();
+    });
+    clicked
+}
+
 /// Icône `WantedAlarm` dans la première case de `UI_SystemMessageGrid`, infobulle au survol.
 pub fn draw_wanted_alarm(ctx: &egui::Context, hud: &mut HudState, assets: &Assets, tooltip: &[(String, Color32)]) {
     let Some(w) = window(hud, assets, "UI_SystemMessageGrid") else { return };

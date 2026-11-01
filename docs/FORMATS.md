@@ -976,9 +976,37 @@ Boucle d'animation : 2 = répétée, 1 = une fois (déduit). Déclencheurs : `ee
 (`LV_UP` 3610 + 3611, `LEARN_SK` 3614), `charactertemplateskill.ini` (`SKILL_EFFECT_DATA` =
 `rang:équipement:n°:EID:x:y:z:échelle:nœud:délai`, rang = indice du nom dans les `UsableSkillTName`
 de `CharacterTemplatePublic.ini`), `charactertemplateeventeffect.ini` (`n:EID:x:y:z:échelle:nœud:délai`,
-condition 0x100 = coup reçu, 0x200 = mort, déduites des noms des jeux). Pas encore dessinés :
-particules (1, 2), traînées (3), lumières (5), cadres mobiles (7), nœud d'attache et délai des
-données d'effet, autres conditions (0x40 armes, 0x1 permanent, ailes et capes des colliers).
+conditions filtrées par FUN_1405748b0 : 0x1 apparition (FUN_14056a0e0, effets permanents), 0x40
+attaque (FUN_140568e80), 0x100 coup reçu (FUN_140571d80) observés ; 0x200 mort déduit).
+
+Relevés ajoutés (code : `effset.rs`, `effect_particles.rs`, `app_effects.rs`) :
+
+```text
+base (mémoire) : +0x2c délai, +0x30 durée, +0x38 boucle, +0x3c drapeaux ; rotation (a, b, c) :
+  a autour de Y, b autour de X, c autour de Z ; ordre Z·Y·X (objets : X·Y·Z) (FUN_1408f83d0)
+boucle (FUN_1408ec780) : 0 une fois (la base s'arrête), 1 temps brut, 2 répétée, 3 aller-retour
+particules (type 1, 204 o) : max, intervalle, 64 o non lus, vitesse±, décalage±, nombre+écart,
+  2 vitesses d'angle, 2×(min, max), direction, axe, cône, drapeaux de direction (1 sphère,
+  2 cône, 0x40 sans repère, 0x80 aucune), forme (0 point, 1 boîte, 2 cercle, 3 sphère), dims,
+  rotation±, vie+écart, gravité, vent, écarts (FUN_1408f8f30) ; p = p0 + v·t·échelle
+  + ½t²(g·(0,−980,0) + vent·(1,0,0)) ; drapeaux de base 0x10000 couleur au hasard, 0x40000 repère
+  local, 0x80000 face caméra, 0x100000 verticale, 0x200000/0x400000 anneau, 0x800000 plafond
+trou noir (type 2, 44 o) : max, nombre, écart, intervalle, vie, vitesse±, angles min/max, pas,
+  anneau ; 0x80000 départ à −v·vie, 0x400000 plan de l'écran (planche : drapeau 1 face caméra,
+  2 verticale)
+traînée (type 3, 20 o) : max points, intervalle, vie d'un point, bords haut/bas sur l'axe Y de
+  l'émetteur (0x20000 axe X, 0x10000 / 0x40000 tourné de 45° / 135°) ; ≤ 5 points, la queue
+  glisse vers le suivant, ruban u 0→1 et opacité 0→1 de la queue à la tête (FUN_140839e80)
+spline (animation 6, effect/animation/*.ESP) : morceau RW 0x0C = char[32], i32 n, i32 type,
+  n vec3 ; position par B-spline cubique (RpSplineFindMatrix chemin 10, FUN_1403734c0)
+nœud des données d'effet (FUN_140573480) : > 0 nœud HAnim suivi, 0 personnage suivi, −1 position
+  de départ, −2 au-dessus de la tête (HEIGHT + 50) suivi, −3 nœud au hasard, −4 + HEIGHT,
+  −5 décalage tourné ; délai (GAP, ms) divisé par la vitesse d'animation (FUN_140570c20)
+```
+
+Pas encore rendus : lumières (5), cadres mobiles (7, déplacent un cadre cible le long d'une spline :
+FUN_14083cbc0), traînée à deux nœuds d'arme, effets des objets équipés (0x40 sur les objets),
+conditions 0x2, 0x8, 0x10, 0x20, 0x80, ailes et capes des colliers.
 
 ## Production (récolte, cuisine, alchimie)
 
@@ -1271,6 +1299,27 @@ Relevés dans Archonia (`archlord.rs`, `tax.rs` d'`archrust-netclient` ; `app_ar
   son nom `RegionTemplate.ini` traduit par `RegionGlossary.txt` de la langue du client. Tribut à l'ArchLord : 20 %
   des recettes des régions (ligne 5 de `UI_TaxView`).
 
+## Métamorphose et évolution du Dragon Scion
+
+Relevés dans Archonia (`morph.rs`, `skills.rs` d'`archrust-netclient` ; `app_morph.rs`, `scene.rs` du moteur).
+
+- **AGPMCHARACTER** : op 0 champ 18 bit 0 métamorphosé, bit 2 évolué (lus à l'ajout seulement, pas à l'op 1) ;
+  op 11 `{1 CID, 2 TID de la forme}` (TID, visage, coiffure d'origine sauvés à la première op 11 seulement ; gabarit
+  inconnu ou même TID : rien) ; op 12 `{1 CID}` retour à l'origine ; op 13 `{1 CID}` envoyée au clic sur
+  `Cancel_Transform.png` ; op 26 `{1 CID, 2 TID évolué}` (refusée si déjà évolué ou même TID) ; op 27 `{1 CID,
+  2 TID à rétablir}` (refusée si non évolué). Évolution : race et classe du gabarit (`CharacterTemplatePublic.ini`)
+  recopiées dans `FACTOR_TYPE`.
+- **AGPMSKILL op 7, action de type 4** (`{1 identifiant de la compétence possédée, 2 SKILL_BASE soi, 6 SKILL_ACTION
+  {0 = 4, 1 = soi}}`) au clic sur `UI_MainGrid_BtnRestoreEvolution.png`, seulement après l'op 4 (effet) d'une
+  compétence de `transform_target` 5 (1189, 1192, 1195).
+- **AGPMITEM** : op 27 `{1 code, 4 CID}` (1 `UseItemFailedBySiegewar`, 2 `UseItemCannotTransformCreature`,
+  3 fenêtre inconnue, 4 `UseItemCannotTransformPotion`) ; op 19 (et 8) `{4 CID, 22 UINT64 restant en ms}` et op 20
+  `{4 CID}` : recharge commune des potions d'usage 7, 600 000 ms. Op 4 d'une potion d'usage 7 : compte à rebours
+  `Transform_Remain_Notice` (`Polymorph Dur` / 60 000, puis chaque minute métamorphosé ou évolué),
+  `Transform_Restore_Notice` à l'échéance.
+- **ItemEvolutionTable.txt** (`slayer orbiter scion summoner`, clé = colonne `scion`) : objet porté par un
+  DragonScion de classe 1 / 2 / 4 dessiné avec l'objet de sa colonne (case vide ou objet absent : lui-même).
+
 ## Niveau MJ, carte du monde et fenêtre du personnage
 
 - **AgpmAdmin (0x12)**, drapeaux 2 : `{op i8, CID i32, 13 mini-paquets}`. À l'entrée en jeu, op 0 avec au champ 2
@@ -1282,9 +1331,20 @@ Relevés dans Archonia (`archlord.rs`, `tax.rs` d'`archrust-netclient` ; `app_ar
   Tullan). Le continent (sans parente) a des boutons de zone (contrôles type 21, `…_A` / `…_B`).
 - **Fenêtre du personnage** : caractéristiques = `FACTOR_STATUS` (0 CON, 1 STR, 2 INT, 3 DEX, 4 CHA, 6 WIS, × 100) ;
   onglets et lignes = `ini/characterpropertyview.xml` (`CharacterPropertyAttack/Defense/Attribute/PVP`, nom
-  `UiMsg_…` de `uimessage.txt`, format `%d` / `%d%%`, fonction `fn_CharacterProperty_*`). Lues directement :
-  dégâts min.–max. (`FACTOR_DMG`), AR et DR (`FACTOR_POINTMAX` 8 et 9), portée (`FACTOR_ATTACK` 0), défense et
-  résistances (`FACTOR_DEFENSE` points par attribut).
+  `UiMsg_…` de `uimessage.txt`, format `%d` / `%d%%`, fonction `fn_CharacterProperty_*`, table FUN_14051af80).
+  Formules d'Archonia (`hud_status.rs`, statut × 100 relu × 0,01) : dégâts physiques = part de classe × 1,05 +
+  dégâts max. (chevalier FOR/3, archer DEX×2/9 + FOR/9, mage INT×0,4 ; FUN_140296740) ; AR = AR + niveau×0,6 +
+  DEX×0,6 + 12 ; DR = (niveau + DEX)×0,4 + 8 + DR ; `FACTOR_ATTACK` 0 portée, 3 incantation, 4 recharge, 5 précision,
+  6 évasion, 7 esquive ; `FACTOR_DEFENSE` taux 0 physique, 9 blocage, 10 blocage de compétence, 12-14 héroïques ;
+  course = statut 9 × 100 / `MovementFast` du modèle ; vitesse d'attaque = attaque 2 × 100 / `Speed` de l'arme (sinon
+  du modèle) ; minuteries PvP en minutes entamées. Couleurs `Color` / `UpperColor` / `LowerColor` selon la référence.
+- **AGPMCHARACTER ops 34, 35, 36** (sans champ propre) : `i32` lus dans le paquet brut à partir de l'octet 0x18
+  (rappels 0x88-0x8a) — 34 : 12 valeurs « ignore » (résistance physique, blocage, blocage de compétence, esquives
+  au corps à corps et à distance, résistance aux critiques, à l'étourdissement, …) ; 35 : ténacités (déplacement,
+  attaque, incantation, recharge) ; 36 : dégâts dans la durée (+, −, héroïques +, −).
+- Non relevé jusqu'au bout : critiques, défense/résistance ignorées, résistances aux critiques et à l'étourdissement,
+  renvoi = options des objets portés (itemoptiontable, runes, conversions, prestige ; FUN_14051aa90) + part des
+  compétences.
 
 ## Inconnues
 

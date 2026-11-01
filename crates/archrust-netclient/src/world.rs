@@ -114,6 +114,40 @@ pub struct CharacterStats {
     /// Facteurs détaillés reçus (fenêtre `Character_Status`), par (partie, indice) : voir
     /// [`factor_part`]. Le « résultat » (champ 0 des facteurs, équipement compris) l'emporte.
     pub factors: std::collections::BTreeMap<(u8, u8), i32>,
+    /// TID (modèle) du personnage (champ 2), quand le paquet le porte.
+    pub tid: Option<i32>,
+    /// Valeurs des opérations 34, 35 et 36 d'AGPMCHARACTER (voir [`decode_character_properties`]), par
+    /// (opération, indice).
+    pub properties: std::collections::BTreeMap<(i8, u8), i32>,
+    /// Victoires et défaites en PvP (AgpmPvP op 0), reportées par le moteur.
+    pub pvp: Option<(i64, i64)>,
+}
+
+/// Opérations d'AGPMCHARACTER sans champ propre (Archonia, `FUN_140173f10` cas 0x22 à 0x24) : le client
+/// passe le paquet brut aux rappels 0x88 à 0x8a d'AgpmCharacter, qui lisent des `i32` à partir de
+/// l'octet 0x18 (en-tête 19 + drapeaux 4 + opération 1) et les rangent sur son propre personnage :
+/// * 34 : 12 valeurs (`AgpdCharacter+0xc6c…0xc98`) — 0 résistance physique ignorée, 1 blocage ignoré,
+///   2 blocage de compétence ignoré, 3 esquive au corps à corps ignorée, 4 esquive à distance ignorée,
+///   5 résistance aux critiques ignorée, 6 résistance à l'étourdissement ignorée, 7 à 9 ?, 10 résistance
+///   ignorée (poison, foudre, glace), 11 résistance élémentaire ignorée (FUN_1404ac7b0) ;
+/// * 35 : ténacités de déplacement, d'attaque, d'incantation et de recharge (`+0xcac…`, FUN_1404ad5b0) ;
+/// * 36 : dégâts dans la durée augmentés, réduits, héroïques augmentés, héroïques réduits (`+0xc9c…`,
+///   FUN_1404ac1f0).
+pub mod character_property_op {
+    pub const IGNORE: i8 = 0x22;
+    pub const TENACITY: i8 = 0x23;
+    pub const DOT: i8 = 0x24;
+}
+
+/// Valeurs d'une opération 34, 35 ou 36 lues dans le paquet brut (`None` pour une autre opération).
+pub fn decode_character_properties(op: i8, raw: &[u8]) -> Option<Vec<i32>> {
+    use character_property_op as cp;
+    let count = match op {
+        cp::IGNORE => 12,
+        cp::TENACITY | cp::DOT => 4,
+        _ => return None,
+    };
+    Some((0..count).map(|i| raw.get(0x18 + i * 4..0x1c + i * 4).map_or(0, |b| i32::from_le_bytes(b.try_into().unwrap()))).collect())
 }
 
 /// Parties de [`CharacterStats::factors`] : numéro du sous-paquet d'AGPMCHAR_FACTORS, et pour les
@@ -121,6 +155,8 @@ pub struct CharacterStats {
 pub mod factor_part {
     /// `FACTOR_STATUS` : 0 CON, 1 STR, 2 INT, 3 DEX, 4 CHA, 5 LUK, 6 WIS (× 100), 7 niveau…
     pub const STATUS: u8 = 1;
+    /// `FACTOR_TYPE` : 0 race, 1 sexe, 2 classe (1 chevalier, 2 archer, 3 scion, 4 mage).
+    pub const TYPE: u8 = 2;
     /// `FACTOR_POINTMAX` : 0 PV, 1 PM, 2 PE, … 8 attaque (AR), 9 défense (DR).
     pub const POINT_MAX: u8 = 4;
     /// `FACTOR_ATTRIBUTE` (15 attributs : 0 physique, 1 magie, 2 eau, 3 feu, 4 terre, 5 air,
@@ -151,6 +187,7 @@ fn decode_factor_map(values: &[Option<Value>]) -> std::collections::BTreeMap<(u8
         }
     };
     ints(fp::STATUS, mini::FACTOR_STATUS, bytes(values, 1));
+    ints(fp::TYPE, mini::FACTOR_TYPE, bytes(values, 2));
     ints(fp::POINT_MAX, mini::FACTOR_POINTMAX, bytes(values, 4));
     ints(fp::ATTRIBUTE, mini::FACTOR_ATTRIBUTE, bytes(values, 6));
     ints(fp::ATTACK, mini::FACTOR_ATTACK, bytes(values, 9));
@@ -250,6 +287,9 @@ pub enum WorldEvent {
     },
     /// Montée de niveau d'un personnage (AGPMCHARACTER op 5).
     LevelUp { cid: i32 },
+    /// Valeurs des opérations 34 à 36 d'AGPMCHARACTER, pour le personnage du joueur (voir
+    /// [`decode_character_properties`]).
+    CharacterProperties { op: i8, values: Vec<i32> },
     /// Objet utilisé (AGPMITEM op 4) : modèle, utilisateur, délai de réutilisation en ms.
     ItemUsed { tid: Option<i32>, user: Option<i32>, cooldown_ms: Option<i32> },
     /// Retour d'un parchemin aller-retour possible (AGPMITEM op 9) ou fini (op 10).
@@ -337,9 +377,11 @@ pub enum WorldEvent {
     Auction(crate::auction::AuctionEvent),
     /// Commutateur d'équipement (AgpmItemSet 0x6A, voir `itemset`).
     ItemSet(crate::itemset::ItemSetEvent),
-    /// Métamorphose d'un personnage (AGPMCHARACTER champ 18) : les portails la refusent
+    /// Métamorphose d'un personnage (AGPMCHARACTER op 0 champ 18 bit 0, ops 11 et 12) : les portails la refusent
     /// (`Teleport_TransformChar`).
     Transformed { cid: i32, transformed: bool },
+    /// Métamorphose et évolution : changements de modèle, recharge des potions, refus (voir `morph`).
+    Morph(crate::morph::MorphEvent),
     /// Connexion au monde perdue : reconnexion en cours (`ReconnectingServerShow`, voir `reconnect`).
     Reconnecting,
     /// Reconnexion acceptée : la partie reprend (`ReconnectingServerHide`).
@@ -459,6 +501,8 @@ pub enum Command {
     Archlord(crate::archlord::ArchlordCommand),
     /// Intendant, changement et consultation des taxes (voir `tax`).
     Tax(crate::tax::TaxCommand),
+    /// Annulation de la métamorphose (voir `morph`).
+    Morph(crate::morph::MorphCommand),
     Quit,
 }
 
@@ -550,6 +594,9 @@ pub const MOVE_FAST: i8 = 0x10;
 /// Caractéristiques d'un paquet CHARACTER : facteurs (champ 7) et argent (champ 8).
 fn character_stats(p: &Incoming) -> Option<CharacterStats> {
     let mut stats = p.get(7).and_then(Value::as_bytes).and_then(decode_character_stats);
+    if let (Some(s), Some(tid)) = (stats.as_mut(), p.get(2).and_then(Value::as_i64)) {
+        s.tid = Some(tid as i32);
+    }
     if let Some(money) = p.get(8).and_then(Value::as_i64) {
         stats.get_or_insert_with(CharacterStats::default).money = Some(money);
     }
@@ -659,8 +706,12 @@ pub fn extra_events(p: &Incoming) -> Vec<WorldEvent> {
     // Métamorphose (champ 18 des paquets personnage).
     if p.packet_type == packet_type::CHARACTER && matches!(p.op(), Some(op) if op == character_op::ADD as i64 || op == character_op::UPDATE as i64) {
         if let (Some(cid), Some(t)) = (p.get(1).and_then(Value::as_i64), p.get(18).and_then(Value::as_i64)) {
-            // Bit 0 métamorphosé, bit 1 monté (FUN_140175bb0).
-            out.push(WorldEvent::Transformed { cid: cid as i32, transformed: t & crate::ride::state::TRANSFORMED != 0 });
+            // Bit 0 métamorphosé, bit 2 évolué : lus à l'ajout seulement (FUN_140175bb0 ; FUN_140176730, l'op 1,
+            // n'y touche pas) ; les ops 11 et 12 font suivre le bit 0 (voir `app_morph.rs`). Bit 1 monté.
+            if p.op() == Some(character_op::ADD as i64) {
+                out.push(WorldEvent::Transformed { cid: cid as i32, transformed: t & crate::ride::state::TRANSFORMED != 0 });
+                out.extend(p.packet.as_ref().and_then(|packet| crate::morph::state_of(p.packet_type, &packet.values)).map(WorldEvent::Morph));
+            }
             out.push(WorldEvent::Ride(crate::ride::RideEvent::State { cid: cid as i32, riding: crate::ride::is_riding(t) }));
         }
     }
@@ -703,6 +754,10 @@ pub fn extra_events(p: &Incoming) -> Vec<WorldEvent> {
 
 /// Traduit un paquet reçu en événement.
 pub fn translate(p: &Incoming) -> WorldEvent {
+    // Métamorphose et évolution (AGPMCHARACTER ops 11, 12, 26, 27 ; AGPMITEM ops 8, 19, 20, 27), voir `morph`.
+    if let Some(ev) = p.packet.as_ref().and_then(|packet| crate::morph::translate(p.packet_type, &packet.values)) {
+        return WorldEvent::Morph(ev);
+    }
     // Dialogue, boutique, banque, quêtes (voir `npc`).
     if let Some(ev) = p.packet.as_ref().and_then(|packet| crate::npc::translate(p.packet_type, &packet.values)) {
         return WorldEvent::Npc(ev);
@@ -917,6 +972,13 @@ pub fn translate(p: &Incoming) -> WorldEvent {
                 stats: character_stats(p),
                 action_status: p.get(11).and_then(Value::as_i64).map(|v| v as i8),
             }
+        }
+        // Opérations 34 à 36 : le paquet brut compte (l'opération est relue à l'octet 23 si le décodage a échoué).
+        packet_type::CHARACTER
+            if p.op().or_else(|| p.raw.get(19).filter(|f| *f & 1 != 0).and(p.raw.get(23)).map(|o| *o as i8 as i64)).and_then(|op| decode_character_properties(op as i8, &p.raw)).is_some() =>
+        {
+            let op = p.op().or_else(|| p.raw.get(23).map(|o| *o as i8 as i64)).unwrap_or(0) as i8;
+            WorldEvent::CharacterProperties { op, values: decode_character_properties(op, &p.raw).unwrap_or_default() }
         }
         packet_type::CHARACTER if p.op() == Some(character_op::LEVEL_UP as i64) => WorldEvent::LevelUp {
             cid: p.get(1).and_then(Value::as_i64).unwrap_or(0) as i32,
@@ -1494,6 +1556,10 @@ impl WorldClient {
                         }
                         Some(Command::Archlord(c)) => {
                             let (schema, values) = crate::archlord::command_packet(&c);
+                            self.conn.send(schema, &values).await
+                        }
+                        Some(Command::Morph(c)) => {
+                            let (schema, values) = crate::morph::command_packet(&c, self.cid);
                             self.conn.send(schema, &values).await
                         }
                         Some(Command::Tax(c)) => {
@@ -2141,6 +2207,27 @@ mod tests {
     }
 
     #[test]
+    fn character_property_ops_read_the_raw_packet() {
+        // En-tête 19, drapeaux 4 (opération seule), opération 0x23, quatre ténacités, pied.
+        let mut raw = vec![0u8; 19];
+        raw[0] = 0xd6;
+        raw[5] = packet_type::CHARACTER;
+        raw.extend(1u32.to_le_bytes());
+        raw.push(0x23);
+        for v in [5i32, 10, 15, -20] {
+            raw.extend(v.to_le_bytes());
+        }
+        raw.push(0x6b);
+        assert_eq!(decode_character_properties(0x23, &raw), Some(vec![5, 10, 15, -20]));
+        assert_eq!(decode_character_properties(0x22, &raw).map(|v| v.len()), Some(12));
+        assert_eq!(decode_character_properties(1, &raw), None);
+        match translate(&Incoming { packet_type: packet_type::CHARACTER, packet: None, raw }) {
+            WorldEvent::CharacterProperties { op, values } => assert_eq!((op, values), (0x23, vec![5, 10, 15, -20])),
+            other => panic!("{other:?}"),
+        }
+    }
+
+    #[test]
     fn character_stats_from_full_factors() {
         let status = build_mini(&mini::FACTOR_STATUS, &sparse(&mini::FACTOR_STATUS, &[(7, Value::I32(5))])).unwrap();
         let point = build_mini(
@@ -2209,8 +2296,16 @@ mod tests {
         let raw = build_packet(c, &sparse(c, &[(0, Value::I8(character_op::UPDATE)), (1, Value::I32(42)), (18, Value::I8(2))])).unwrap();
         let packet = decode_packet(c, &raw).unwrap();
         let extra = extra_events(&Incoming { packet_type: packet_type::CHARACTER, packet: Some(packet), raw });
-        assert!(extra.iter().any(|e| matches!(e, WorldEvent::Transformed { cid: 42, transformed: false })));
         assert!(extra.iter().any(|e| matches!(e, WorldEvent::Ride(RideEvent::State { cid: 42, riding: true }))));
+        // L'op 1 ne touche pas aux bits de métamorphose et d'évolution (FUN_140176730).
+        assert!(!extra.iter().any(|e| matches!(e, WorldEvent::Transformed { .. } | WorldEvent::Morph(_))));
+        // Op 0 champ 18 = 5 : métamorphosé et évolué.
+        let raw = build_packet(c, &sparse(c, &[(0, Value::I8(character_op::ADD)), (1, Value::I32(42)), (18, Value::I8(5))])).unwrap();
+        let packet = decode_packet(c, &raw).unwrap();
+        let extra = extra_events(&Incoming { packet_type: packet_type::CHARACTER, packet: Some(packet), raw });
+        assert!(extra.iter().any(|e| matches!(e, WorldEvent::Transformed { cid: 42, transformed: true })));
+        assert!(extra.iter().any(|e| matches!(e, WorldEvent::Morph(crate::morph::MorphEvent::State { cid: 42, transformed: true, evolved: true }))));
+        assert!(extra.iter().any(|e| matches!(e, WorldEvent::Ride(RideEvent::State { cid: 42, riding: false }))));
         // Vue optimisée op 1 : champ 15 de la vue.
         let v = mini::OPT_VIEW_CHAR;
         let view = build_mini(v, &sparse(v, &[(0, Value::I32(43)), (1, Value::I32(1)), (15, Value::I8(3))])).unwrap();

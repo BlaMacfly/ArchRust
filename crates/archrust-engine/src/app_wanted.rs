@@ -70,6 +70,13 @@ pub struct WantedGlue {
     default_tip: Option<Vec<(String, Color32)>>,
 }
 
+impl WantedGlue {
+    /// Icône `WantedAlarm` affichée (première case de `UI_SystemMessageGrid`).
+    pub fn alarm_shown(&self) -> bool {
+        self.wanted
+    }
+}
+
 fn send(net: Option<&NetLink>, cmd: WantedCommand) {
     if let Some(net) = net {
         net.send(Command::Wanted(cmd));

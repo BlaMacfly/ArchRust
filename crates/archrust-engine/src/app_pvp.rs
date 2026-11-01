@@ -263,6 +263,7 @@ impl App {
             op::INFO => {
                 self.pvp.wins = ev.win;
                 self.pvp.losses = ev.lose;
+                self.hud.stats.pvp = Some((ev.win, ev.lose));
             }
             op::ADD_ENEMY => {
                 self.pvp.enemies.insert(ev.target as i32);
