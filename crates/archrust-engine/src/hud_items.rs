@@ -203,7 +203,7 @@ pub fn draw_character(
             let origin = rect.min;
             let painter = ui.painter().clone();
             match w.textures.first() {
-                Some((_, tex)) if hud.image(ctx, assets, tex).is_some() => control_image(ctx, hud, assets, &painter, rect, w.size, tex, 1.0),
+                Some((_, tex)) if hud.image(ctx, assets, tex).is_some() => window_image(ctx, hud, assets, &painter, rect, w.size, tex),
                 _ => {
                     painter.rect_filled(rect, 4.0, Color32::from_black_alpha(210));
                 }
@@ -218,7 +218,8 @@ pub fn draw_character(
                     1 if c.name == "CONTROL_29628" => {
                         shadow_text(&painter, r.left_center(), Align2::LEFT_CENTER, "Personnage", font * 1.1, Color32::from_rgb(235, 225, 200));
                     }
-                    1 if display == "1:HP" || display == "1:MP" => {
+                    // Libellés fixes (PV, PM, STA, WIS, AGI, STR, INT, CHA) : textes du dossier de langue.
+                    1 if c.textures.is_empty() && c.name != "CONTROL_29628" && display.starts_with("1:") && display.len() > 2 => {
                         shadow_text(&painter, r.left_center(), Align2::LEFT_CENTER, &display[2..], font, Color32::from_rgb(235, 225, 200));
                     }
                     1 if value("현재_레벨") => {
@@ -301,5 +302,7 @@ pub fn draw_character(
                     _ => {}
                 }
             }
+            // Caractéristiques, onglets et propriétés (voir `hud_status.rs`).
+            super::status_ui::draw_status(ctx, ui, hud, assets, &painter, &layout, origin, &w, &stats, font);
         });
 }

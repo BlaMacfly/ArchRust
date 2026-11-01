@@ -187,6 +187,52 @@ pub struct SkyRenderer {
     /// Tampons de sommets dynamiques (particules, reflets) et leur capacité en sommets.
     particle_buf: Option<(wgpu::Buffer, usize)>,
     flare_buf: Option<(wgpu::Buffer, usize)>,
+    /// Effets : un pipeline par mélange (indice = `EffectBlend as usize`) et leur tampon.
+    effect_pipelines: [wgpu::RenderPipeline; 5],
+    effect_buf: Option<(wgpu::Buffer, usize)>,
+}
+
+/// Mélange d'un effet, d'après `AgcdEffRenderBase` (`switch` de FUN_1408f8030 d'Archonia : états
+/// RenderWare `SRCBLEND` (10) / `DESTBLEND` (11) et `D3DRS_BLENDOP` (0xab)).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum EffectBlend {
+    /// Source alpha, 1 − source alpha (types 0, 1, 4, 8 et défaut).
+    Alpha = 0,
+    /// Source alpha + destination (type 3, le plus courant).
+    AddAlpha = 1,
+    /// Source + destination (type 2).
+    AddOne = 2,
+    /// Destination − source alpha (type 7).
+    RevSubAlpha = 3,
+    /// Destination − source (type 6).
+    RevSubOne = 4,
+}
+
+impl EffectBlend {
+    pub const ALL: [EffectBlend; 5] = [EffectBlend::Alpha, EffectBlend::AddAlpha, EffectBlend::AddOne, EffectBlend::RevSubAlpha, EffectBlend::RevSubOne];
+
+    /// Mélange d'une valeur des données. Les types 5 et 9 (couleur source / 1 − couleur source) et
+    /// les soustractions 10 à 13, rares, retombent sur le mélange alpha.
+    pub fn from_data(v: u32) -> Self {
+        match v {
+            2 => EffectBlend::AddOne,
+            3 => EffectBlend::AddAlpha,
+            6 => EffectBlend::RevSubOne,
+            7 => EffectBlend::RevSubAlpha,
+            _ => EffectBlend::Alpha,
+        }
+    }
+
+    fn factors(self) -> (wgpu::BlendFactor, wgpu::BlendFactor, wgpu::BlendOperation) {
+        use wgpu::{BlendFactor as F, BlendOperation as O};
+        match self {
+            EffectBlend::Alpha => (F::SrcAlpha, F::OneMinusSrcAlpha, O::Add),
+            EffectBlend::AddAlpha => (F::SrcAlpha, F::One, O::Add),
+            EffectBlend::AddOne => (F::One, F::One, O::Add),
+            EffectBlend::RevSubAlpha => (F::SrcAlpha, F::One, O::ReverseSubtract),
+            EffectBlend::RevSubOne => (F::One, F::One, O::ReverseSubtract),
+        }
+    }
 }
 
 fn dynamic_buffer(device: &wgpu::Device, slot: &mut Option<(wgpu::Buffer, usize)>, queue: &wgpu::Queue, vertices: &[Vertex], label: &str) {
@@ -344,6 +390,45 @@ impl SkyRenderer {
             color: wgpu::BlendComponent { src_factor: wgpu::BlendFactor::One, dst_factor: wgpu::BlendFactor::One, operation: wgpu::BlendOperation::Add },
             alpha: wgpu::BlendComponent { src_factor: wgpu::BlendFactor::Zero, dst_factor: wgpu::BlendFactor::One, operation: wgpu::BlendOperation::Add },
         };
+        // Effets d'Archonia (`app_effects.rs`) : même nuanceur que les particules, un pipeline par
+        // mélange d'`AgcdEffRenderBase` (voir `EffectBlend`).
+        let effect_pipelines = EffectBlend::ALL.map(|blend| {
+            let (src, dst, op) = blend.factors();
+            device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+                label: Some("effects"),
+                layout: Some(&particle_layout),
+                vertex: wgpu::VertexState {
+                    module: &nature_shader,
+                    entry_point: Some("vs_particle"),
+                    buffers: std::slice::from_ref(&vertex_layout),
+                    compilation_options: Default::default(),
+                },
+                fragment: Some(wgpu::FragmentState {
+                    module: &nature_shader,
+                    entry_point: Some("fs_particle"),
+                    targets: &[Some(wgpu::ColorTargetState {
+                        format,
+                        blend: Some(wgpu::BlendState {
+                            color: wgpu::BlendComponent { src_factor: src, dst_factor: dst, operation: op },
+                            alpha: wgpu::BlendComponent { src_factor: wgpu::BlendFactor::Zero, dst_factor: wgpu::BlendFactor::One, operation: wgpu::BlendOperation::Add },
+                        }),
+                        write_mask: wgpu::ColorWrites::ALL,
+                    })],
+                    compilation_options: Default::default(),
+                }),
+                primitive: wgpu::PrimitiveState { topology: wgpu::PrimitiveTopology::TriangleList, cull_mode: None, ..Default::default() },
+                depth_stencil: Some(wgpu::DepthStencilState {
+                    format: wgpu::TextureFormat::Depth32Float,
+                    depth_write_enabled: false,
+                    depth_compare: wgpu::CompareFunction::Greater,
+                    stencil: Default::default(),
+                    bias: Default::default(),
+                }),
+                multisample: Default::default(),
+                multiview: None,
+                cache: None,
+            })
+        });
         let flare_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
             label: Some("flare"),
             layout: Some(&nature_layout),
@@ -376,6 +461,26 @@ impl SkyRenderer {
             depth_layout,
             particle_buf: None,
             flare_buf: None,
+            effect_pipelines,
+            effect_buf: None,
+        }
+    }
+
+    /// Téléverse les sommets de tous les effets de l'image (lots mis bout à bout).
+    pub fn prepare_effects(&mut self, device: &wgpu::Device, queue: &wgpu::Queue, vertices: &[Vertex]) {
+        dynamic_buffer(device, &mut self.effect_buf, queue, vertices, "effects");
+    }
+
+    /// Un lot d'effets (sommets `range` du tampon de `prepare_effects`).
+    pub fn draw_effect(&self, pass: &mut wgpu::RenderPass<'_>, globals: &wgpu::BindGroup, texture: &wgpu::BindGroup, blend: EffectBlend, range: std::ops::Range<u32>) {
+        if let Some((buf, _)) = &self.effect_buf {
+            if !range.is_empty() {
+                pass.set_pipeline(&self.effect_pipelines[blend as usize]);
+                pass.set_bind_group(0, globals, &[]);
+                pass.set_bind_group(1, texture, &[]);
+                pass.set_vertex_buffer(0, buf.slice(..));
+                pass.draw(range, 0..1);
+            }
         }
     }
 

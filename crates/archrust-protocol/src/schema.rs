@@ -468,6 +468,14 @@ pub mod main {
         f!(MemoryBlock), // 11 temps de recharge encodés (texte)
     ]);
 
+    // AgpmAdmin (0x12) — drapeaux 2 : op, CID, puis 13 mini-paquets (2 = ADMIN_CHAR). Le serveur
+    // envoie l'op 0 à l'entrée en jeu avec le niveau MJ du personnage.
+    schema!(pub ADMIN = "AGPMADMIN", T::ADMIN, 2, [
+        f!(Int8), f!(Int32),
+        f!(Packet), f!(Packet), f!(Packet), f!(Packet), f!(Packet), f!(Packet), f!(Packet),
+        f!(Packet), f!(Packet), f!(Packet), f!(Packet), f!(Packet), f!(Packet),
+    ]);
+
     // ApmEventManager (0x3C) — drapeaux 1 : désignation (mini EVENT_BASE), données de la fonction.
     // Les fonctions d'un PNJ arrivent ainsi, paquets complets mis bout à bout, au champ 4 de sa vue.
     schema!(pub EVENT_MANAGER = "APMEVENTMANAGER", T::EVENT_MANAGER, 1, [f!(Packet), f!(Packet)]);
@@ -750,6 +758,7 @@ pub mod main {
             T::EVENT_GUILD => EVENT_GUILD,
             T::GUILD_WAREHOUSE => GUILD_WAREHOUSE,
             T::UI_STATUS => UI_STATUS,
+            T::ADMIN => ADMIN,
             T::PVP => PVP,
             T::REMISSION => REMISSION,
             T::PRODUCT => PRODUCT,
@@ -791,6 +800,8 @@ pub mod mini {
 
     // Désignation dans AGPMSKILL (type d'objet, identifiant) — drapeaux 1.
     schema!(pub SKILL_BASE = "AGPMSKILL_BASE", 150, 1, [f!(Int8), f!(Int32)]);
+    // Données MJ d'un personnage (AGPMADMIN champ 2) — drapeaux 1 : op, CID, nom, niveau MJ, ?, compte.
+    schema!(pub ADMIN_CHAR = "AGPMADMIN_CHAR", 122, 1, [f!(Int8), f!(Int32), f!(Char, 49), f!(Int16), f!(Int8), f!(Char, 49)]);
     // Rémission (AgpmRemission op 2) — drapeaux 1 : type (4 lettres de pardon), résultat.
     schema!(pub REMISSION = "AGPMREMISSION_MINI", 190, 1, [f!(Int8), f!(Int32)]);
     // Criminel d'un avis de recherche (AgpmWantedCriminal champ 5 hors ops 0 et 1) — drapeaux 2 : nom, montant

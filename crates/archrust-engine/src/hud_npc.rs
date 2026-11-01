@@ -158,7 +158,7 @@ pub(super) fn frame<R>(ctx: &egui::Context, hud: &mut HudState, assets: &Assets,
             let (rect, _) = ui.allocate_exact_size(size, egui::Sense::hover());
             let painter = ui.painter().clone();
             match w.textures.first() {
-                Some((_, tex)) if hud.image(ctx, assets, tex).is_some() => control_image(ctx, hud, assets, &painter, rect, w.size, tex, 1.0),
+                Some((_, tex)) if hud.image(ctx, assets, tex).is_some() => window_image(ctx, hud, assets, &painter, rect, w.size, tex),
                 _ => {
                     painter.rect_filled(rect, 4.0, Color32::from_black_alpha(220));
                 }
@@ -178,7 +178,13 @@ pub fn draw_npc_dialog(ctx: &egui::Context, hud: &mut HudState, assets: &Assets,
         for c in &w.controls {
             let r = layout.rect(origin, c.pos, c.size);
             match c.name.as_str() {
-                "CONTROL_31156" => shadow_text(painter, r.left_center(), Align2::LEFT_CENTER, &view.npc_name, font, Color32::from_rgb(255, 230, 160)),
+                // Titre coupé au bord de son contrôle et avant la croix : un nom long (« <Tullan> Portail
+                // vers la Frontière chaotique ») passait sous la croix de fermeture.
+                "CONTROL_31156" => {
+                    let x_left = w.control("CONTROL_NPCDialogQuitButton").map_or(f32::INFINITY, |x| layout.rect(origin, x.pos, x.size).left() - 2.0 * s);
+                    let clip = r.intersect(Rect::everything_left_of(x_left));
+                    shadow_text(&painter.with_clip_rect(clip), r.left_center(), Align2::LEFT_CENTER, &view.npc_name, font, Color32::from_rgb(255, 230, 160));
+                }
                 "CONTROL_NPCDialogEdit" => text_box(ui, r, "npc-dialog-text", &view.text, font * 1.05, Color32::from_rgb(230, 222, 200)),
                 "CONTROL_NPCDialogQuitButton" => {
                     if button(ctx, ui, hud, assets, painter, r, c, "", font, true, "npc-dialog-x").clicked() {

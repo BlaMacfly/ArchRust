@@ -294,7 +294,7 @@ Jetons d'unité : `player`, `target`, `nameplate1`…`nameplateN` (unités en vu
 | Cible (côté client) | `TargetUnit(unité ou nom)`, `TargetNearest`, `ClearTarget` |
 | Groupe (5 membres au plus) | `IsInGroup`, `GetNumGroupMembers` (joueur compris), `GetNumSubgroupMembers`, `UnitInParty`, `UnitIsGroupLeader`, `GetPartyInvitations()` (noms des inviteurs en attente), `InviteUnit(nom ou unité)`, `UninviteUnit`, `PromoteToLeader`, `AcceptGroup`, `DeclineGroup`, `LeaveParty`, `C_PartyInfo.InviteUnit`, `C_PartyInfo.LeaveParty` ; ces demandes passent par les commandes `/inviter`… du client |
 | Discussion | `print`, `SendChatMessage(texte, type)` (les messages tapés passent aussi par elle : accrochable), `DEFAULT_CHAT_FRAME:AddMessage`, `ChatFrame_AddMessageEventFilter(event, filtre)` (masquer ou réécrire les messages reçus), `RunMacroText("/goto …")` |
-| Inventaire | `GetItemInfo(tid ou nom)`, `GetItemCount`, `C_Container.GetContainerNumSlots`, `C_Container.GetContainerItemInfo`, `ArchRust.GetInventory()` |
+| Inventaire | `GetItemInfo(tid ou nom)` (ordre de WoW : nom, lien, qualité 1, niveau, niveau requis, catégorie, `""`, pile, `""`, icône, 0 ; objet du sac, sinon du catalogue ; `nil` si inconnu), `GetItemIcon(tid)` (nom de texture ou `nil`), `GetItemCount`, `C_Container.GetContainerNumSlots`, `C_Container.GetContainerItemInfo`, `ArchRust.GetInventory()` |
 | Combat | `CombatLogGetCurrentEventInfo()` → horodatage, `"SWING_DAMAGE"`/`"SPELL_HEAL"`, false, GUID source, nom source, 0, 0, GUID cible, nom cible, 0, 0, montant, PV restants |
 | Temps | `GetTime`, `GetTimePreciseSec`, `debugprofilestop`, `GetFramerate`, `C_Timer.After`, `C_Timer.NewTimer`, `C_Timer.NewTicker(période, f, n)` (`:Cancel()`, `:IsCancelled()`) |
 | Client | `GetRealmName`, `GetLocale` (`frFR`), `GetBuildInfo`, `IsLoggedIn`, `GetScreenWidth/Height`, `GetCursorPosition`, `GetMouseFocus`, `IsShiftKeyDown`, `IsControlKeyDown`, `IsAltKeyDown`, `ReloadUI`, `Screenshot([fichier])` (dans `saved-variables/Screenshots`), `Quit`, `PlaySound`/`PlaySoundFile(chemin)` (`sound/ui/block.wav`, `sd0000.wav` d'un pack `.pk`, `Interface\AddOns\<AddOn>\son.wav` ou chemin relatif à l'AddOn ; un numéro de kit WoW est ignoré), `PlayMusic(chemin)` (MP3 en boucle, fondu, remplace la musique de zone), `StopMusic()` (retour à la musique de zone) |
@@ -309,6 +309,9 @@ Jetons d'unité : `player`, `target`, `nameplate1`…`nameplateN` (unités en vu
 | `ArchRust.GetUnits()` | liste des unités en vue : `{guid, token, cid, tid, name, level, hp, hpMax, x, y, z, facing, moving}` |
 | `ArchRust.GetUnit(unité)` / `GetNumUnits()` | une unité (même forme) / leur nombre |
 | `ArchRust.GetInventory()` | objets : `{id, tid, name, count, where = "bag"/"equipped"/"other", tab, row, col}` |
+| `ArchRust.GetItemTemplate(tid)` | modèle d'objet du client (`ItemTemplateAll.ini`), possédé ou non : `{tid, name, icon, level, type, kind, part, stack, category}` ou `nil` (voir ci-dessous) |
+| `ArchRust.SearchItems(texte, [catégorie], [max])` | modèles dont le nom contient `texte` (casse ignorée) ou dont le TID commence par `texte` s'il est numérique ; texte vide : tous. Rend la liste (TID croissant, `max` = 200 par défaut, 5 000 au plus) et le nombre total trouvé |
+| `ArchRust.GetNumItemTemplates()` | nombre de modèles du catalogue (0 hors jeu ou si les tables manquent) |
 | `ArchRust.GetCamera()` | distance, lacet°, tangage°, champ de vision° |
 | `ArchRust.GetCameraPosition()` | œil x, y, z, cible x, y, z |
 | `ArchRust.SetCamera(distance, lacet°, tangage°)` | place la caméra (`nil` = inchangé) |
@@ -327,6 +330,21 @@ Jetons d'unité : `player`, `target`, `nameplate1`…`nameplateN` (unités en vu
 | `ArchRust.IsInWorld()`, `GetLoadedSectors()`, `GetFrameRect(frame)` | état du client |
 | `ArchRust.Dump(valeur [, profondeur])` | texte lisible d'une table |
 | `ArchRust.BuiltinLibraries` | chargeurs des bibliothèques intégrées |
+
+**Catalogue des objets.** Le moteur lit `ItemTemplateAll.ini` (fusionnée avec `ItemTemplateAll2.ini`) à
+l'entrée en jeu. Champs d'un modèle : `name` (nom du client), `icon` (texture du client `l%07x`, la même
+que les icônes du HUD : `tex:SetTexture(t.icon)` ; absent si l'objet n'en a pas), `level` (niveau requis,
+bloc `RestrictFactor`), `type` (0 se porte, 1 s'utilise, 2 autre), `kind` (1 armure, 2 arme, 4 bouclier,
+8 anneau, 16 collier, 32 monture), `part` (partie du corps), `stack` (taille de pile, 1 si l'objet ne
+s'empile pas), `category` : `weapon`, `armor` (boucliers compris), `jewel` (anneaux, colliers), `mount`,
+`usable`, `other` — à passer aussi à `SearchItems` (`all` ou `nil` : toutes).
+
+```lua
+local list, total = ArchRust.SearchItems("shield", "armor", 50)
+for _, t in ipairs(list) do print(t.tid, t.name, t.level) end
+local icon = MaFrame:CreateTexture(nil, "ARTWORK")
+icon:SetTexture(GetItemIcon(190) or "Interface\\Icons\\INV_Misc_QuestionMark")
+```
 
 Les erreurs Lua s'affichent une fois en rouge dans la discussion et dans le journal ; `/errors`
 les liste.
@@ -455,6 +473,7 @@ La console Lua (touche `` ` ``) exécute aussi du code dans l'état des AddOns.
 ## Tests
 
 `cargo test -p archrust-addons` charge du Lua : bibliothèques standard et alias, `require` borné,
+catalogue des objets (`tests/item_catalog.rs`),
 cycle de vie Ace3 complet (AceDB, profils, minuteurs, crochets, locales), sérialiseur, LibDataBroker,
 LibSharedMedia, `embeds.xml`, souris (clic, glisser, curseur), événements du monde, et une session
 avec les AddOns d'exemple du dépôt (`tests/sample_addons.rs`). `tests/addon_messages.rs` simule deux clients

@@ -497,6 +497,15 @@ pub fn item_part_for_tid(assets: &Assets, tid: i32) -> Option<i64> {
     table.section(&tid.to_string())?.get(column)?.trim().parse().ok()
 }
 
+/// Genre d'équipement d'un objet (colonne `Kind` d'ItemTemplateAll.ini) : 1 armure, 2 arme, 4 bouclier,
+/// 8 anneau, 16 collier, 32 monture.
+pub fn item_kind_for_tid(assets: &Assets, tid: i32) -> Option<i64> {
+    let table = assets.table("ini", "ItemTemplateAll.ini").ok()?;
+    let header = table.section("")?;
+    let column = header.entries.iter().find(|(_, name)| name.eq_ignore_ascii_case("Kind")).map(|(index, _)| index.as_str())?;
+    table.section(&tid.to_string())?.get(column)?.trim().parse().ok()
+}
+
 /// Type d'arme d'un objet (colonne `WeaponType` d'ItemTemplateAll.ini) ; `None` si ce n'est pas une
 /// arme (`Kind` 2).
 pub fn item_weapon_type(assets: &Assets, tid: i32) -> Option<i64> {
@@ -566,6 +575,13 @@ pub fn entity_meshes_with_equipment(
         // Monture (partie 14) et arme montée (15) : pas des vêtements ; la monture est un personnage à
         // part (voir `app_ride.rs`).
         if matches!(item_part_for_tid(assets, item.template_id), Some(14 | 15)) {
+            continue;
+        }
+        // Anneau (genre 8) et collier (genre 0x10) : jamais dessinés sur le personnage. Leur `BASE_DFF`
+        // (`d00000c4.ecl`, un coffret) n'est que leur modèle au sol. Archonia (AgcmItem::UnEquipItem,
+        // FUN_1407566c0) ne traite un collier que par ses effets attachés (FUN_1407538d0 : capes et
+        // ailes serties, par AgcmEventEffect).
+        if matches!(item_kind_for_tid(assets, item.template_id), Some(8 | 16)) {
             continue;
         }
         let Some(file) = item_model_for_tid(assets, item.template_id) else {

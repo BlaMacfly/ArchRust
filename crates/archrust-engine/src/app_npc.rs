@@ -30,8 +30,12 @@ use glam::Vec3;
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::time::{Duration, Instant};
 
-/// Distance à laquelle le serveur accepte de parler (1500) ; le client s'approche un peu plus.
-const TALK_RANGE: f32 = 1200.0;
+/// Portée du dialogue d'un PNJ dans ArchLord : 600 unités au sol (même portée pour la boutique et la
+/// banque, à confirmer dans Archonia) ; au-delà, le personnage marche jusqu'à 80 % de cette
+/// portée (480 unités) puis le dialogue s'ouvre. ArchRust demandait le dialogue dès 1200 unités.
+const TALK_RANGE: f32 = 600.0;
+/// Point d'arrivée de l'approche : 80 % de la portée.
+const APPROACH_RANGE: f32 = TALK_RANGE * 0.8;
 /// Au-delà, les fenêtres du PNJ se ferment.
 const CLOSE_RANGE: f32 = 2200.0;
 /// Banque : 4 pages de 7 lignes × 4 colonnes.
@@ -727,8 +731,8 @@ impl App {
             self.npc_request_dialog(cid);
             return true;
         }
-        // S'approcher jusqu'à 600 unités du PNJ.
-        let dest = npc - gap.normalize_or_zero() * 600.0;
+        // S'approcher jusqu'à 80 % de la portée (480 unités) du PNJ.
+        let dest = npc - gap.normalize_or_zero() * APPROACH_RANGE;
         if let (Some(net), Some(p)) = (&self.net, &mut self.player) {
             net.send(Command::MoveTo { position: p.position, destination: dest });
             p.destination = dest;

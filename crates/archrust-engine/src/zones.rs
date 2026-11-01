@@ -2,9 +2,10 @@
 //!
 //! Chaîne reconstituée sur les données du client et sur Archonia (module ciel `AgcmSkySet`) :
 //!
-//! 1. la grille d'attributs du secteur `C{sx},{sy}.amf` (archive `world/a%06dx.ma1`, 16 octets
-//!    d'en-tête puis 16 × 16 `u32`) porte dans les 16 bits hauts de chaque cellule l'indice de la
-//!    région (`RegionTemplate.ini`) ; les 16 bits bas sont les attributs de cellule (collision…).
+//! 1. la grille d'attributs du secteur `C{sx},{sy}.amf` (archive `world/a%06dx.ma1`, 12 octets
+//!    d'en-tête puis 16 × 16 `u32`, puis les segments de blocage) porte dans les 16 bits hauts de
+//!    chaque cellule l'indice de la région (`RegionTemplate.ini`) ; les 16 bits bas sont les
+//!    attributs de cellule (octet 1, bit 0 : sol bloqué, voir [`cell_ground_blocked`]).
 //!    Vérifié : le secteur d'Anchorville (`C325,389`) ne contient que des cellules `0x0009xxxx`
 //!    et la région 9 est « 앵커빌 » (Anchorville) ; la salle du trône de la scène de connexion
 //!    (`C272,272`) donne la région 22 « 3D_UI 휴먼컨셉 ». L'ordre des cellules (ligne = z,
@@ -28,12 +29,16 @@
 
 use crate::assets::Assets;
 use crate::world::{sector_of, sector_origin, tile_of, CELLS, CELL_SIZE};
+use glam::Vec3;
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Instant;
 
+/// En-tête d'un `.amf` : version `0x1003`, un `u32` (0), largeur de la grille (16) — écriture
+/// d'ApWorldSector, `FUN_1402241d0`.
+const AMF_HEADER: usize = 12;
 /// Taille d'une grille `.amf` : en-tête + 256 cellules.
-const AMF_LEN: usize = 16 + CELLS * CELLS * 4;
+const AMF_LEN: usize = AMF_HEADER + CELLS * CELLS * 4;
 
 /// Préfixes des six tranches horaires de `skyset.ini`, dans l'ordre de la journée.
 pub const SKY_SLOTS: [&str; 6] = ["00", "05", "07", "13", "19", "21"];
@@ -56,16 +61,39 @@ pub fn cell_region(cell: u32) -> u16 {
 }
 
 /// Grille de 256 cellules d'un `.amf` (sans l'en-tête), ou `None` si la taille ne correspond pas.
+/// Les cellules suivent un en-tête de 12 octets ; la lecture à 16 octets, d'avant le 2026-10-29,
+/// décalait la grille d'une cellule (la dernière était le nombre de segments).
 pub fn parse_amf(bytes: &[u8]) -> Option<Vec<u32>> {
     if bytes.len() < AMF_LEN {
         return None;
     }
     Some(
-        bytes[16..AMF_LEN]
+        bytes[AMF_HEADER..AMF_LEN]
             .chunks_exact(4)
             .map(|c| u32::from_le_bytes(c.try_into().unwrap()))
             .collect(),
     )
+}
+
+/// Segments de blocage d'un `.amf`, après la grille : `u32` nombre, puis 28 octets par segment
+/// (deux points x, y, z et un `f32` inutilisé). Archonia (`FUN_140197780`) empêche de les franchir.
+pub fn parse_amf_lines(bytes: &[u8]) -> Vec<[Vec3; 2]> {
+    let f = |o: usize| bytes.get(o..o + 4).map(|b| f32::from_le_bytes(b.try_into().unwrap()));
+    let Some(n) = bytes.get(AMF_LEN..AMF_LEN + 4).map(|b| u32::from_le_bytes(b.try_into().unwrap())) else {
+        return Vec::new();
+    };
+    (0..n as usize)
+        .map_while(|k| {
+            let o = AMF_LEN + 4 + k * 28;
+            Some([Vec3::new(f(o)?, f(o + 4)?, f(o + 8)?), Vec3::new(f(o + 12)?, f(o + 16)?, f(o + 20)?)])
+        })
+        .collect()
+}
+
+/// Cellule bloquée au sol : bit 0 de l'octet 1 (`FUN_14018cc80`, `FUN_140183bd0` mode 0). Le bit 1
+/// du même octet est le blocage « ciel », qu'Archonia ne consulte que pour un vol.
+pub fn cell_ground_blocked(cell: u32) -> bool {
+    cell & 0x100 != 0
 }
 
 /// Musiques d'une section `skyset.ini` : `HH_BackGroundMusic` distincts et non vides des six
@@ -345,13 +373,25 @@ mod tests {
     fn amf_cells_carry_the_region_in_the_high_half() {
         assert_eq!(cell_region(0x0009_000e), 9);
         assert_eq!(cell_region(0x0016_020e), 22);
-        let mut bytes = vec![0u8; 16];
+        // En-tête de C344,411.amf : 0x1003, 0, 16 ; puis la grille et un segment.
+        let mut bytes = Vec::new();
+        for v in [0x1003u32, 0, 16] {
+            bytes.extend_from_slice(&v.to_le_bytes());
+        }
         for i in 0..256u32 {
-            bytes.extend_from_slice(&((i << 16) | 4).to_le_bytes());
+            bytes.extend_from_slice(&((i << 16) | if i == 5 { 0x30e } else { 0x20e }).to_le_bytes());
+        }
+        assert!(parse_amf_lines(&bytes).is_empty());
+        bytes.extend_from_slice(&1u32.to_le_bytes());
+        for v in [1.0f32, 2.0, 3.0, 4.0, 5.0, 6.0, 0.0] {
+            bytes.extend_from_slice(&v.to_le_bytes());
         }
         let grid = parse_amf(&bytes).unwrap();
         assert_eq!(grid.len(), 256);
+        assert_eq!(cell_region(grid[0]), 0);
         assert_eq!(cell_region(grid[17]), 17);
+        assert!(cell_ground_blocked(grid[5]) && !cell_ground_blocked(grid[6]));
+        assert_eq!(parse_amf_lines(&bytes), vec![[Vec3::new(1.0, 2.0, 3.0), Vec3::new(4.0, 5.0, 6.0)]]);
         assert!(parse_amf(&bytes[..100]).is_none());
     }
 

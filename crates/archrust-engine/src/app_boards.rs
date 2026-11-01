@@ -39,7 +39,13 @@ pub struct BoardsGlue {
     /// Police « Georgia » du système (`None` pas encore cherchée, `Some(None)` absente).
     font: Option<Option<Arc<Vec<u8>>>>,
     rng: u32,
+    /// Nom caché par le décor ou le terrain, par CID, et instant du dernier test (voir
+    /// `App::boards_occluded`).
+    occluded: HashMap<i32, (bool, Instant)>,
 }
+
+/// Intervalle entre deux tests de visibilité du nom d'un même personnage.
+const OCCLUSION_EVERY: std::time::Duration = std::time::Duration::from_millis(250);
 
 /// Nom (et guilde) d'un personnage à dessiner.
 struct IdLine {
@@ -72,6 +78,26 @@ fn template_column(assets: &Assets, tid: i32, column: &str) -> Option<f32> {
 }
 
 impl App {
+    /// Nom du personnage `cid` (au-dessus de la tête, `head`) caché, vu de `eye`, par le relief ou un
+    /// objet du décor. Testé tous les `OCCLUSION_EVERY` par personnage ; entre deux tests, le dernier
+    /// résultat.
+    fn boards_occluded(&mut self, cid: i32, eye: Vec3, head: Vec3) -> bool {
+        let now = Instant::now();
+        if let Some((hidden, at)) = self.boards.occluded.get(&cid) {
+            if now.duration_since(*at) < OCCLUSION_EVERY {
+                return *hidden;
+            }
+        }
+        let len = eye.distance(head);
+        let by_ground = self.terrain.raycast(eye, head - eye, len).is_some_and(|p| p.distance(eye) < len - 50.0);
+        let hidden = by_ground || self.objects.segment_blocked(&self.assets, eye, head, 40.0);
+        self.boards.occluded.insert(cid, (hidden, now));
+        if self.boards.occluded.len() > 512 {
+            self.boards.occluded.retain(|_, (_, t)| now.duration_since(*t) < std::time::Duration::from_secs(5));
+        }
+        hidden
+    }
+
     fn boards_template(&mut self, tid: i32) -> (f32, f32) {
         let assets = &self.assets;
         *self.boards.templates.entry(tid).or_insert_with(|| {
@@ -216,6 +242,10 @@ impl App {
             };
             // Personnage au-delà de la distance `CharView` (non tracé) : pas de nom non plus.
             if !shown || (cid != me && char_distance.is_some_and(|d| pos.distance(eye) > d)) {
+                continue;
+            }
+            // Nom caché par le décor (murs, toits) ou le relief entre la caméra et lui : pas dessiné.
+            if cid != me && self.boards_occluded(cid, eye, foot + Vec3::Y * height) {
                 continue;
             }
             let color = pvp_colors.get(&cid).copied().unwrap_or_else(|| boards::name_color(kind, None));

@@ -593,7 +593,17 @@ impl Assets {
         } else {
             archrust_data::ini::decrypt_ini_with(&raw, cp)
         };
-        let table = Arc::new(IniTable::parse(&text));
+        let mut table = IniTable::parse(&text);
+        // Archonia charge `ItemTemplateAll.ini` puis `ItemTemplateAll2.ini` (chaînes en 0x140e2acf0 et
+        // 0x140e2ad08, lues l'une après l'autre en 0x1400f7cab) : les objets récents (ailes TID 60731…)
+        // ne sont que dans la seconde. Les deux n'ont pas les mêmes numéros de colonnes : fusion par
+        // nom de colonne.
+        if file.eq_ignore_ascii_case("ItemTemplateAll.ini") {
+            if let Ok(second) = self.table(dir, "ItemTemplateAll2.ini") {
+                table.merge_positional((*second).clone());
+            }
+        }
+        let table = Arc::new(table);
         self.tables.lock().unwrap().insert(key, table.clone());
         Ok(table)
     }
@@ -617,6 +627,11 @@ impl Assets {
         Ok(img)
     }
 
+    /// Vrai si la texture existe (patchs, client) ; `texture` rend sinon un substitut (diagnostics).
+    pub fn texture_found(&self, name: &str) -> bool {
+        self.load_texture_uncached(&name.to_ascii_lowercase()).is_ok()
+    }
+
     fn load_texture_uncached(&self, name: &str) -> Result<RgbaImage> {
         // 1. Packs de ressources, dans l'ordre ; une image illisible passe la main au suivant.
         if let Some((img, res)) = self.from_packs(ResourceKind::Texture, name, |bytes, _| Ok(image::load_from_memory(&bytes)?.to_rgba8())) {
@@ -632,20 +647,29 @@ impl Assets {
         //    sur le pack `etc` est appliqué à chaque dossier : il contient des textures sous
         //    `texture\character\high\…`, ce qui n'a de sens que si le lecteur d'images l'utilise.
         self.game_dir()?;
-        let file = format!("{name}.tx1");
+        // Les modèles récents d'Archonia nomment leurs textures avec l'extension de l'image source
+        // (`Anduril_DIFF.png`, `Red_Dragon_Cannon_D.jpg`) alors que le pack range `anduril_diff.tx1` ;
+        // d'autres gardent l'extension dans le nom du fichier (`raven_female_body.png.tx1`). Les deux
+        // formes sont essayées.
+        let stem = [".png", ".jpg", ".jpeg", ".bmp", ".tga", ".dds"].iter().find_map(|e| name.strip_suffix(e));
         let mut raw = None;
-        for dir in texture_search_path(&self.quality) {
-            if let Some(b) = self.open(&format!("{dir}\\{file}"), true)? {
-                raw = Some(b);
-                break;
+        'search: for file in std::iter::once(format!("{name}.tx1")).chain(stem.map(|s| format!("{s}.tx1"))) {
+            for dir in texture_search_path(&self.quality) {
+                if let Some(b) = self.open(&format!("{dir}\\{file}"), true)? {
+                    raw = Some(b);
+                    break 'search;
+                }
             }
         }
         let Some(raw) = raw else {
             // Pas de `.tx1` : certaines textures du monde sont des images ordinaires du pack, comme
             // le masque de fondu du sol `a0001c0t.tif` (TIFF 256×256 à quatre échantillons) dans
             // `texture\world`.
-            for ext in ["tif", "png", "bmp", "dds"] {
-                let file = format!("{name}.{ext}");
+            // Nom déjà muni de son extension (`d03d57ac.png`) : l'image telle quelle d'abord.
+            let named: Vec<String> = stem.map(|_| name.to_string()).into_iter().chain(["tif", "png", "bmp", "dds"].iter().map(|ext| format!("{name}.{ext}"))).collect();
+            for file in named {
+                let ext = file.rsplit('.').next().unwrap_or("").to_string();
+                let ext = ext.as_str();
                 for dir in texture_search_path(&self.quality) {
                     if let Some(bytes) = self.open(&format!("{dir}\\{file}"), true)? {
                         // TIFF : lecteur propre, qui garde le 4ᵉ échantillon (alpha des masques).

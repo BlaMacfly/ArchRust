@@ -120,6 +120,13 @@ pub struct GpuTexture {
     pub height: u32,
 }
 
+/// Lot d'un effet : texture (nom RenderWare ; absente = blanc), mélange et triangles.
+pub struct EffectDraw {
+    pub texture: Option<String>,
+    pub blend: crate::sky_render::EffectBlend,
+    pub vertices: Vec<Vertex>,
+}
+
 /// Instance à dessiner : maillage + transformation.
 pub struct DrawItem {
     pub mesh: Arc<Mesh>,
@@ -169,6 +176,9 @@ pub struct Renderer {
     pub sky_draw: Option<crate::sky_render::SkyDraw>,
     pub particles: Option<(String, Vec<Vertex>)>,
     pub flares: Vec<crate::sky_render::FlareDraw>,
+    /// Effets d'Archonia de l'image (`app_effects.rs`) : lots (texture, mélange, sommets en
+    /// coordonnées du monde), dessinés après les particules dans l'ordre de la liste.
+    pub effects: Vec<EffectDraw>,
     sky: crate::sky_render::SkyRenderer,
     /// Demande de capture de la prochaine image (lue dans `take_capture`).
     pub capture_next: bool,
@@ -464,6 +474,7 @@ impl Renderer {
             sky_draw: None,
             particles: None,
             flares: Vec::new(),
+            effects: Vec::new(),
             sky,
             capture_next: false,
             captured: None,
@@ -732,6 +743,21 @@ impl Renderer {
             _ => 0,
         };
         let particle_tex = self.particles.as_ref().and_then(|(t, _)| self.textures.get(&t.to_ascii_lowercase()).cloned());
+        // Effets : un seul tampon, un appel par lot.
+        let mut effect_vertices: Vec<Vertex> = Vec::new();
+        let mut effect_batches: Vec<(Arc<GpuTexture>, crate::sky_render::EffectBlend, std::ops::Range<u32>)> = Vec::new();
+        for e in &self.effects {
+            if e.vertices.is_empty() {
+                continue;
+            }
+            let tex = e.texture.as_ref().and_then(|t| self.textures.get(&t.to_ascii_lowercase())).unwrap_or(&self.white).clone();
+            let start = effect_vertices.len() as u32;
+            effect_vertices.extend_from_slice(&e.vertices);
+            effect_batches.push((tex, e.blend, start..effect_vertices.len() as u32));
+        }
+        if !effect_vertices.is_empty() {
+            self.sky.prepare_effects(&self.device, &self.queue, &effect_vertices);
+        }
         let sun_ndc = self
             .sky_draw
             .as_ref()
@@ -838,6 +864,9 @@ impl Renderer {
             // Particules de météo, après les objets opaques.
             if let Some(tex) = &particle_tex {
                 self.sky.draw_particles(&mut pass, &self.globals_bg, &tex.bind_group, particle_count);
+            }
+            for (tex, blend, range) in &effect_batches {
+                self.sky.draw_effect(&mut pass, &self.globals_bg, &tex.bind_group, *blend, range.clone());
             }
         }
         // Reflets du soleil, par-dessus la scène, cachés si le soleil l'est.

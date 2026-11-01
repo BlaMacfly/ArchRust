@@ -128,6 +128,15 @@ mod tax_glue;
 #[path = "app_assets.rs"]
 mod assets_glue;
 
+#[path = "app_cursor.rs"]
+mod cursor_glue;
+
+#[path = "app_worldmap.rs"]
+mod worldmap_glue;
+
+#[path = "app_effects.rs"]
+mod effects_glue;
+
 /// Configuration du client.
 #[derive(Debug, Clone)]
 pub struct Config {
@@ -255,6 +264,8 @@ pub struct App {
     game_clock: GameClock,
     /// Ciel, météo et musique du gabarit, voir `app_nature.rs`.
     nature: nature_glue::NatureGlue,
+    /// Effets d'Archonia joués (voir `app_effects.rs`).
+    effects: effects_glue::EffectsGlue,
     /// Groupe du joueur (paquets 0x08 / 0x09), voir `app_party.rs`.
     party: party_glue::PartyGlue,
     /// Combat, mort, résurrection et butin, voir `app_combat.rs`.
@@ -313,6 +324,10 @@ pub struct App {
     tax: tax_glue::TaxGlue,
     /// Surveillance des dossiers de packs (`assets/`, `patches/`), voir `app_assets.rs`.
     assets_watch: assets_glue::AssetsWatch,
+    /// Curseurs de la souris d'Archonia, voir `app_cursor.rs`.
+    cursor: cursor_glue::CursorGlue,
+    /// Carte du monde (`UI_WORLD_MAP`, touche M), voir `app_worldmap.rs`.
+    worldmap: worldmap_glue::WorldMapGlue,
 }
 
 impl App {
@@ -410,6 +425,7 @@ impl App {
             zone_region: None,
             game_clock: GameClock::default(),
             nature: Default::default(),
+            effects: Default::default(),
             party: Default::default(),
             combat: Default::default(),
             item_ui: Default::default(),
@@ -439,6 +455,8 @@ impl App {
             archlord: Default::default(),
             tax: Default::default(),
             assets_watch: Default::default(),
+            cursor: Default::default(),
+            worldmap: Default::default(),
         })
     }
 
@@ -1264,6 +1282,8 @@ impl App {
         self.party_observe(&ev);
         // Morts, vues des monstres, objets retirés du sol (voir `app_combat.rs`).
         self.combat_observe(&ev);
+        // Effets : montée de niveau, apprentissage, compétences, coups (voir `app_effects.rs`).
+        self.effects_observe(&ev);
         // Statut criminel et points de meurtrier (voir `app_pvp.rs`).
         self.pvp_observe(&ev);
         self.portal_observe(&ev);
@@ -1609,6 +1629,7 @@ impl App {
             // Guildes (0x15 / 0x39), voir `app_guild.rs`.
             WorldEvent::Guild(ev) => self.on_guild_event(ev),
             WorldEvent::UiStatus(st) => self.on_ui_status(st),
+            WorldEvent::Admin(a) => self.on_admin_level(a),
             WorldEvent::Pvp(ev) => self.on_pvp(ev),
             WorldEvent::Remission(ev) => self.on_remission(ev),
             WorldEvent::Convert(ev) => self.on_convert_event(ev),
@@ -1847,6 +1868,11 @@ impl App {
                     None => self.ui.show_options = !self.ui.show_options,
                 }
             }
+            // /effet <EID> [cid] : joue un jeu d'effets (voir `app_effects.rs`).
+            "/effet" | "/effect" => {
+                let line = self.effects_slash(arg);
+                self.ui.push_chat(format!("[système] {line}"));
+            }
             // /music <chemin> | off | auto : musique forcée (comme PlayMusic / StopMusic des AddOns).
             "/music" => {
                 let arg = arg.trim();
@@ -1892,7 +1918,7 @@ impl App {
                     .collect();
                 if parts.len() >= 3 {
                     let mut dest = Vec3::new(parts[0], parts[1], parts[2]);
-                    if let Some(h) = self.terrain.height_at(dest.x, dest.z) {
+                    if let Some(h) = Self::ground_height(&self.terrain, &self.objects, &self.assets, dest.x, dest.z) {
                         dest.y = h;
                     }
                     log::debug!(
@@ -2019,8 +2045,21 @@ impl App {
     /// TID du personnage local affiché en mode sans client (humain par défaut, `a0000060.ecl`).
     const LOCAL_PREVIEW_TID: i32 = 96;
 
-    /// Avance une entité vers sa destination et la pose sur le terrain.
-    fn step_entity(terrain: &Terrain, e: &mut Entity, dt: f32) {
+    /// Rayon du personnage contre les segments de blocage des `.amf` : Archonia prend celui du
+    /// modèle de personnage (`+0x3fa0`), qu'aucune table du client ne renseigne ; 0 ici.
+    const CHARACTER_RADIUS: f32 = 0.0;
+
+    /// Hauteur du sol sous (x, z) comme Archonia (`FUN_140528910`) : terrain, ou modèle de
+    /// collision d'un objet praticable (escalier, pont, dallage) s'il est plus haut.
+    fn ground_height(terrain: &Terrain, objects: &WorldObjects, assets: &Assets, x: f32, z: f32) -> Option<f32> {
+        let t = terrain.height_at(x, z)?;
+        Some(objects.ridable_height(assets, x, z).map_or(t, |o| o.max(t)))
+    }
+
+    /// Avance une entité vers sa destination et la pose sur le sol. Pour le joueur (`blocking`),
+    /// le pas s'arrête devant une cellule bloquée ou un segment du `.amf` (`FUN_14016ecd0` →
+    /// `FUN_140196ab0`) : la destination devient le point d'arrêt.
+    fn step_entity(terrain: &Terrain, objects: &WorldObjects, assets: &Assets, e: &mut Entity, dt: f32, blocking: bool) {
         let to = Vec3::new(
             e.destination.x - e.position.x,
             0.0,
@@ -2034,7 +2073,19 @@ impl App {
                 e.turn_y = turn;
             }
             let step = (e.speeds.units_per_second() * dt).min(dist);
-            e.position += to / dist * step;
+            let next = e.position + to / dist * step;
+            // Un départ dans une cellule bloquée (position imposée par le serveur) ne fige pas le
+            // joueur : il peut en sortir.
+            let stop = (blocking && !terrain.blocked(e.position.x, e.position.z))
+                .then(|| terrain.clip_move(e.position, next, Self::CHARACTER_RADIUS))
+                .filter(|c| (c.x - next.x).abs() > 0.01 || (c.z - next.z).abs() > 0.01);
+            match stop {
+                Some(c) => {
+                    e.position = Vec3::new(c.x, e.position.y, c.z);
+                    e.destination = e.position;
+                }
+                None => e.position = next,
+            }
         }
         // Les personnages de la scène de connexion (CID négatifs) gardent la hauteur de
         // `LoginSettings.txt` : ils se tiennent sur le sol d'un bâtiment (salle du trône de la
@@ -2042,7 +2093,7 @@ impl App {
         if e.cid < 0 {
             return;
         }
-        if let Some(h) = terrain.height_at(e.position.x, e.position.z) {
+        if let Some(h) = Self::ground_height(terrain, objects, assets, e.position.x, e.position.z) {
             e.position.y = h;
         }
     }
@@ -2050,11 +2101,11 @@ impl App {
     /// Simulation locale : déplacements, hauteur du sol, caméra qui suit le joueur.
     fn simulate(&mut self, dt: f32) {
         for e in self.entities.iter_mut() {
-            Self::step_entity(&self.terrain, e, dt);
+            Self::step_entity(&self.terrain, &self.objects, &self.assets, e, dt, false);
         }
         if let Some(p) = &mut self.player {
             let before = p.position;
-            Self::step_entity(&self.terrain, p, dt);
+            Self::step_entity(&self.terrain, &self.objects, &self.assets, p, dt, true);
             if before != p.position {
                 self.camera.target = p.position + Vec3::new(0.0, 100.0, 0.0);
             }
@@ -2177,7 +2228,7 @@ impl App {
             closed |= self.mail.close_windows();
             closed |= self.auction.close_windows();
             closed |= self.itemset.close_windows();
-            for open in [&mut self.ui.show_inventory, &mut self.item_ui.show_character, &mut self.skills.show_book] {
+            for open in [&mut self.ui.show_inventory, &mut self.item_ui.show_character, &mut self.skills.show_book, &mut self.worldmap.open] {
                 closed |= std::mem::take(open);
             }
             if closed {
@@ -2315,10 +2366,27 @@ impl App {
         let near = inv.project_point3(ndc);
         let far = inv.project_point3(Vec3::new(ndc.x, ndc.y, 1.0));
         let dir = (far - near).normalize_or_zero();
-        let Some(hit) = self.terrain.raycast(near, dir, self.camera.far) else {
-            return;
+        // Point cliqué : terrain, ou objet praticable (marche d'escalier, pont) plus proche.
+        let ground = self.terrain.raycast(near, dir, self.camera.far);
+        let max = ground.map_or(self.camera.far, |g| g.distance(near));
+        let hit = match self.objects.ridable_raycast(&self.assets, near, dir, max) {
+            Some(t) => near + dir * t,
+            None => match ground {
+                Some(g) => g,
+                None => return,
+            },
         };
+        // Archonia refuse une destination dans une cellule bloquée (`FUN_140168070`) et arrête
+        // le trajet devant la première rencontrée (`FUN_140196ab0`).
+        if self.terrain.blocked(hit.x, hit.z) {
+            log::debug!("destination {hit:?} bloquée");
+            return;
+        }
         let from = player.position;
+        let mut hit = if self.terrain.blocked(from.x, from.z) { hit } else { self.terrain.clip_move(from, hit, Self::CHARACTER_RADIUS) };
+        if let Some(h) = Self::ground_height(&self.terrain, &self.objects, &self.assets, hit.x, hit.z) {
+            hit.y = h;
+        }
         if let Some(p) = &mut self.player {
             p.destination = hit;
         }
@@ -2373,6 +2441,10 @@ impl App {
         // s'éloignant (voir `app_archlord.rs`, `app_tax.rs`).
         self.archlord_frame();
         self.tax_frame();
+        // Curseur d'Archonia selon ce qui est sous la souris (voir `app_cursor.rs`).
+        self.cursor_update();
+        // Carte du monde : zone, carte parente, téléportation des MJ (voir `app_worldmap.rs`).
+        self.worldmap_frame();
 
         // Déplacement clavier (ZQSD / WASD) de la caméra.
         let speed = (self.camera.distance * 0.8 * dt as f32).max(1.0);
@@ -2403,6 +2475,8 @@ impl App {
         let object_distance = self.object_draw_distance();
         // Heure, ciel, brouillard, lumières et météo (`app_nature.rs`), après les CVars.
         self.update_nature(dt as f32);
+        // Effets d'Archonia : sons et triangles de l'image (voir `app_effects.rs`).
+        self.effects_frame();
         self.update_audio(dt as f32);
         // Packs déposés dans assets/ ou patches/ en cours de jeu (`app_assets.rs`).
         self.watch_packs();
@@ -2573,6 +2647,10 @@ impl App {
                 crate::hud::draw_character(ctx, &mut self.hud, &self.assets, &mut self.item_ui.show_character, &player_name, &equipped, &mut item_requests);
                 // Barre de raccourcis avant les fenêtres d'objets : un objet lâché dessus y reste.
                 skills_glue::panel(ctx, &mut self.skills, &skill_views, &mut self.hud, &self.assets);
+                // Carte du monde (touche M) et clic des MJ sur les cartes (voir `app_worldmap.rs`).
+                if phase == Phase::InWorld {
+                    worldmap_glue::panel(ctx, &mut self.worldmap, self.player.as_ref().map(|p| p.position), &mut self.hud, &self.assets);
+                }
                 // Entrepôt de guilde avant la banque : un objet de l'entrepôt lâché dans le sac y est repris.
                 guild_glue::item_requests(&self.guild, &mut item_requests, self.net.as_ref());
                 npc_glue::panel(ctx, &mut self.npc, &npc_views, &mut item_requests, &self.items, &mut self.hud, &self.assets, self.net.as_ref(), &mut self.ui);
@@ -2714,8 +2792,10 @@ impl App {
                 },
             }
         });
+        let egui_cursor = full_output.platform_output.cursor_icon;
         gpu.egui_state
             .handle_platform_output(&gpu.window, full_output.platform_output);
+        self.cursor.apply(&gpu.window, egui_cursor);
         let paint_jobs = ctx.tessellate(full_output.shapes, full_output.pixels_per_point);
         let screen = egui_wgpu::ScreenDescriptor {
             size_in_pixels: [gpu.renderer.config.width, gpu.renderer.config.height],
@@ -2891,6 +2971,8 @@ impl ApplicationHandler for App {
                 }
             }
             WindowEvent::RedrawRequested => {
+                // Curseurs d'Archonia, créés une fois (voir `app_cursor.rs`).
+                self.cursor_load(event_loop);
                 if let Err(e) = self.frame() {
                     log::error!("rendu : {e:#}");
                 }
@@ -2992,6 +3074,15 @@ impl ApplicationHandler for App {
                     PhysicalKey::Code(KeyCode::KeyU) if down && !event.repeat && self.phase == Phase::InWorld => self.mail.toggle(),
                     // Ctrl+M : `UI_SkillMacro` (`Hotkey=2:50`), ici le commutateur d'équipement (voir `app_itemset.rs`).
                     PhysicalKey::Code(KeyCode::KeyM) if down && !event.repeat && self.phase == Phase::InWorld && self.addon_glue.modifiers.control_key() => self.itemset.toggle(),
+                    // M : carte du monde (`Hotkey=0:50` « World Map », `WorldMap_Toggle`, voir `app_worldmap.rs`).
+                    PhysicalKey::Code(KeyCode::KeyM) if down && !event.repeat && self.phase == Phase::InWorld && !self.addon_glue.modifiers.shift_key() && !self.addon_glue.modifiers.alt_key() => self.worldmap_toggle(),
+                    // O : options (`Hotkey=0:24` « Game Options », `Action=1:3:1:1:Option_Video` : onglet GFX).
+                    PhysicalKey::Code(KeyCode::KeyO) if down && !event.repeat && self.phase == Phase::InWorld => {
+                        self.ui.show_options = !self.ui.show_options;
+                        if self.ui.show_options {
+                            self.hud.options_tab = 0;
+                        }
+                    }
                     PhysicalKey::Code(KeyCode::KeyN) if down && !event.repeat && self.phase == Phase::InWorld => self.buddy.toggle_bans(),
                     PhysicalKey::Code(KeyCode::KeyK) if down && !event.repeat && self.phase == Phase::InWorld => {
                         self.skills.show_book = !self.skills.show_book

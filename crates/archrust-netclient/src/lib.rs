@@ -41,6 +41,7 @@ pub mod summons;
 pub mod tax;
 pub mod teleport;
 pub mod ui_status;
+pub mod admin;
 pub mod wanted;
 pub mod world;
 

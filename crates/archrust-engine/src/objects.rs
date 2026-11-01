@@ -20,13 +20,20 @@
 use crate::assets::Assets;
 use crate::render::{DrawItem, Mesh, Renderer};
 use crate::scene::model_meshes;
-use crate::world::{sector_of, tile_of};
+use crate::world::{sector_of, sector_origin, tile_of, triangle_height, CELLS, CELL_SIZE};
 use glam::{Mat4, Quat, Vec3};
 use std::collections::{HashMap, HashSet};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 /// Bit des drapeaux AgcmObject propre aux repères d'éditeur (catégorie « spawn »).
 pub const AGCM_OBJECT_MARKER: u32 = 0x1_0000;
+
+/// Drapeaux `ObjectType` d'ApmObject (premier `ObjectType` de la section d'un objet placé) :
+/// 0x100 range l'objet dans les listes « bloquant » des cellules qu'il couvre, 0x200 dans les
+/// listes « praticable » (`FUN_140235640`, modes 0 et 3 de `FUN_140235fc0`). La hauteur du sol
+/// d'Archonia (`FUN_140528910`) ne retient que les objets qui portent les deux.
+pub const APM_OBJECT_BLOCKING: u32 = 0x100;
+pub const APM_OBJECT_RIDABLE: u32 = 0x200;
 
 /// Objet placé, avant chargement de son modèle.
 #[derive(Debug, Clone, PartialEq)]
@@ -36,6 +43,13 @@ pub struct Placement {
     pub scale: Vec3,
     pub degree_x: f32,
     pub degree_y: f32,
+    /// `ObjectType` d'ApmObject de l'objet placé (0 si absent).
+    pub apm_flags: u32,
+}
+
+/// Premier `ObjectType` d'une section d'objet placé (celui d'ApmObject).
+fn apm_flags_of(s: &archrust_data::ini::IniSection) -> u32 {
+    s.get_all("ObjectType").next().and_then(|v| v.trim().parse().ok()).unwrap_or(0)
 }
 
 impl Placement {
@@ -72,6 +86,7 @@ pub fn tile_placements(assets: &Assets, tile: u32) -> Vec<Placement> {
                 scale: s.get("Scale").and_then(vec3_of).unwrap_or(Vec3::ONE),
                 degree_x: s.get_f32("DegreeX").unwrap_or(0.0),
                 degree_y: s.get_f32("DegreeY").unwrap_or(0.0),
+                apm_flags: apm_flags_of(s),
             })
         })
         .collect()
@@ -112,6 +127,7 @@ pub fn tile_portals(assets: &Assets, tile: u32) -> Vec<PortalObject> {
             scale: s.get("Scale").and_then(vec3_of).unwrap_or(Vec3::ONE),
             degree_x: s.get_f32("DegreeX").unwrap_or(0.0),
             degree_y: s.get_f32("DegreeY").unwrap_or(0.0),
+            apm_flags: apm_flags_of(s),
         };
         out.push(PortalObject { id, point, placement });
     }
@@ -140,6 +156,7 @@ pub fn tile_function_objects(assets: &Assets, tile: u32, function: i32) -> Vec<(
                 scale: s.get("Scale").and_then(vec3_of).unwrap_or(Vec3::ONE),
                 degree_x: s.get_f32("DegreeX").unwrap_or(0.0),
                 degree_y: s.get_f32("DegreeY").unwrap_or(0.0),
+                apm_flags: apm_flags_of(s),
             },
         ));
     }
@@ -182,9 +199,53 @@ pub fn root_inverse(assets: &Assets, file: &str) -> Mat4 {
         .unwrap_or(Mat4::IDENTITY)
 }
 
+/// Modèle de collision d'un modèle d'objet : colonne 5 `COLLISION_DFF` d'`objecttemplate.ini`
+/// (lue par AgcmObject, `FUN_1406e0250`, ex. `I00001ce.ECL` pour l'escalier `H001ce00.ECL` de
+/// Tullan), sinon le modèle dessiné.
+pub fn template_collision(assets: &Assets, tid: u32) -> Option<String> {
+    let table = assets.table("ini", "objecttemplate.ini").ok()?;
+    let t = table.section(&tid.to_string())?;
+    t.get("5")
+        .map(|f| f.trim().to_ascii_lowercase())
+        .filter(|f| !f.is_empty())
+        .or_else(|| template_model(assets, tid))
+}
+
+/// Triangles d'un clump d'objet dans le repère de l'objet (frame racine annulée).
+fn clump_triangles(assets: &Assets, file: &str) -> Option<Vec<[Vec3; 3]>> {
+    let clump = assets.clump("object", file).ok()?;
+    let root = root_inverse(assets, file);
+    let world = clump.world_matrices();
+    let mut out = Vec::new();
+    for a in &clump.atomics {
+        let (Some(g), Some(frame)) = (clump.geometries.get(a.geometry as usize), world.get(a.frame as usize)) else { continue };
+        let m = root * *frame;
+        let verts: Vec<Vec3> = g.vertices.iter().map(|v| m.transform_point3(*v)).collect();
+        for t in &g.triangles {
+            let [i, j, k] = t.v.map(|i| i as usize);
+            if let (Some(&a), Some(&b), Some(&c)) = (verts.get(i), verts.get(j), verts.get(k)) {
+                out.push([a, b, c]);
+            }
+        }
+    }
+    Some(out)
+}
+
+/// Sols praticables d'un secteur : triangles (monde) des modèles de collision des objets
+/// praticables, rangés par cellule de 400 unités comme les listes d'Archonia.
+#[derive(Default)]
+pub struct SectorFloors {
+    triangles: Vec<[Vec3; 3]>,
+    cells: Vec<Vec<u32>>,
+}
+
 /// Objets du monde chargés autour du joueur, par secteur.
 #[derive(Default)]
 pub struct WorldObjects {
+    /// Sols praticables par secteur, construits à la demande.
+    floors: Mutex<HashMap<(i32, i32), Arc<SectorFloors>>>,
+    /// Triangles de collision par modèle d'objet (`None` = sans modèle).
+    collision: Mutex<HashMap<u32, Option<Arc<Vec<[Vec3; 3]>>>>>,
     /// Tuiles dont les placements ont été lus.
     tiles: HashSet<u32>,
     /// Placements des tuiles lues, par secteur.
@@ -303,12 +364,8 @@ impl WorldObjects {
         loaded
     }
 
-    /// Lit les tuiles autour de `center`, prépare les secteurs proches (quelques-uns par image)
-    /// et oublie les lointains.
-    pub fn update(&mut self, renderer: &mut Renderer, assets: &Assets, center: Vec3) {
-        if !assets.has_client() {
-            return;
-        }
+    /// Lit les placements des tuiles à moins de `radius` secteurs de `center` (sans dessin).
+    pub fn load_tiles(&mut self, assets: &Assets, center: Vec3) {
         let (cx, cy) = sector_of(center.x, center.z);
         let r = self.radius;
         for sy in cy - r..=cy + r {
@@ -321,9 +378,138 @@ impl WorldObjects {
                         let key = sector_of(p.position.x, p.position.z);
                         self.placements.entry(key).or_default().push(p);
                     }
+                    // Des objets d'une tuile voisine peuvent couvrir des secteurs déjà construits.
+                    self.floors.lock().unwrap().clear();
                 }
             }
         }
+    }
+
+    /// Triangles de collision (repère de l'objet) d'un modèle d'objet, mis en cache.
+    fn collision_triangles(&self, assets: &Assets, tid: u32) -> Option<Arc<Vec<[Vec3; 3]>>> {
+        if let Some(t) = self.collision.lock().unwrap().get(&tid) {
+            return t.clone();
+        }
+        let tris = template_collision(assets, tid)
+            .and_then(|file| clump_triangles(assets, &file))
+            .filter(|t| !t.is_empty())
+            .map(Arc::new);
+        self.collision.lock().unwrap().insert(tid, tris.clone());
+        tris
+    }
+
+    /// Sols praticables du secteur `(sx, sy)` : objets praticables (`ObjectType` 0x300) placés
+    /// dans ce secteur ou ses voisins, triangles de collision gardés s'ils touchent le secteur.
+    fn sector_floors(&self, assets: &Assets, sx: i32, sy: i32) -> Arc<SectorFloors> {
+        if let Some(f) = self.floors.lock().unwrap().get(&(sx, sy)) {
+            return f.clone();
+        }
+        let origin = sector_origin(sx, sy);
+        let size = CELL_SIZE * CELLS as f32;
+        let mut floors = SectorFloors {
+            triangles: Vec::new(),
+            cells: vec![Vec::new(); CELLS * CELLS],
+        };
+        let wanted = APM_OBJECT_BLOCKING | APM_OBJECT_RIDABLE;
+        let placements = (-1..=1)
+            .flat_map(|dy| (-1..=1).map(move |dx| (sx + dx, sy + dy)))
+            .filter_map(|k| self.placements.get(&k))
+            .flatten()
+            .filter(|p| p.apm_flags & wanted == wanted);
+        for p in placements {
+            let Some(local) = self.collision_triangles(assets, p.tid) else { continue };
+            let m = p.matrix();
+            for t in local.iter() {
+                let w = t.map(|v| m.transform_point3(v));
+                let lo = w[0].min(w[1]).min(w[2]) - origin;
+                let hi = w[0].max(w[1]).max(w[2]) - origin;
+                if hi.x < 0.0 || hi.z < 0.0 || lo.x >= size || lo.z >= size {
+                    continue;
+                }
+                let index = floors.triangles.len() as u32;
+                floors.triangles.push(w);
+                let cell = |v: f32| ((v / CELL_SIZE).floor() as i64).clamp(0, CELLS as i64 - 1) as usize;
+                for j in cell(lo.z)..=cell(hi.z) {
+                    for i in cell(lo.x)..=cell(hi.x) {
+                        floors.cells[j * CELLS + i].push(index);
+                    }
+                }
+            }
+        }
+        let floors = Arc::new(floors);
+        self.floors.lock().unwrap().insert((sx, sy), floors.clone());
+        floors
+    }
+
+    /// Hauteur du sol des objets praticables sous (x, z), comme Archonia (`FUN_140528910`) :
+    /// rayon vertical descendant contre les modèles de collision des objets de la cellule, premier
+    /// triangle touché (le plus haut), quelle que soit la hauteur du personnage. `None` si aucun.
+    pub fn ridable_height(&self, assets: &Assets, x: f32, z: f32) -> Option<f32> {
+        let (sx, sy) = sector_of(x, z);
+        let floors = self.sector_floors(assets, sx, sy);
+        let origin = sector_origin(sx, sy);
+        let i = (((x - origin.x) / CELL_SIZE).floor() as i64).clamp(0, CELLS as i64 - 1) as usize;
+        let j = (((z - origin.z) / CELL_SIZE).floor() as i64).clamp(0, CELLS as i64 - 1) as usize;
+        floors.cells[j * CELLS + i]
+            .iter()
+            .filter_map(|&k| triangle_height(&floors.triangles[k as usize], x, z))
+            .reduce(f32::max)
+    }
+
+    /// Distance du premier triangle praticable touché par un rayon (clic au sol sur un escalier,
+    /// un pont), en suivant les cellules traversées par pas d'une demi-cellule.
+    pub fn ridable_raycast(&self, assets: &Assets, origin: Vec3, dir: Vec3, max_dist: f32) -> Option<f32> {
+        let dir = dir.normalize_or_zero();
+        if dir == Vec3::ZERO {
+            return None;
+        }
+        let mut seen: HashSet<((i32, i32), usize)> = HashSet::new();
+        let mut best: Option<f32> = None;
+        let step = CELL_SIZE * 0.5;
+        let mut t = 0.0;
+        while t <= max_dist && best.is_none_or(|b| t <= b + CELL_SIZE) {
+            let p = origin + dir * t;
+            let (sx, sy) = sector_of(p.x, p.z);
+            let o = sector_origin(sx, sy);
+            let i = (((p.x - o.x) / CELL_SIZE).floor() as i64).clamp(0, CELLS as i64 - 1) as usize;
+            let j = (((p.z - o.z) / CELL_SIZE).floor() as i64).clamp(0, CELLS as i64 - 1) as usize;
+            if seen.insert(((sx, sy), j * CELLS + i)) {
+                let floors = self.sector_floors(assets, sx, sy);
+                for &k in &floors.cells[j * CELLS + i] {
+                    let [v0, v1, v2] = floors.triangles[k as usize];
+                    let (e1, e2) = (v1 - v0, v2 - v0);
+                    let h = dir.cross(e2);
+                    let det = e1.dot(h);
+                    if det.abs() < 1e-6 {
+                        continue;
+                    }
+                    let s = origin - v0;
+                    let u = s.dot(h) / det;
+                    let q = s.cross(e1);
+                    let v = dir.dot(q) / det;
+                    if u < 0.0 || v < 0.0 || u + v > 1.0 {
+                        continue;
+                    }
+                    let d = e2.dot(q) / det;
+                    if d > 0.0 && d <= max_dist && best.is_none_or(|b| d < b) {
+                        best = Some(d);
+                    }
+                }
+            }
+            t += step;
+        }
+        best
+    }
+
+    /// Lit les tuiles autour de `center`, prépare les secteurs proches (quelques-uns par image)
+    /// et oublie les lointains.
+    pub fn update(&mut self, renderer: &mut Renderer, assets: &Assets, center: Vec3) {
+        if !assets.has_client() {
+            return;
+        }
+        self.load_tiles(assets, center);
+        let (cx, cy) = sector_of(center.x, center.z);
+        let r = self.radius;
         let keep = r + 2;
         self.sectors
             .retain(|&(sx, sy), _| (sx - cx).abs() <= keep && (sy - cy).abs() <= keep);
@@ -362,6 +548,76 @@ impl WorldObjects {
         (!spheres.is_empty()).then_some((center, radius))
     }
 
+    /// Vrai si un triangle d'un objet placé (et déjà chargé) coupe le segment `from` → `to`, hors des
+    /// `margin` dernières unités : sert à masquer le nom d'un personnage caché par le décor (voir
+    /// `app_boards.rs`). Sphère englobante d'abord, puis triangles du modèle (Möller–Trumbore).
+    pub fn segment_blocked(&self, assets: &Assets, from: Vec3, to: Vec3, margin: f32) -> bool {
+        let seg = to - from;
+        let len = seg.length();
+        if len <= margin + 1.0 {
+            return false;
+        }
+        let dir = seg / len;
+        let limit = len - margin;
+        let (a, b) = (sector_of(from.x, from.z), sector_of(to.x, to.z));
+        for sx in a.0.min(b.0) - 1..=a.0.max(b.0) + 1 {
+            for sy in a.1.min(b.1) - 1..=a.1.max(b.1) + 1 {
+                let Some(list) = self.placements.get(&(sx, sy)) else { continue };
+                for p in list {
+                    let Some((center, radius)) = self.placed_bounds(p) else { continue };
+                    let t = (center - from).dot(dir).clamp(0.0, limit);
+                    if (from + dir * t).distance(center) > radius {
+                        continue;
+                    }
+                    if Self::model_hits(assets, p, from, dir, limit) {
+                        return true;
+                    }
+                }
+            }
+        }
+        false
+    }
+
+    /// Un triangle du modèle de `p` coupe le rayon entre 1 et `limit` unités.
+    fn model_hits(assets: &Assets, p: &Placement, from: Vec3, dir: Vec3, limit: f32) -> bool {
+        let Some(file) = template_model(assets, p.tid) else { return false };
+        let Ok(clump) = assets.clump("object", &file) else { return false };
+        let root = root_inverse(assets, &file);
+        let world = clump.world_matrices();
+        let object = p.matrix();
+        for a in &clump.atomics {
+            let (Some(g), Some(frame)) = (clump.geometries.get(a.geometry as usize), world.get(a.frame as usize)) else { continue };
+            let m = object * root * *frame;
+            let verts: Vec<Vec3> = g.vertices.iter().map(|v| m.transform_point3(*v)).collect();
+            for t in &g.triangles {
+                let [i, j, k] = t.v.map(|i| i as usize);
+                let (Some(&v0), Some(&v1), Some(&v2)) = (verts.get(i), verts.get(j), verts.get(k)) else { continue };
+                let (e1, e2) = (v1 - v0, v2 - v0);
+                let h = dir.cross(e2);
+                let det = e1.dot(h);
+                if det.abs() < 1e-6 {
+                    continue;
+                }
+                let inv = 1.0 / det;
+                let s = from - v0;
+                let u = inv * s.dot(h);
+                if !(0.0..=1.0).contains(&u) {
+                    continue;
+                }
+                let q = s.cross(e1);
+                let v = inv * dir.dot(q);
+                if v < 0.0 || u + v > 1.0 {
+                    continue;
+                }
+                let dist = inv * e2.dot(q);
+                if dist > 1.0 && dist < limit {
+                    return true;
+                }
+            }
+        }
+        false
+    }
+
     /// Objets à dessiner à moins de `max_distance` de `eye`.
     pub fn draw_items(&self, eye: Vec3, max_distance: f32) -> Vec<DrawItem> {
         let mut out = Vec::new();
@@ -395,6 +651,7 @@ mod tests {
             scale: Vec3::splat(2.0),
             degree_x: 0.0,
             degree_y: 90.0,
+            apm_flags: 0,
         };
         let m = p.matrix();
         // +Z du modèle, mis à l'échelle ×2 puis tourné de 90° autour de Y : vers +X.
@@ -405,5 +662,30 @@ mod tests {
         );
         assert_eq!(vec3_of("1.5, -2,3"), Some(Vec3::new(1.5, -2.0, 3.0)));
         assert_eq!(vec3_of("1,2"), None);
+    }
+
+    /// Avec les données du client (`ARCHRUST_GAME_DIR`) : l'escalier `튤란계단a` de Tullan (TID 462,
+    /// collision `I00001ce.ECL`, posé en (-352200, 9446, 72627)) descend de 9946 à 9456 entre
+    /// z = 72260 et z = 74960, alors que la rampe du terrain tombe de 9942 à 9446 avant z = 72800 :
+    /// le sol suit les marches, plus le terrain.
+    #[test]
+    fn tullan_stairs_carry_the_walker() {
+        let Some(dir) = std::env::var_os("ARCHRUST_GAME_DIR") else { return };
+        let assets = Assets::new(Some(dir.into()), &[]);
+        let mut objects = WorldObjects::new(1);
+        objects.load_tiles(&assets, Vec3::new(-352200.0, 0.0, 73700.0));
+        let mut terrain = crate::world::Terrain::new(1);
+        assert!(terrain.load_ground(&assets, 344, 411));
+        let x = -352200.0;
+        let ground = |z: f32| {
+            let t = terrain.height_at(x, z).unwrap();
+            objects.ridable_height(&assets, x, z).map_or(t, |o| o.max(t))
+        };
+        for (z, want) in [(72440.0, 9946.2), (72980.0, 9854.0), (73340.0, 9759.9), (73880.0, 9691.2), (74600.0, 9543.2), (74960.0, 9456.5)] {
+            assert!((ground(z) - want).abs() < 1.0, "z {z} : {} au lieu de {want}", ground(z));
+        }
+        // Bas de l'escalier et rue : terrain.
+        assert!((ground(75500.0) - 9446.2).abs() < 1.0);
+        assert!((terrain.height_at(x, 73340.0).unwrap() - 9446.2).abs() < 1.0);
     }
 }

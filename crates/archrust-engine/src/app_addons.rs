@@ -4,7 +4,7 @@
 
 use super::*;
 use crate::addon_ui::{AddonUi, AddonUiOutput};
-use archrust_addons::{CameraInfo, ItemInfo, UnitInfo};
+use archrust_addons::{CameraInfo, ItemInfo, ItemTemplateInfo, UnitInfo};
 use winit::keyboard::ModifiersState;
 
 /// CVars du moteur que les AddOns peuvent lire et modifier (`GetCVar` / `SetCVar`).
@@ -71,6 +71,8 @@ pub struct AddonGlue {
     pub modifiers: ModifiersState,
     /// Signature de l'inventaire déjà transmis (évite de le reconstruire à chaque image).
     inventory_sig: Option<u64>,
+    /// Catalogue des objets pour les AddOns, lu une fois dans `ItemTemplateAll.ini`.
+    item_templates: Option<std::sync::Arc<Vec<ItemTemplateInfo>>>,
     /// Dernière valeur appliquée de `uiScale`.
     ui_scale: Option<f32>,
     /// Extensions ArchRust négociées avec le serveur monde (gardées pour chaque rechargement).
@@ -91,6 +93,44 @@ fn unit_of(e: &Entity, moving: bool) -> UnitInfo {
         facing: e.turn_y,
         moving,
     }
+}
+
+/// Catalogue des objets du client pour les AddOns, trié par TID : nom, icône (colonne `TEXTURE`, texture `l%07x`
+/// comme les icônes du HUD), niveau requis (seconde colonne `Level`, bloc `RestrictFactor`), `Type`, `Kind`, `Part`,
+/// taille de pile (`MaxStackableCount` si `IsStackable`).
+fn item_templates(assets: &Assets) -> Vec<ItemTemplateInfo> {
+    let Ok(table) = assets.table("ini", "ItemTemplateAll.ini") else {
+        return Vec::new();
+    };
+    let Some(header) = table.section("") else {
+        return Vec::new();
+    };
+    let column = |n: &str| header.entries.iter().find(|(_, v)| v.eq_ignore_ascii_case(n)).map(|(k, _)| k.clone());
+    let [name, kind_type, kind, part, level, texture, stackable, max_stack] =
+        ["Name", "Type", "Kind", "Part", "Level", "TEXTURE", "IsStackable", "MaxStackableCount"].map(column);
+    let mut list: Vec<ItemTemplateInfo> = table
+        .sections
+        .iter()
+        .filter_map(|s| {
+            let tid: i32 = s.name.parse().ok()?;
+            let get = |c: &Option<String>| c.as_ref().and_then(|c| s.get(c));
+            let num = |v: Option<&str>| v.and_then(|v| v.trim().parse::<f64>().ok()).map_or(0, |v| v as i64);
+            let icon = num(get(&texture));
+            let stack = if num(get(&stackable)) != 0 { num(get(&max_stack)).max(1) } else { 1 };
+            Some(ItemTemplateInfo {
+                tid,
+                name: get(&name).unwrap_or_default().trim().to_string(),
+                icon: if icon > 0 { format!("l{:07x}", icon as u32) } else { String::new() },
+                level: level.as_ref().map_or(0, |c| num(s.get_all(c).nth(1))),
+                item_type: num(get(&kind_type)),
+                kind: num(get(&kind)),
+                part: num(get(&part)),
+                stack,
+            })
+        })
+        .collect();
+    list.sort_by_key(|t| t.tid);
+    list
 }
 
 fn floats(v: &[f32], n: usize) -> Option<Vec<f32>> {
@@ -298,6 +338,13 @@ impl App {
     pub(super) fn enter_world_addons(&mut self) {
         let first = !self.addons.is_loaded();
         if first {
+            // Catalogue des objets (une fois par session) : avant le chargement, pour les AddOns qui le lisent tout de suite.
+            let templates = self
+                .addon_glue
+                .item_templates
+                .get_or_insert_with(|| std::sync::Arc::new(item_templates(&self.assets)))
+                .clone();
+            self.addons.set_host(|h| h.item_templates = templates);
             self.addon_glue.inventory_sig = None;
             self.sync_addons_frame();
             self.sync_addons_world();
@@ -671,5 +718,32 @@ impl App {
             _ => {}
         }
         self.apply_addon_commands();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Avec les données du client (`ARCHRUST_GAME_DIR`) : catalogue des objets donné aux AddOns.
+    #[test]
+    fn catalogue_des_objets_du_client() {
+        let Some(dir) = std::env::var_os("ARCHRUST_GAME_DIR") else { return };
+        let assets = Assets::new(Some(dir.into()), &[]);
+        let list = item_templates(&assets);
+        // ItemTemplateAll.ini et ItemTemplateAll2.ini (fusionnées), triées par TID.
+        assert!(list.len() > 20_000, "{}", list.len());
+        assert!(list.windows(2).all(|w| w[0].tid < w[1].tid));
+        let bow = list.iter().find(|t| t.tid == 1).unwrap();
+        assert_eq!((bow.name.as_str(), bow.category(), bow.stack), ("Short Bow", "weapon", 1));
+        assert!(bow.icon.starts_with('l') && bow.icon.len() == 8, "{}", bow.icon);
+        let potion = list.iter().find(|t| t.tid == 190).unwrap();
+        assert_eq!(potion.category(), "usable");
+        assert!(potion.stack > 1, "pile de potions : {}", potion.stack);
+        let shield = list.iter().find(|t| t.name == "Lionheart Shield").unwrap();
+        assert_eq!(shield.category(), "armor");
+        assert!(shield.level > 1, "niveau requis : {}", shield.level);
+        // L'icône est une texture du client (même nom que les icônes du HUD).
+        assert!(assets.texture(&bow.icon).is_ok_and(|t| t.width > 1));
     }
 }

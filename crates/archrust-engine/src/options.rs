@@ -91,16 +91,33 @@ pub struct VideoOptions {
     pub fog: bool,
     /// `LensFlare` (`OP_LensFlare`) : reflets du soleil.
     pub lens_flare: bool,
+    /// `Effect` (`OP_Effect`, « Effets », 0 à 4) : Archonia en tire `EffectField`, `EffectCombat`,
+    /// `EffectUI` et `EffectSkill` (FUN_14070fb80, voir [`VideoOptions::effect_levels`]).
+    pub effect: u8,
+    /// `DisableOtherPlayerSkillEffect` (`OP_TurnOffAllEffects`, « Désactiver les effets des autres
+    /// joueurs ») : effets des compétences des autres joueurs masqués.
+    pub hide_other_effects: bool,
 }
 
 impl Default for VideoOptions {
-    /// Valeurs de `COption.ini` d'Archonia : `Nature=2`, `LensFlare=1`, `Fog=1`, `Sky=1`.
+    /// Valeurs de `COption.ini` d'Archonia : `Nature=2`, `LensFlare=1`, `Fog=1`, `Sky=1`, `Effect=2`,
+    /// `DisableOtherPlayerSkillEffect=0`.
     fn default() -> Self {
-        Self { char_view: 3, map_view: 1, nature: 2, sky: true, fog: true, lens_flare: true }
+        Self { char_view: 3, map_view: 1, nature: 2, sky: true, fog: true, lens_flare: true, effect: 2, hide_other_effects: false }
     }
 }
 
 impl VideoOptions {
+    /// Niveaux (terrain, combat, interface, compétences) d'`OP_Effect`, comme FUN_14070fb80 :
+    /// 0 → (0, 0, 0, 0) ; 1 → (1, 1, 0, 1) ; 2 → (2, 2, 1, 1) ; 3 → (3, 3, 1, 1) ; 4 → (4, 4, 1, 1).
+    pub fn effect_levels(&self) -> (u8, u8, u8, u8) {
+        match self.effect.min(4) {
+            0 => (0, 0, 0, 0),
+            1 => (1, 1, 0, 1),
+            n => (n, n, 1, 1),
+        }
+    }
+
     /// Facteur de densité des particules de météo selon `Nature` (hypothèse : 1/3, 2/3, 1).
     pub fn nature_density(&self) -> f32 {
         [1.0 / 3.0, 2.0 / 3.0, 1.0][self.nature.min(2) as usize]

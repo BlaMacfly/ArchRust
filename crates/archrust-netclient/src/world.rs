@@ -111,6 +111,57 @@ pub struct CharacterStats {
     pub criminal: Option<i8>,
     pub criminal_left: Option<i64>,
     pub murderer_left: Option<i64>,
+    /// Facteurs détaillés reçus (fenêtre `Character_Status`), par (partie, indice) : voir
+    /// [`factor_part`]. Le « résultat » (champ 0 des facteurs, équipement compris) l'emporte.
+    pub factors: std::collections::BTreeMap<(u8, u8), i32>,
+}
+
+/// Parties de [`CharacterStats::factors`] : numéro du sous-paquet d'AGPMCHAR_FACTORS, et pour les
+/// dégâts et la défense (deux attributs chacun) une partie par moitié.
+pub mod factor_part {
+    /// `FACTOR_STATUS` : 0 CON, 1 STR, 2 INT, 3 DEX, 4 CHA, 5 LUK, 6 WIS (× 100), 7 niveau…
+    pub const STATUS: u8 = 1;
+    /// `FACTOR_POINTMAX` : 0 PV, 1 PM, 2 PE, … 8 attaque (AR), 9 défense (DR).
+    pub const POINT_MAX: u8 = 4;
+    /// `FACTOR_ATTRIBUTE` (15 attributs : 0 physique, 1 magie, 2 eau, 3 feu, 4 terre, 5 air,
+    /// 6 poison, 7 foudre, 8 glace, 9 blocage, 10 blocage de compétence, 11 héroïque…).
+    pub const ATTRIBUTE: u8 = 6;
+    /// `FACTOR_DMG` : minimum et maximum par attribut.
+    pub const DAMAGE_MIN: u8 = 7;
+    pub const DAMAGE_MAX: u8 = 17;
+    /// `FACTOR_DEFENSE` : points et taux par attribut.
+    pub const DEFENSE_POINT: u8 = 8;
+    pub const DEFENSE_RATE: u8 = 18;
+    /// `FACTOR_ATTACK` : 0 portée, 1 ?, 2 vitesse d'attaque…
+    pub const ATTACK: u8 = 9;
+}
+
+/// Facteurs détaillés d'un paquet AGPMCHAR_FACTORS (voir [`factor_part`]).
+fn decode_factor_map(values: &[Option<Value>]) -> std::collections::BTreeMap<(u8, u8), i32> {
+    use factor_part as fp;
+    let mut out = std::collections::BTreeMap::new();
+    let bytes = |v: &[Option<Value>], i: usize| v.get(i).and_then(Option::as_ref).and_then(Value::as_bytes).map(<[u8]>::to_vec);
+    let mut ints = |part: u8, schema: &'static archrust_protocol::schema::Schema, b: Option<Vec<u8>>| {
+        if let Some((_, v)) = b.and_then(|b| decode_mini(schema, &b).ok()) {
+            for (i, x) in v.iter().enumerate() {
+                if let Some(x) = x.as_ref().and_then(Value::as_i64) {
+                    out.insert((part, i as u8), x as i32);
+                }
+            }
+        }
+    };
+    ints(fp::STATUS, mini::FACTOR_STATUS, bytes(values, 1));
+    ints(fp::POINT_MAX, mini::FACTOR_POINTMAX, bytes(values, 4));
+    ints(fp::ATTRIBUTE, mini::FACTOR_ATTRIBUTE, bytes(values, 6));
+    ints(fp::ATTACK, mini::FACTOR_ATTACK, bytes(values, 9));
+    for (index, schema, parts) in [(7, mini::FACTOR_DMG, [fp::DAMAGE_MIN, fp::DAMAGE_MAX]), (8, mini::FACTOR_DEFENSE, [fp::DEFENSE_POINT, fp::DEFENSE_RATE])] {
+        if let Some((_, pair)) = bytes(values, index).and_then(|b| decode_mini(schema, &b).ok()) {
+            for (k, part) in parts.into_iter().enumerate() {
+                ints(part, mini::FACTOR_ATTRIBUTE, bytes(&pair, k));
+            }
+        }
+    }
+    out
 }
 
 /// Effet actif d'une compétence sur un personnage (AGPMSKILL op 4).
@@ -266,6 +317,8 @@ pub enum WorldEvent {
     Guild(crate::guild::GuildEvent),
     /// Potions de la barre et seuils de leur prise automatique, reçus à l'entrée en jeu.
     UiStatus(crate::ui_status::UiStatus),
+    /// Niveau MJ d'un personnage (AgpmAdmin op 0, voir `admin`).
+    Admin(crate::admin::AdminLevel),
     /// Combat entre joueurs (AgpmPvP, voir `pvp`).
     Pvp(crate::pvp::PvpEvent),
     /// Rémission (AgpmRemission, voir `remission`).
@@ -479,6 +532,14 @@ pub fn decode_character_stats(bytes: &[u8]) -> Option<CharacterStats> {
         walk_speed: int(&status, 8).map(|v| v as i32),
         run_speed: int(&status, 9).map(|v| v as i32),
         murderer: int(&status, 11).map(|v| v as i32),
+        // Facteurs détaillés : ceux du paquet, puis le « résultat » (champ 0) par-dessus.
+        factors: {
+            let mut map = decode_factor_map(&values);
+            if let Some((_, result)) = values.get(0).and_then(Option::as_ref).and_then(Value::as_bytes).and_then(|b| decode_mini(mini::CHAR_FACTORS, b).ok()) {
+                map.extend(decode_factor_map(&result));
+            }
+            map
+        },
         ..Default::default()
     })
 }
@@ -739,6 +800,10 @@ pub fn translate(p: &Incoming) -> WorldEvent {
     // Statut d'interface (voir `ui_status`).
     if let Some(st) = p.packet.as_ref().and_then(|packet| crate::ui_status::translate(p.packet_type, &packet.values)) {
         return WorldEvent::UiStatus(st);
+    }
+    // Niveau MJ (voir `admin`).
+    if let Some(a) = p.packet.as_ref().and_then(|packet| crate::admin::translate(p.packet_type, &packet.values)) {
+        return WorldEvent::Admin(a);
     }
     // Guildes (voir `guild`).
     if let Some(ev) = p.packet.as_ref().and_then(|packet| crate::guild::translate(p.packet_type, &packet.values, &p.raw)) {
@@ -2092,7 +2157,17 @@ mod tests {
         let stats = decode_character_stats(&factors).unwrap();
         assert_eq!(
             stats,
-            CharacterStats { level: Some(5), hp: Some(80), mp: Some(30), max_hp: Some(120), max_mp: Some(40), exp: Some(1234 + (1u64 << 32)), ..Default::default() }
+            CharacterStats {
+                level: Some(5),
+                hp: Some(80),
+                mp: Some(30),
+                max_hp: Some(120),
+                max_mp: Some(40),
+                exp: Some(1234 + (1u64 << 32)),
+                // Facteurs détaillés (fenêtre du personnage) : statut 7 et maxima 0, 1.
+                factors: [((factor_part::STATUS, 7), 5), ((factor_part::POINT_MAX, 0), 120), ((factor_part::POINT_MAX, 1), 40)].into_iter().collect(),
+                ..Default::default()
+            }
         );
     }
 

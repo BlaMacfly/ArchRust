@@ -124,6 +124,13 @@ pub use tax_ui::{draw_announce, draw_tax_window, TaxView};
 #[path = "hud_boss.rs"]
 mod boss_ui;
 pub use boss_ui::{draw_boss, draw_boss_button, draw_boss_dps, BossDetail, BossEntry, BossUi, BossView, DpsRow, BOSS_LIST_ROWS};
+
+#[path = "hud_worldmap.rs"]
+mod worldmap_ui;
+pub use worldmap_ui::{draw_world_map, map_to_world, world_to_map, WorldMapUi, WorldMapView};
+
+#[path = "hud_status.rs"]
+mod status_ui;
 pub use options_ui::{draw_options, OptionsEdit, OptionsOut};
 pub use login_ui::{draw_char_create, draw_char_select, CharSlotView, CreateUi, SelectUi};
 pub use menu_ui::{draw_main_menu, main_menu_open, toggle_options_menu, MenuUi};
@@ -131,7 +138,7 @@ pub use party_ui::{draw_party, party_face, PartyFrame, PartyFrames, PartyUi, Par
 pub use dialogs_ui::{info_box, confirm_box, draw_bank_money, draw_buy_count, draw_split, ui_message};
 pub use guild_ui::{draw_battle_texts, draw_guild_warehouse, draw_guild_window, draw_gware_money, draw_message_box, GridCell, GuildEdit, GuildRow, GuildUi, GuildView, GwareItem, GwareView, ListSpec, PageColors};
 pub use portal_ui::{draw_buy_bank, draw_loading, draw_reconnect_hold, draw_remission, draw_teleport, BuyBankView, PortalUi, RemissionUi, RemissionView, TeleportRow, TeleportView};
-pub use skills_ui::{draw_quickbar, draw_skill_book, draw_trainer, BookEntry, BookView, Shortcut, SkillUi, SlotView, TrainerEntry, TrainerView};
+pub use skills_ui::{draw_quickbar, draw_skill_book, draw_trainer, BookEntry, BookView, Shortcut, SkillUi, SlotView, TrainerEntry, TrainerView, EXTRA_BELTS, QUICK_SLOTS};
 pub use npc_ui::{draw_bank, draw_npc_dialog, draw_quests, draw_shop, BankView, DialogView, NpcUi, QuestEntry, QuestState, QuestView, ShopEntry, ShopView};
 
 /// Fenêtres de guilde d'Archonia (voir `hud_guild.rs`).
@@ -198,6 +205,9 @@ pub struct UiWindow {
     pub name: String,
     /// Position en 1920 × 1080 (UIPosition, index 1).
     pub pos: [f32; 2],
+    /// `Pos=` du fichier d'interface (disposition 1024 × 768, `UIPos=0`) : sert à placer une
+    /// fenêtre par rapport à une autre (listes des menus principaux au-dessus de leur bouton).
+    pub pos0: [f32; 2],
     pub size: [f32; 2],
     pub textures: Vec<(u32, String)>,
     pub controls: Vec<UiControl>,
@@ -276,7 +286,10 @@ impl UiWindow {
                                 c.grid_name = v.rsplit(':').next().map(str::trim).filter(|n| !n.is_empty() && n.parse::<f32>().is_err()).map(str::to_string);
                             }
                         }
-                        ("Pos", None) => w.pos = pair(v).unwrap_or_default(),
+                        ("Pos", None) => {
+                            w.pos = pair(v).unwrap_or_default();
+                            w.pos0 = w.pos;
+                        }
                         ("Size", None) => w.size = pair(v).unwrap_or_default(),
                         ("Texture", None) => w.textures.extend(texture_entry(v)),
                         ("UIPos", None) => {
@@ -406,6 +419,11 @@ impl HudState {
         st.cash = s.cash.or(st.cash);
         st.bank_pages = s.bank_pages.or(st.bank_pages);
         st.skill_points = s.skill_points.or(st.skill_points);
+        // Facteurs détaillés (fenêtre `Character_Status`, voir `hud_status.rs`) et minuteries PvP.
+        st.factors.extend(s.factors.iter().map(|(k, v)| (*k, *v)));
+        st.murderer = s.murderer.or(st.murderer);
+        st.criminal_left = s.criminal_left.or(st.criminal_left);
+        st.murderer_left = s.murderer_left.or(st.murderer_left);
     }
 
     pub fn add_buff(&mut self, skill_tid: i32, duration_ms: u64) {
@@ -488,13 +506,15 @@ impl HudState {
                 .chain(boss_ui::BOSS_WINDOWS.iter())
                 .chain(siege_ui::SIEGE_WINDOWS.iter())
                 .chain(tax_ui::TAX_WINDOWS.iter())
+                .chain(worldmap_ui::WORLDMAP_WINDOWS.iter())
+                .chain(skills_ui::QUICKBELT_WINDOWS.iter())
                 .filter_map(|n| UiWindow::parse(&ui, pos.as_deref(), n))
                 .collect();
             // Textes fixes du dossier de langue (`ini_fr/UI_1024X768.ini`…, mêmes contrôles) pour les
             // fenêtres qui les affichent tels quels ; rien à remplacer en anglais (`ini`).
             let lang = crate::assets::text_dir();
             if let Some(fr) = (lang != "ini").then(|| assets.table(lang, "UI_1024X768.ini").ok()).flatten() {
-                for w in list.iter_mut().filter(|w| ["UI_Teleport", "UI_BuyBank", "UI_Bank", "UI_SplitItem", "UI_NPCTrade_BuyStackCount", "UI_BankConfirm", "UI_Party", "UI_SelfCharacterMenu", "UI_TargetCharacterMenu", "UI_PartyOption", "UI_LG_CHARSELECT", "UI_ConfirmDeleteChar", "UI_LG_CHARCREATE", "UI_ReconnectHold", "UI_Remission"].contains(&w.name.as_str()) || GUILD_WINDOWS.contains(&w.name.as_str()) || menu_ui::MENU_WINDOWS.contains(&w.name.as_str()) || options_ui::OPTION_WINDOWS.contains(&w.name.as_str()) || convert_ui::CONVERT_WINDOWS.contains(&w.name.as_str()) || refinery_ui::REFINERY_WINDOWS.contains(&w.name.as_str()) || repair_ui::REPAIR_WINDOWS.contains(&w.name.as_str()) || product_ui::PRODUCT_WINDOWS.contains(&w.name.as_str()) || buddy_ui::BUDDY_WINDOWS.contains(&w.name.as_str()) || mail_ui::MAIL_WINDOWS.contains(&w.name.as_str()) || auction_ui::AUCTION_WINDOWS.contains(&w.name.as_str()) || chat_ui::CHAT_WINDOWS.contains(&w.name.as_str()) || customize_ui::CUSTOMIZE_WINDOWS.contains(&w.name.as_str()) || wanted_ui::WANTED_WINDOWS.contains(&w.name.as_str()) || summons_ui::SUMMONS_WINDOWS.contains(&w.name.as_str()) || shrine_ui::SHRINE_WINDOWS.contains(&w.name.as_str()) || boss_ui::BOSS_WINDOWS.contains(&w.name.as_str()) || siege_ui::SIEGE_WINDOWS.contains(&w.name.as_str()) || tax_ui::TAX_WINDOWS.contains(&w.name.as_str())) {
+                for w in list.iter_mut().filter(|w| ["Character_Status", "UI_WORLD_MAP", "UI_Teleport", "UI_BuyBank", "UI_Bank", "UI_SplitItem", "UI_NPCTrade_BuyStackCount", "UI_BankConfirm", "UI_Party", "UI_SelfCharacterMenu", "UI_TargetCharacterMenu", "UI_PartyOption", "UI_LG_CHARSELECT", "UI_ConfirmDeleteChar", "UI_LG_CHARCREATE", "UI_ReconnectHold", "UI_Remission"].contains(&w.name.as_str()) || GUILD_WINDOWS.contains(&w.name.as_str()) || menu_ui::MENU_WINDOWS.contains(&w.name.as_str()) || options_ui::OPTION_WINDOWS.contains(&w.name.as_str()) || convert_ui::CONVERT_WINDOWS.contains(&w.name.as_str()) || refinery_ui::REFINERY_WINDOWS.contains(&w.name.as_str()) || repair_ui::REPAIR_WINDOWS.contains(&w.name.as_str()) || product_ui::PRODUCT_WINDOWS.contains(&w.name.as_str()) || buddy_ui::BUDDY_WINDOWS.contains(&w.name.as_str()) || mail_ui::MAIL_WINDOWS.contains(&w.name.as_str()) || auction_ui::AUCTION_WINDOWS.contains(&w.name.as_str()) || chat_ui::CHAT_WINDOWS.contains(&w.name.as_str()) || customize_ui::CUSTOMIZE_WINDOWS.contains(&w.name.as_str()) || wanted_ui::WANTED_WINDOWS.contains(&w.name.as_str()) || summons_ui::SUMMONS_WINDOWS.contains(&w.name.as_str()) || shrine_ui::SHRINE_WINDOWS.contains(&w.name.as_str()) || boss_ui::BOSS_WINDOWS.contains(&w.name.as_str()) || siege_ui::SIEGE_WINDOWS.contains(&w.name.as_str()) || tax_ui::TAX_WINDOWS.contains(&w.name.as_str())) {
                     let Some(fw) = UiWindow::parse(&fr, None, &w.name) else { continue };
                     for c in &mut w.controls {
                         if let Some(d) = fw.control(&c.name).and_then(|x| x.display.clone()) {
@@ -1100,6 +1120,21 @@ fn control_image(
     );
 }
 
+/// Fond d'une fenêtre : l'image d'origine posée au pixel près depuis le coin haut gauche, jamais
+/// étirée. Certaines fenêtres sont un peu plus grandes que leur fond (`Character_Status` 570 × 500
+/// pour `CS_Back.png` 553 × 487, `MailBox` 350 pour 346, `UI_Auction` 1197 pour 1191) : étiré à la
+/// taille de la fenêtre, le fond décalait ses cases et sa croix de fermeture par rapport aux
+/// contrôles (cadre de survol décalé, croix « hors de son emplacement »).
+fn window_image(ctx: &egui::Context, hud: &mut HudState, assets: &Assets, painter: &egui::Painter, rect: Rect, size: [f32; 2], name: &str) {
+    let Some((tex, orig)) = hud.image(ctx, assets, name) else {
+        return;
+    };
+    let part = [(orig[0] / size[0].max(1.0)).min(1.0), (orig[1] / size[1].max(1.0)).min(1.0)];
+    let uv_max = Pos2::new((size[0] / orig[0]).min(1.0), (size[1] / orig[1]).min(1.0));
+    let draw = Rect::from_min_size(rect.min, Vec2::new(rect.width() * part[0], rect.height() * part[1]));
+    painter.image(tex, draw, Rect::from_min_max(Pos2::ZERO, uv_max), Color32::WHITE);
+}
+
 /// Texture « au repos » d'un bouton : celle en `…a.png`, sinon la première.
 fn button_texture(c: &UiControl) -> Option<&str> {
     c.textures
@@ -1331,6 +1366,26 @@ fn draw_minimap(
             Color32::WHITE,
         );
     }
+}
+
+/// Point du monde (x, z) sous un clic gauche sur la carte de la minicarte, pour la téléportation
+/// des MJ (voir `app_worldmap.rs`) : le raster de `MINIMAP_RASTER` px centré sur le joueur couvre
+/// le contrôle de type 16, comme dans `update_minimap`.
+pub fn minimap_click(ctx: &egui::Context, hud: &mut HudState, assets: &Assets, player: Vec3) -> Option<[f32; 2]> {
+    let w = hud.windows(assets).iter().find(|w| w.name == "MiniMap").cloned()?;
+    let view = w.controls.iter().find(|c| c.kind == 16)?;
+    let layout = Layout::new(ctx.screen_rect());
+    let r = layout.rect(layout.window_origin(&w), view.pos, view.size);
+    let mut hit = None;
+    egui::Area::new(egui::Id::new("archrust-minimap-gm")).fixed_pos(r.min).order(egui::Order::Middle).show(ctx, |ui| {
+        let (_, resp) = ui.allocate_exact_size(r.size(), egui::Sense::click());
+        if let Some(p) = resp.clicked().then(|| resp.interact_pointer_pos()).flatten() {
+            let per = MINIMAP_RASTER / MINIMAP_PX_PER_UNIT / r.width().max(1.0);
+            let d = p - r.center();
+            hit = Some([player.x + d.x * per, player.z + d.y * per]);
+        }
+    });
+    hit
 }
 
 /// Quart de tuile, nom de fichier et coordonnées locales (px) d'un point du monde.

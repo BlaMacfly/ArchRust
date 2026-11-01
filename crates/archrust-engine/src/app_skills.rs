@@ -12,7 +12,8 @@
 
 use super::App;
 use crate::assets::Assets;
-use crate::hud::{BookEntry, BookView, HudState, Shortcut, SkillUi, SlotView, TrainerEntry, TrainerView};
+use crate::hud::{BookEntry, BookView, HudState, Shortcut, SkillUi, SlotView, TrainerEntry, TrainerView, EXTRA_BELTS, QUICK_SLOTS};
+use egui::Color32;
 use crate::net::NetLink;
 use archrust_netclient::items::ItemCommand;
 use archrust_netclient::npc::function;
@@ -62,6 +63,14 @@ struct Level {
     require_point: i32,
     cost: i64,
     upgrade_cost: i64,
+    /// Coûts (PV, PM, flèches), temps d'incantation, de relance et durée en ms (`cost_hp`, `cost_mp`,
+    /// `cost_arrow`, `cast_time`, `recast_time`, `duration`), pour l'infobulle.
+    cost_hp: i64,
+    cost_mp: i64,
+    cost_arrow: i64,
+    cast_ms: i64,
+    recast_ms: i64,
+    duration_ms: i64,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -76,6 +85,43 @@ struct SkillData {
 #[derive(Default)]
 struct SkillTables {
     by_tid: HashMap<i32, SkillData>,
+    /// `skilltooltip.txt` par nom de compétence (en minuscules) : description et colonnes marquées « V ».
+    tips: HashMap<String, TipRow>,
+    /// Même table dans le dossier de langue (description traduite), si ses noms correspondent.
+    tips_local: HashMap<String, TipRow>,
+}
+
+/// Ligne de `skilltooltip.txt` : ce que l'infobulle d'Archonia montre pour une compétence.
+#[derive(Debug, Clone, Default)]
+struct TipRow {
+    description: String,
+    shown: std::collections::HashSet<String>,
+}
+
+/// `skilltooltip.txt` : en-tête (`Name`, `Description`, `Level`, …, `RequiredLevel`, `CostMP`,
+/// `CastTime`…), puis une ligne par compétence où « V » marque les lignes à montrer.
+fn parse_tips(text: &str) -> HashMap<String, TipRow> {
+    let mut lines = text.lines();
+    let header: Vec<String> = lines.next().unwrap_or("").split('\t').map(|h| h.trim().to_string()).collect();
+    let mut out = HashMap::new();
+    for line in lines {
+        let f: Vec<&str> = line.split('\t').collect();
+        let name = f.first().map(|s| s.trim()).unwrap_or("");
+        if name.is_empty() {
+            continue;
+        }
+        let description = f.get(1).map(|s| s.trim()).filter(|d| !d.eq_ignore_ascii_case("V")).unwrap_or("").to_string();
+        let shown = f.iter().enumerate().skip(2).filter(|(_, v)| v.trim().eq_ignore_ascii_case("V")).filter_map(|(i, _)| header.get(i).cloned()).collect();
+        out.entry(name.to_lowercase()).or_insert(TipRow { description, shown });
+    }
+    out
+}
+
+/// Durée en ms écrite en secondes (« 2 s », « 7,45 s »).
+fn seconds(ms: i64) -> String {
+    let text = format!("{:.2}", ms as f64 / 1000.0);
+    let text = text.trim_end_matches('0').trim_end_matches('.');
+    format!("{} s", text.replace('.', ","))
 }
 
 fn load_tables(assets: &Assets) -> SkillTables {
@@ -120,6 +166,12 @@ fn load_tables(assets: &Assets) -> SkillTables {
             require_point: num(c_point) as i32,
             cost: num(c_cost) as i64,
             upgrade_cost: num(c_up) as i64,
+            cost_hp: num(col("cost_hp")) as i64,
+            cost_mp: num(col("cost_mp")) as i64,
+            cost_arrow: num(col("cost_arrow")) as i64,
+            cast_ms: num(col("cast_time")) as i64,
+            recast_ms: num(col("recast_time")) as i64,
+            duration_ms: num(col("duration")) as i64,
         });
     }
     // SKILLTEMPLATE.ini : TID → nom.
@@ -134,7 +186,10 @@ fn load_tables(assets: &Assets) -> SkillTables {
             tables.by_tid.insert(tid, SkillData { name, levels, kind });
         }
     }
-    log::info!("compétences : {} modèle(s), {} décrite(s) par SKILL_CONST", tables.by_tid.len(), by_name.len());
+    // Infobulles : `skilltooltip.txt` anglais (noms de SKILLTEMPLATE) et celui du dossier de langue.
+    tables.tips = parse_tips(&super::npc_glue::client_text_in(assets, "ini", "skilltooltip.txt"));
+    tables.tips_local = parse_tips(&super::npc_glue::client_text(assets, "skilltooltip.txt"));
+    log::info!("compétences : {} modèle(s), {} décrite(s) par SKILL_CONST, {} infobulle(s)", tables.by_tid.len(), by_name.len(), tables.tips.len());
     tables
 }
 
@@ -151,7 +206,10 @@ pub struct SkillsGlue {
     trainer_selected: Option<i32>,
     /// Fin du délai de relance par identifiant (et durée totale).
     cooldowns: HashMap<i32, (Instant, Duration)>,
-    slots: [Option<Shortcut>; 12],
+    /// Cases : potions, barre principale, puis les barres en plus (`QUICK_SLOTS`).
+    slots: Vec<Option<Shortcut>>,
+    /// Barres en plus affichées (`UI_QuickBelt_1…`, flèches de la barre).
+    belts: usize,
     /// Personnage dont la barre est chargée.
     slots_owner: Option<String>,
     /// Demandes des fenêtres, traitées à l'image suivante (la passe egui tient le GPU emprunté).
@@ -171,6 +229,43 @@ impl SkillsGlue {
 
     fn name(&mut self, assets: &Assets, tid: i32) -> String {
         self.tables(assets).by_tid.get(&tid).map(|d| d.name.clone()).unwrap_or_else(|| format!("Compétence {tid}"))
+    }
+
+    /// Infobulle d'une compétence au niveau `level` (1 et plus ; 0 : le premier niveau), comme celle
+    /// d'Archonia : nom, niveau, description, puis les lignes que `skilltooltip.txt` marque (libellés
+    /// de `sysstr.txt` 67 à 79 : niveau requis, points, incantation, relance, durée, coûts).
+    fn tooltip(&mut self, assets: &Assets, tid: i32, level: i32) -> Vec<(String, Color32)> {
+        let name = self.name(assets, tid);
+        let tables = self.tables(assets);
+        let data = tables.by_tid.get(&tid);
+        let key = data.map(|d| d.name.to_lowercase()).unwrap_or_default();
+        let row = tables.tips.get(&key).cloned();
+        let description = tables.tips_local.get(&key).map(|r| r.description.clone()).filter(|d| !d.is_empty()).or_else(|| row.as_ref().map(|r| r.description.clone())).unwrap_or_default();
+        let lv = data.and_then(|d| d.levels.get((level.max(1) - 1) as usize).or(d.levels.last())).cloned();
+        let mut lines = vec![(name, Color32::from_rgb(255, 210, 110))];
+        if level > 0 {
+            lines.push((format!("Niveau {level}"), Color32::from_rgb(255, 235, 170)));
+        }
+        if !description.is_empty() {
+            lines.push((description, Color32::from_rgb(225, 225, 225)));
+        }
+        let (Some(row), Some(lv)) = (row, lv) else { return lines };
+        let rows: [(&str, u32, Option<String>); 8] = [
+            ("RequiredLevel", 67, (lv.require_level > 0).then(|| lv.require_level.to_string())),
+            ("RequiredPoints", 68, (lv.require_point > 0).then(|| lv.require_point.to_string())),
+            ("CastTime", 69, (lv.cast_ms > 0).then(|| seconds(lv.cast_ms))),
+            ("RecastTime", 70, (lv.recast_ms > 0).then(|| seconds(lv.recast_ms))),
+            ("Duration", 71, (lv.duration_ms > 0).then(|| seconds(lv.duration_ms))),
+            ("CostHP", 77, (lv.cost_hp > 0).then(|| lv.cost_hp.to_string())),
+            ("CostMP", 78, (lv.cost_mp > 0).then(|| lv.cost_mp.to_string())),
+            ("CostArrow", 79, (lv.cost_arrow > 0).then(|| lv.cost_arrow.to_string())),
+        ];
+        for (column, label, value) in rows {
+            let Some(value) = value.filter(|_| row.shown.contains(column)) else { continue };
+            let label = super::npc_glue::sysstr(assets, label).unwrap_or_else(|| column.to_string());
+            lines.push((format!("{label} : {value}"), Color32::from_rgb(200, 220, 255)));
+        }
+        lines
     }
 
     fn id_of(&self, tid: i32) -> Option<i32> {
@@ -198,14 +293,19 @@ fn slots_path(dir: &Path, name: &str) -> PathBuf {
     dir.join(format!("raccourcis-{safe}.txt"))
 }
 
-/// Barre enregistrée : une ligne « case sorte TID » (sorte : compétence ou objet).
-fn load_slots(dir: &Path, name: &str) -> [Option<Shortcut>; 12] {
-    let mut slots = [None; 12];
+/// Barre enregistrée : une ligne « case sorte TID » (sorte : compétence ou objet ; cases 12 et
+/// plus : barres en plus) et une ligne « barres n » (barres en plus affichées).
+fn load_slots(dir: &Path, name: &str) -> (Vec<Option<Shortcut>>, usize) {
+    let mut slots = vec![None; QUICK_SLOTS];
+    let mut belts = 0;
     for line in std::fs::read_to_string(slots_path(dir, name)).unwrap_or_default().lines() {
         let f: Vec<&str> = line.split_whitespace().collect();
+        if let ["barres", n] = f.as_slice() {
+            belts = n.parse::<usize>().unwrap_or(0).min(EXTRA_BELTS);
+        }
         if let [slot, kind, tid] = f.as_slice() {
             if let (Ok(slot), Ok(tid)) = (slot.parse::<usize>(), tid.parse::<i32>()) {
-                if slot < 12 {
+                if slot < QUICK_SLOTS {
                     slots[slot] = match *kind {
                         "competence" => Some(Shortcut::Skill(tid)),
                         "objet" => Some(Shortcut::Item(tid)),
@@ -215,11 +315,12 @@ fn load_slots(dir: &Path, name: &str) -> [Option<Shortcut>; 12] {
             }
         }
     }
-    slots
+    (slots, belts)
 }
 
-fn save_slots(dir: &Path, name: &str, slots: &[Option<Shortcut>; 12]) {
-    let mut text = String::from("# Barre de raccourcis d'ArchRust : case (0 à 11) sorte TID\n");
+fn save_slots(dir: &Path, name: &str, slots: &[Option<Shortcut>], belts: usize) {
+    let mut text = String::from("# Barre de raccourcis d'ArchRust : case (0 à 11, puis 12 et plus pour les barres en plus) sorte TID\n");
+    text.push_str(&format!("barres {belts}\n"));
     for (i, s) in slots.iter().enumerate() {
         match s {
             Some(Shortcut::Skill(t)) => text.push_str(&format!("{i} competence {t}\n")),
@@ -238,7 +339,8 @@ fn save_slots(dir: &Path, name: &str, slots: &[Option<Shortcut>; 12]) {
 pub struct SkillViews {
     book: Vec<BookEntry>,
     trainer: Option<(String, Vec<TrainerEntry>)>,
-    slots: [SlotView; 12],
+    slots: Vec<SlotView>,
+    belts: usize,
     points: Option<i32>,
     auto: [u8; 2],
 }
@@ -246,7 +348,7 @@ pub struct SkillViews {
 /// Fenêtres et barre ; les demandes attendent `App::skills_frame`.
 pub fn panel(ctx: &egui::Context, glue: &mut SkillsGlue, views: &SkillViews, hud: &mut HudState, assets: &Assets) {
     let mut out = Vec::new();
-    crate::hud::draw_quickbar(ctx, hud, assets, &views.slots, views.auto, &mut out);
+    crate::hud::draw_quickbar(ctx, hud, assets, &views.slots, views.belts, views.auto, &mut out);
     if glue.show_book {
         crate::hud::draw_skill_book(ctx, hud, assets, BookView { entries: &views.book, points: views.points, first: &mut glue.book_first }, &mut out);
     }
@@ -421,7 +523,7 @@ impl App {
             if self.skills.auto_at[k].is_some_and(|t| t.elapsed() < AUTO_POTION_GAP) {
                 continue;
             }
-            let Some(Shortcut::Item(tid)) = self.skills.slots[k] else { continue };
+            let Some(Some(Shortcut::Item(tid))) = self.skills.slots.get(k).copied() else { continue };
             // Sans potion dans le sac : rien (pas de message à chaque image).
             if !self.items.values().any(|i| i.template_id == Some(tid) && i.status == Some(2)) {
                 continue;
@@ -431,8 +533,20 @@ impl App {
         }
     }
 
-    /// Touches 1 à = : cases de la barre (potions sur 1 et 2).
+    /// Touches 1 à = : cases de la barre (potions sur 1 et 2). Maj, Ctrl et Alt + 3 à = : cases des
+    /// barres en plus 1, 2 et 3 (`Hotkey=1:4…`, `2:4…`, `3:4…` « Quick Slot 2-1… 4-10 » d'Archonia ;
+    /// la barre 4 n'a pas de touches).
     pub(super) fn skills_key(&mut self, code: KeyCode) -> bool {
+        let m = self.addon_glue.modifiers;
+        let belt = if m.shift_key() {
+            1
+        } else if m.control_key() {
+            2
+        } else if m.alt_key() {
+            3
+        } else {
+            0
+        };
         let slot = match code {
             KeyCode::Digit1 => 0,
             KeyCode::Digit2 => 1,
@@ -447,6 +561,12 @@ impl App {
             KeyCode::Minus => 10,
             KeyCode::Equal => 11,
             _ => return false,
+        };
+        let slot = match belt {
+            0 => slot,
+            // Potions : pas de touche avec modificateur (`HotkeyFlag=0`).
+            _ if slot < 2 => return true,
+            b => 12 + (b - 1) * 10 + (slot - 2),
         };
         self.skills_use_slot(slot);
         true
@@ -472,7 +592,8 @@ impl App {
                     }
                 }
                 SkillUi::SlotSet { slot, shortcut } => {
-                    self.skills.slots[slot] = Some(shortcut);
+                    let Some(cell) = self.skills.slots.get_mut(slot) else { continue };
+                    *cell = Some(shortcut);
                     changed = true;
                     // Potions des cases 1 et 2 : gardées aussi par le serveur (statut d'interface).
                     if let (0 | 1, Shortcut::Item(tid), Some(net)) = (slot, shortcut, &self.net) {
@@ -486,11 +607,19 @@ impl App {
                     }
                 }
                 SkillUi::SlotSwap(a, b) => {
-                    self.skills.slots.swap(a, b);
+                    if a < self.skills.slots.len() && b < self.skills.slots.len() {
+                        self.skills.slots.swap(a, b);
+                        changed = true;
+                    }
+                }
+                SkillUi::Belts(delta) => {
+                    self.skills.belts = (self.skills.belts as i64 + delta as i64).clamp(0, EXTRA_BELTS as i64) as usize;
                     changed = true;
                 }
                 SkillUi::SlotClear(slot) => {
-                    self.skills.slots[slot] = None;
+                    if let Some(cell) = self.skills.slots.get_mut(slot) {
+                        *cell = None;
+                    }
                     changed = true;
                 }
                 SkillUi::SlotUse(slot) => self.skills_use_slot(slot),
@@ -510,7 +639,7 @@ impl App {
         }
         if changed {
             if let Some(name) = self.skills.slots_owner.clone() {
-                save_slots(&self.config.saved_dir, &name, &self.skills.slots);
+                save_slots(&self.config.saved_dir, &name, &self.skills.slots, self.skills.belts);
             }
         }
     }
@@ -524,20 +653,20 @@ impl App {
         }
         let Some((name, me)) = self.player.as_ref().filter(|p| p.cid != 0 && !p.name.is_empty()).map(|p| (p.name.clone(), p.position)) else { return };
         if self.skills.slots_owner.as_deref() != Some(name.as_str()) {
-            self.skills.slots = load_slots(&self.config.saved_dir, &name);
+            (self.skills.slots, self.skills.belts) = load_slots(&self.config.saved_dir, &name);
             self.skills.slots_owner = Some(name);
         }
         // Potions gardées par le serveur : sur les cases 1 et 2 restées vides (autre poste, barre effacée).
         if let Some((hp, mp)) = self.skills.server_potions.take() {
             let mut changed = false;
             for (slot, tid) in [(0, hp), (1, mp)] {
-                if tid > 0 && self.skills.slots[slot].is_none() {
-                    self.skills.slots[slot] = Some(Shortcut::Item(tid));
+                if let Some(cell) = self.skills.slots.get_mut(slot).filter(|c| tid > 0 && c.is_none()) {
+                    *cell = Some(Shortcut::Item(tid));
                     changed = true;
                 }
             }
             if let (true, Some(owner)) = (changed, self.skills.slots_owner.clone()) {
-                save_slots(&self.config.saved_dir, &owner, &self.skills.slots);
+                save_slots(&self.config.saved_dir, &owner, &self.skills.slots, self.skills.belts);
             }
         }
         self.skills_auto_potions();
@@ -560,7 +689,8 @@ impl App {
                     continue;
                 }
                 let name = self.skills.name(&assets, *tid);
-                v.book.push(BookEntry { tid: *tid, name, level: *level, cooldown: self.skills.cooldown(*id), left_s: self.skills.left_s(*id) });
+                let tip = self.skills.tooltip(&assets, *tid, *level);
+                v.book.push(BookEntry { tid: *tid, name, level: *level, cooldown: self.skills.cooldown(*id), left_s: self.skills.left_s(*id), tip });
             }
             v.book.sort_by(|a, b| a.name.cmp(&b.name));
         }
@@ -594,13 +724,17 @@ impl App {
                 let cost = super::tax_glue::taxed(next.map(|l| if owned == 0 { l.cost } else { l.upgrade_cost }).unwrap_or(0));
                 let require_level = next.map(|l| l.require_level).unwrap_or(0);
                 let possible = next.is_some_and(|l| level >= l.require_level && points >= l.require_point && money >= cost);
-                entries.push(TrainerEntry { tid, name: d.name.clone(), level: owned, max_level: d.levels.len() as i32, require_level, cost, possible });
+                let tip = self.skills.tooltip(&assets, tid, (owned + 1).min(d.levels.len() as i32));
+                entries.push(TrainerEntry { tid, name: d.name.clone(), level: owned, max_level: d.levels.len() as i32, require_level, cost, possible, tip });
             }
             entries.sort_by_key(|e| (e.require_level, e.tid));
             let npc_name = self.entities.iter().find(|e| e.cid == npc).map(|e| e.name.clone()).unwrap_or_default();
             v.trainer = Some((npc_name, entries));
         }
-        for (i, s) in self.skills.slots.iter().enumerate() {
+        v.belts = self.skills.belts;
+        v.slots = vec![SlotView::default(); self.skills.slots.len()];
+        let slots = self.skills.slots.clone();
+        for (i, s) in slots.iter().enumerate() {
             let Some(sc) = s else { continue };
             let (count, cooldown, left_s) = match sc {
                 Shortcut::Skill(t) => {
@@ -612,7 +746,22 @@ impl App {
                     (Some(n), 0.0, 0)
                 }
             };
-            v.slots[i] = SlotView { shortcut: Some(*sc), count, cooldown, left_s };
+            // Infobulle : compétence au niveau connu ; objet : celle du premier exemplaire du sac.
+            let tip = match sc {
+                Shortcut::Skill(t) => {
+                    let level = self.skills.known.values().find(|(k, _)| k == t).map_or(0, |(_, l)| *l);
+                    self.skills.tooltip(&assets, *t, level)
+                }
+                Shortcut::Item(t) => self
+                    .items
+                    .values()
+                    .filter(|it| it.template_id == Some(*t) && it.status == Some(2))
+                    .min_by_key(|it| it.id)
+                    .and_then(|it| self.hud.item_tips.get(&it.id).cloned())
+                    .or_else(|| crate::scene::item_name_for_tid(&assets, *t).map(|n| vec![(n, Color32::WHITE)]))
+                    .unwrap_or_default(),
+            };
+            v.slots[i] = SlotView { shortcut: Some(*sc), count, cooldown, left_s, tip };
         }
         v
     }
@@ -661,11 +810,26 @@ mod tests {
         assert_eq!(class_column(1, 1), Some(0));
         assert_eq!(class_column(2, 4), Some(5));
         let dir = std::env::temp_dir().join("archrust-test-raccourcis");
-        let mut slots = [None; 12];
+        let mut slots = vec![None; QUICK_SLOTS];
         slots[2] = Some(Shortcut::Skill(4));
         slots[0] = Some(Shortcut::Item(190));
-        save_slots(&dir, "Gm Test", &slots);
-        assert_eq!(load_slots(&dir, "Gm Test"), slots);
+        // Barre en plus 2, case 3 (Ctrl+5).
+        slots[12 + 10 + 2] = Some(Shortcut::Skill(7));
+        save_slots(&dir, "Gm Test", &slots, 2);
+        assert_eq!(load_slots(&dir, "Gm Test"), (slots, 2));
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn infobulles_des_competences() {
+        let text = "Name\tDescription\tLevel\tRequiredLevel\tCostMP\tCastTime\nDual Slash\tDouble Attack\tV\tV\tV\t\nPower Rush\t\t\t\t\t\n";
+        let tips = parse_tips(text);
+        let row = &tips["dual slash"];
+        assert_eq!(row.description, "Double Attack");
+        assert!(row.shown.contains("RequiredLevel") && row.shown.contains("CostMP") && !row.shown.contains("CastTime"));
+        assert!(tips["power rush"].shown.is_empty());
+        assert_eq!(seconds(2000), "2 s");
+        assert_eq!(seconds(7450), "7,45 s");
+        assert_eq!(seconds(2500), "2,5 s");
     }
 }

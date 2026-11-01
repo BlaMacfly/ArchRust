@@ -29,7 +29,7 @@ pub mod ui;
 
 pub use manager::{
     AddonError, AddonManager, CameraInfo, EditEvent, HostCommand, HostState, ItemInfo,
-    LoadedAddon, PartyMember, PointerInput, UnitInfo,
+    ItemTemplateInfo, LoadedAddon, PartyMember, PointerInput, UnitInfo,
 };
 pub use comm::ExtInfo;
 pub use manifest::Manifest;

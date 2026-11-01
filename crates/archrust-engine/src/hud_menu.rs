@@ -76,6 +76,14 @@ pub fn draw_main_menu(ctx: &egui::Context, hud: &mut HudState, assets: &Assets) 
     hud.menu_requests.extend(out);
 }
 
+/// Coin d'une liste de menu : la liste garde, par rapport à la barre `UI_CharInfo`, l'écart de leurs
+/// `Pos=` du fichier d'interface (disposition 1024 × 768 où les deux sont dessinées ensemble). Les
+/// placer chacune par son `UIPos` les ancrait à des bords d'écran différents (barre au centre, liste
+/// à droite) : sur un écran autre que 1920 × 1080, la liste s'éloignait de son bouton.
+fn list_origin(layout: &Layout, bar_origin: Pos2, bar: &UiWindow, list: &UiWindow) -> Pos2 {
+    bar_origin + Vec2::new(list.pos0[0] - bar.pos0[0], list.pos0[1] - bar.pos0[1]) * layout.scale
+}
+
 fn draw_menus(ctx: &egui::Context, hud: &mut HudState, assets: &Assets, open: &mut Option<String>, out: &mut Vec<MenuUi>) {
     let Some(bar) = window(hud, assets, "UI_CharInfo") else { return };
     let layout = Layout::new(ctx.screen_rect());
@@ -101,7 +109,7 @@ fn draw_menus(ctx: &egui::Context, hud: &mut HudState, assets: &Assets, open: &m
     let Some(list) = open.clone() else { return };
     let Some((_, _, entries)) = MENUS.iter().find(|(_, l, _)| *l == list) else { return };
     let Some(w) = window(hud, assets, &list) else { return };
-    let at = layout.window_origin(&w);
+    let at = list_origin(&layout, origin, &bar, &w);
     let mut chosen = None;
     egui::Area::new(egui::Id::new(("archonia-main-menu", &list)))
         .fixed_pos(at)

@@ -64,6 +64,41 @@ pub struct ItemInfo {
     pub grid: Option<[i32; 3]>,
 }
 
+/// Modèle d'objet du client (`ItemTemplateAll.ini`, fusionnée avec `ItemTemplateAll2.ini`) : catalogue des objets
+/// pour les AddOns (`ArchRust.GetItemTemplate`, `ArchRust.SearchItems`, `GetItemIcon`, `GetItemInfo`).
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct ItemTemplateInfo {
+    pub tid: i32,
+    pub name: String,
+    /// Icône : nom de la texture du client (`l%07x`, colonne `TEXTURE`), à passer à `SetTexture` ; vide sans icône.
+    pub icon: String,
+    /// Niveau requis (colonne `Level` du bloc `RestrictFactor`), 0 sans condition.
+    pub level: i64,
+    /// `Type` : 0 se porte, 1 s'utilise, 2 autre.
+    pub item_type: i64,
+    /// `Kind` d'un objet porté : 1 armure, 2 arme, 4 bouclier, 8 anneau, 16 collier, 32 monture.
+    pub kind: i64,
+    /// `Part` : partie du corps d'un objet porté.
+    pub part: i64,
+    /// Taille maximale d'une pile (1 : ne s'empile pas).
+    pub stack: i64,
+}
+
+impl ItemTemplateInfo {
+    /// Catégorie lisible : `weapon`, `armor` (boucliers compris), `jewel` (anneaux, colliers), `mount`, `usable`,
+    /// `other`.
+    pub fn category(&self) -> &'static str {
+        match (self.item_type, self.kind) {
+            (0, 2) => "weapon",
+            (0, 1 | 4) => "armor",
+            (0, 8 | 16) => "jewel",
+            (0, 32) => "mount",
+            (1, _) => "usable",
+            _ => "other",
+        }
+    }
+}
+
 /// Caméra orbitale (angles en degrés).
 #[derive(Debug, Clone, Copy, Default, PartialEq)]
 pub struct CameraInfo {
@@ -94,6 +129,8 @@ pub struct HostState {
     /// Noms des joueurs dont une invitation de groupe attend une réponse.
     pub party_invitations: Vec<String>,
     pub inventory: Vec<ItemInfo>,
+    /// Catalogue des objets du client, trié par TID (donné une fois par le moteur à l'entrée en jeu).
+    pub item_templates: std::sync::Arc<Vec<ItemTemplateInfo>>,
     pub camera: CameraInfo,
     /// Matrice vue × projection (colonnes) pour `WorldToScreen`.
     pub view_proj: [f32; 16],

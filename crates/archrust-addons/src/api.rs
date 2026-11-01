@@ -4,8 +4,8 @@
 
 use crate::frame::{create_frame, frame_id, frame_object, num};
 use crate::manager::{
-    fire, load_by_name, report_error, CombatValue, HostCommand, Shared, SharedState, Timer,
-    UnitInfo,
+    fire, load_by_name, report_error, CombatValue, HostCommand, ItemTemplateInfo, Shared,
+    SharedState, Timer, UnitInfo,
 };
 use crate::ui::{FrameKind, Rect};
 use mlua::{ChunkMode, Function, Lua, MultiValue, Table, Value, Variadic};
@@ -115,6 +115,52 @@ fn unit_arg(v: &Value) -> String {
 }
 
 /// Table Lua décrivant une unité (`ArchRust.GetUnit`, `ArchRust.GetUnits`).
+/// Modèle d'objet du catalogue par TID (catalogue trié par TID).
+fn item_template(list: &[ItemTemplateInfo], tid: i32) -> Option<&ItemTemplateInfo> {
+    list.binary_search_by_key(&tid, |t| t.tid).ok().map(|i| &list[i])
+}
+
+/// Table Lua d'un modèle d'objet : `{tid, name, icon, level, type, kind, part, stack, category}`.
+fn item_template_table(lua: &Lua, t: &ItemTemplateInfo) -> mlua::Result<Table> {
+    let e = lua.create_table()?;
+    e.set("tid", t.tid)?;
+    e.set("name", t.name.as_str())?;
+    if !t.icon.is_empty() {
+        e.set("icon", t.icon.as_str())?;
+    }
+    e.set("level", t.level)?;
+    e.set("type", t.item_type)?;
+    e.set("kind", t.kind)?;
+    e.set("part", t.part)?;
+    e.set("stack", t.stack.max(1))?;
+    e.set("category", t.category())?;
+    Ok(e)
+}
+
+/// Recherche dans le catalogue : nom contenant `text` (sans tenir compte de la casse) ou TID commençant par `text`
+/// s'il est numérique, dans la catégorie `category` (`nil` ou `all` : toutes). Rend au plus `max` modèles, par TID
+/// croissant, et le nombre total de modèles trouvés.
+pub fn search_item_templates<'a>(list: &'a [ItemTemplateInfo], text: &str, category: Option<&str>, max: usize) -> (Vec<&'a ItemTemplateInfo>, usize) {
+    let needle = text.trim().to_lowercase();
+    let numeric = !needle.is_empty() && needle.chars().all(|c| c.is_ascii_digit());
+    let category = category.filter(|c| !c.is_empty() && !c.eq_ignore_ascii_case("all"));
+    let mut out = Vec::new();
+    let mut total = 0;
+    for t in list {
+        if category.is_some_and(|c| !c.eq_ignore_ascii_case(t.category())) {
+            continue;
+        }
+        let hit = needle.is_empty() || (numeric && t.tid.to_string().starts_with(&needle)) || t.name.to_lowercase().contains(&needle);
+        if hit {
+            total += 1;
+            if out.len() < max {
+                out.push(t);
+            }
+        }
+    }
+    (out, total)
+}
+
 fn unit_table(lua: &Lua, u: &UnitInfo, is_player: bool, token: &str) -> mlua::Result<Table> {
     let t = lua.create_table()?;
     t.set("guid", guid_of(u, is_player))?;
@@ -917,9 +963,12 @@ pub fn install(lua: &Lua, shared: Shared) -> mlua::Result<()> {
     g.set("C_CVar", c_cvar)?;
 
     // Objets
-    func!("GetItemInfo", s, move |_, item: Value| {
+    // Ordre de WoW : nom, lien, qualité, niveau d'objet, niveau requis, type, sous-type, pile, emplacement, icône,
+    // prix. Objet de l'inventaire, sinon du catalogue (`ArchRust.GetItemTemplate`) ; le nom seul si le catalogue
+    // n'a pas l'objet.
+    func!("GetItemInfo", s, move |lua, item: Value| {
         let st = s.borrow();
-        let found = match &item {
+        let owned = match &item {
             Value::Integer(tid) => st.host.inventory.iter().find(|i| i.tid == Some(*tid as i32)),
             Value::String(n) => {
                 let n = n.to_str()?.to_string();
@@ -927,7 +976,43 @@ pub fn install(lua: &Lua, shared: Shared) -> mlua::Result<()> {
             }
             _ => None,
         };
-        Ok(found.map(|i| i.name.clone()))
+        let template = match (&item, owned.and_then(|i| i.tid)) {
+            (_, Some(tid)) => item_template(&st.host.item_templates, tid),
+            (Value::Integer(tid), None) => item_template(&st.host.item_templates, *tid as i32),
+            (Value::String(n), None) => {
+                let n = n.to_str()?.to_string();
+                st.host.item_templates.iter().find(|t| t.name.eq_ignore_ascii_case(&n))
+            }
+            _ => None,
+        };
+        let Some(name) = owned.map(|i| i.name.clone()).or_else(|| template.map(|t| t.name.clone())) else {
+            return Ok(MultiValue::from_vec(vec![Value::Nil]));
+        };
+        let mut out = vec![Value::String(lua.create_string(&name)?), Value::String(lua.create_string(format!("|cffffffff[{name}]|r"))?)];
+        if let Some(t) = template {
+            out.extend([
+                Value::Integer(1),
+                Value::Integer(t.level),
+                Value::Integer(t.level),
+                Value::String(lua.create_string(t.category())?),
+                Value::String(lua.create_string("")?),
+                Value::Integer(t.stack.max(1)),
+                Value::String(lua.create_string("")?),
+                if t.icon.is_empty() { Value::Nil } else { Value::String(lua.create_string(&t.icon)?) },
+                Value::Integer(0),
+            ]);
+        }
+        Ok(MultiValue::from_vec(out))
+    });
+    func!("GetItemIcon", s, move |_, tid: Value| {
+        let st = s.borrow();
+        let tid = match tid {
+            Value::Integer(t) => t as i32,
+            Value::Number(t) => t as i32,
+            Value::String(t) => t.to_str()?.trim().parse().unwrap_or(0),
+            _ => 0,
+        };
+        Ok(item_template(&st.host.item_templates, tid).filter(|t| !t.icon.is_empty()).map(|t| t.icon.clone()))
     });
     func!("GetItemCount", s, move |_, item: Value| {
         let st = s.borrow();
@@ -1093,6 +1178,36 @@ pub fn install(lua: &Lua, shared: Shared) -> mlua::Result<()> {
                     t.set(i + 1, e)?;
                 }
                 Ok(t)
+            })?,
+        )?;
+        let s = shared.clone();
+        ar.set(
+            "GetItemTemplate",
+            lua.create_function(move |lua, tid: i64| {
+                let st = s.borrow();
+                match item_template(&st.host.item_templates, tid as i32) {
+                    Some(t) => Ok(Value::Table(item_template_table(lua, t)?)),
+                    None => Ok(Value::Nil),
+                }
+            })?,
+        )?;
+        let s = shared.clone();
+        ar.set(
+            "GetNumItemTemplates",
+            lua.create_function(move |_, ()| Ok(s.borrow().host.item_templates.len()))?,
+        )?;
+        let s = shared.clone();
+        ar.set(
+            "SearchItems",
+            lua.create_function(move |lua, (text, category, max): (Option<String>, Option<String>, Option<i64>)| {
+                let st = s.borrow();
+                let max = max.unwrap_or(200).clamp(1, 5000) as usize;
+                let (found, total) = search_item_templates(&st.host.item_templates, text.as_deref().unwrap_or(""), category.as_deref(), max);
+                let t = lua.create_table()?;
+                for (i, it) in found.into_iter().enumerate() {
+                    t.set(i + 1, item_template_table(lua, it)?)?;
+                }
+                Ok((t, total))
             })?,
         )?;
         let s = shared.clone();

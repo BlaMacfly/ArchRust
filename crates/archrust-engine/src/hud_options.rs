@@ -14,7 +14,9 @@
 //! - **GFX** : listes `OP_CharView` et `OP_MapView` (distances des personnages et de la carte,
 //!   « Proche » à « Global », un clic passe au choix suivant), `OP_Nature` (environnement bas à haut :
 //!   densité de la météo) et son bouton détail, qui ouvre `Option_Detail_Nature` (reflets
-//!   `OP_LensFlare`, brouillard `OP_Fog`, effets météo `OP_Sky`, en cases Oui/Non).
+//!   `OP_LensFlare`, brouillard `OP_Fog`, effets météo `OP_Sky`, en cases Oui/Non) ; `OP_Effect`
+//!   (effets d'Archonia, désactivés à « Off ») et la case `OP_TurnOffAllEffects` (effets des
+//!   compétences des autres joueurs).
 //! - **Affichage** : noms au-dessus de soi, des monstres, des autres joueurs, ligne de guilde, cadre
 //!   des membres du groupe, casque (envoyé au serveur).
 //! - **Fonction** : refus d'échange, d'invitation de groupe et de guilde (drapeaux envoyés au
@@ -39,6 +41,9 @@ pub(super) const OPTION_WINDOWS: [&str; 6] = ["Option_Video", "Option_Sound", "O
 const DETAIL_NATURE: &str = "Option_Detail_Nature";
 /// Libellés de la liste `OP_Nature` (`uimessage.txt`).
 const NATURE_LABELS: [&str; 3] = ["Option_Msg_LOW", "Option_Msg_MEDIUM", "Option_Msg_HIGH"];
+/// Libellés de la liste `OP_Effect` (0 à 4, `Effect` de `COption.ini`) : choix d'`uimessage.txt`
+/// (l'ordre suit les niveaux de FUN_14070fb80 ; la liste d'Archonia elle-même n'est pas relevée).
+const EFFECT_LABELS: [&str; 5] = ["Option_Msg_OFF", "Option_Msg_LOW", "Option_Msg_MEDIUM", "Option_Msg_HIGH", "Option_Msg_VERY_HIGH"];
 /// Hauteur d'une ligne d'`OpAdv_List_Op`.
 const ADV_ROW: f32 = 20.0;
 
@@ -193,15 +198,17 @@ pub fn draw_options(ctx: &egui::Context, hud: &mut HudState, assets: &Assets, ed
                         }
                     }
                     // Onglet GFX : distances des personnages et de la carte, un clic passe au choix suivant.
-                    (5, _) if tab == 0 && matches!(c.action.as_deref(), Some("OP_CharView" | "OP_MapView" | "OP_Nature")) => {
+                    (5, _) if tab == 0 && matches!(c.action.as_deref(), Some("OP_CharView" | "OP_MapView" | "OP_Nature" | "OP_Effect")) => {
                         let action = match c.action.as_deref() {
                             Some("OP_CharView") => "OP_CharView",
                             Some("OP_Nature") => "OP_Nature",
+                            Some("OP_Effect") => "OP_Effect",
                             _ => "OP_MapView",
                         };
                         let text = match action {
                             "OP_CharView" => ui_message(hud, assets, VIEW_LABELS[video.char_view.min(3) as usize]),
                             "OP_Nature" => ui_message(hud, assets, NATURE_LABELS[video.nature.min(2) as usize]),
+                            "OP_Effect" => ui_message(hud, assets, EFFECT_LABELS[video.effect.min(4) as usize]),
                             _ => ui_message(hud, assets, VIEW_LABELS[video.map_view.min(3) as usize]),
                         };
                         if button(ctx, ui, hud, assets, &painter, r, c, "", font, true, ("options-combo", action)).clicked() {
@@ -215,6 +222,13 @@ pub fn draw_options(ctx: &egui::Context, hud: &mut HudState, assets: &Assets, ed
                         let action = combos.iter().find(|(cr, _)| cr.contains(r.center())).map_or("", |(_, a)| *a);
                         if button(ctx, ui, hud, assets, &painter, r, c, "", font, true, ("options-combo-arrow", action)).clicked() {
                             cycle_view(video, action);
+                            out.changed = true;
+                        }
+                    }
+                    // « Désactiver les effets des autres joueurs » (`DisableOtherPlayerSkillEffect`).
+                    (3, _) if tab == 0 && c.action.as_deref() == Some("OP_TurnOffAllEffects") => {
+                        if checkbox(ctx, ui, hud, assets, &painter, r, c, video.hide_other_effects, true, ("options-check", tab, name)).clicked() {
+                            video.hide_other_effects = !video.hide_other_effects;
                             out.changed = true;
                         }
                     }
@@ -296,6 +310,7 @@ pub fn draw_options(ctx: &egui::Context, hud: &mut HudState, assets: &Assets, ed
 fn cycle_view(video: &mut VideoOptions, action: &str) {
     match action {
         "OP_Nature" => video.nature = (video.nature.min(2) + 1) % 3,
+        "OP_Effect" => video.effect = (video.effect.min(4) + 1) % 5,
         "OP_CharView" => video.char_view = (video.char_view + 1) % 4,
         _ => video.map_view = (video.map_view + 1) % 4,
     }

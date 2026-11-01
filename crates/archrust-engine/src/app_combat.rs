@@ -531,7 +531,7 @@ impl App {
             return true;
         }
         let from = player.position;
-        let dest = Vec3::new(at.x, self.terrain.height_at(at.x, at.z).unwrap_or(at.y), at.z);
+        let dest = Vec3::new(at.x, Self::ground_height(&self.terrain, &self.objects, &self.assets, at.x, at.z).unwrap_or(at.y), at.z);
         if let Some(p) = self.player.as_mut() {
             p.destination = dest;
         }
@@ -583,7 +583,7 @@ impl App {
     }
 
     /// Objet au sol sous le curseur (à moins de 30 px de sa projection).
-    fn combat_loot_under_cursor(&self) -> Option<i32> {
+    pub(super) fn combat_loot_under_cursor(&self) -> Option<i32> {
         let (Some(gpu), Some((cx, cy))) = (&self.gpu, self.last_cursor) else {
             return None;
         };

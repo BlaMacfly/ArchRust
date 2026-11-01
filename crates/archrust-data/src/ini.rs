@@ -156,6 +156,45 @@ impl IniTable {
         Self::parse(&decrypt_ini(raw))
     }
 
+    /// Ajoute les sections d'une table de même forme (positionnelle : en-tête `[]` qui nomme les
+    /// colonnes). Les clés des sections ajoutées sont renumérotées d'après le nom de leur colonne ;
+    /// une colonne inconnue de cette table reçoit un nouveau numéro dans l'en-tête. Sert aux tables
+    /// qu'Archonia charge l'une après l'autre (`ItemTemplateAll.ini` puis `ItemTemplateAll2.ini`).
+    pub fn merge_positional(&mut self, other: IniTable) {
+        let mut header = self.section("").cloned().unwrap_or_default();
+        let had_header = self.section("").is_some();
+        let mut next = header.entries.iter().filter_map(|(k, _)| k.parse::<u32>().ok()).max().map_or(0, |m| m + 1);
+        let mut remap: HashMap<String, String> = HashMap::new();
+        if let Some(theirs) = other.section("") {
+            for (k, name) in &theirs.entries {
+                let mine = match header.entries.iter().find(|(_, n)| n.eq_ignore_ascii_case(name)) {
+                    Some((mk, _)) => mk.clone(),
+                    None => {
+                        let nk = next.to_string();
+                        next += 1;
+                        header.entries.push((nk.clone(), name.clone()));
+                        nk
+                    }
+                };
+                remap.insert(k.clone(), mine);
+            }
+        }
+        if had_header {
+            if let Some(&i) = self.index.get("") {
+                self.sections[i] = header;
+            }
+        } else {
+            self.push(header);
+        }
+        for sec in other.sections.into_iter().filter(|s| !s.name.is_empty()) {
+            if self.index.contains_key(&sec.name.to_ascii_lowercase()) {
+                continue;
+            }
+            let entries = sec.entries.into_iter().map(|(k, v)| (remap.get(&k).cloned().unwrap_or(k), v)).collect();
+            self.push(IniSection { name: sec.name, entries });
+        }
+    }
+
     fn push(&mut self, sec: IniSection) {
         self.index
             .entry(sec.name.to_ascii_lowercase())
@@ -230,6 +269,21 @@ mod tests {
         assert_eq!(s.get("name"), Some("Humain"));
         assert_eq!(s.get_all("Skill").collect::<Vec<_>>(), vec!["10", "11"]);
         assert_eq!(t.section("2").unwrap().get_i64("Skill"), None);
+    }
+
+    #[test]
+    fn positional_tables_merge_by_column_name() {
+        let mut a = IniTable::parse("0=ModuleData1\n1=Name\n2=Part\n[5018]\n1=Karkaen Necklace\n2=13\n");
+        let b = IniTable::parse("0=ModuleData1\n1=Part\n2=Name\n3=EFFECT_DATA7\n[60731]\n2=Dark Wings\n1=0\n3=x\n[5018]\n2=doublon\n");
+        a.merge_positional(b);
+        let h = a.section("").unwrap();
+        assert_eq!(h.get("3"), Some("EFFECT_DATA7"));
+        let w = a.section("60731").unwrap();
+        assert_eq!(w.get("1"), Some("Dark Wings"));
+        assert_eq!(w.get("2"), Some("0"));
+        assert_eq!(w.get("3"), Some("x"));
+        // La première table garde la main sur un doublon.
+        assert_eq!(a.section("5018").unwrap().get("1"), Some("Karkaen Necklace"));
     }
 
     #[test]

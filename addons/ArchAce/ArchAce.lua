@@ -17,7 +17,10 @@ local defaults = {
     -- Plaques Lua (Nameplates.lua) désactivées par défaut : le moteur dessine les noms d'Archonia
     -- (AgcmIDBoard) ; `/aace plates on` les remet.
     plates = false,
-    unitFrames = true,
+    -- Cadres « Joueur » et « Cible » (UnitFrames.lua) désactivés par défaut : Archonia n'a pas ces
+    -- panneaux (sa cible est UI_TargetInfo, dessinée par le moteur) ; `/aace demo` ou les options
+    -- de l'AddOn les remettent.
+    unitFrames = false,
     theme = "defaut",
     fov = 55,
     framePos = { x = 270, y = -70 },

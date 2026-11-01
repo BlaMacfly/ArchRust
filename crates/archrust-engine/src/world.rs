@@ -58,6 +58,23 @@ pub struct HeightField {
     pub origin: Vec3,
     grid: Vec<f32>,
     filled: Vec<bool>,
+    /// Triangles du sol par cellule (vide pour un glTF de patch) : hauteur exacte, comme Archonia
+    /// qui lance un rayon vertical contre la géométrie du secteur (`FUN_140528f30`).
+    cell_triangles: Vec<Vec<[Vec3; 3]>>,
+}
+
+/// Hauteur du triangle `t` à la verticale de (x, z), si le point est dans sa projection XZ.
+pub fn triangle_height(t: &[Vec3; 3], x: f32, z: f32) -> Option<f32> {
+    let [a, b, c] = t;
+    let d = (b.z - c.z) * (a.x - c.x) + (c.x - b.x) * (a.z - c.z);
+    if d.abs() < 1e-6 {
+        return None;
+    }
+    let l1 = ((b.z - c.z) * (x - c.x) + (c.x - b.x) * (z - c.z)) / d;
+    let l2 = ((c.z - a.z) * (x - c.x) + (a.x - c.x) * (z - c.z)) / d;
+    let l3 = 1.0 - l1 - l2;
+    const E: f32 = -1e-4;
+    (l1 >= E && l2 >= E && l3 >= E).then(|| l1 * a.y + l2 * b.y + l3 * c.y)
 }
 
 impl HeightField {
@@ -84,6 +101,7 @@ impl HeightField {
             origin,
             grid,
             filled,
+            cell_triangles: Vec::new(),
         };
         for k in 0..n * n {
             if !hf.filled[k] {
@@ -112,11 +130,34 @@ impl HeightField {
         self.grid[j.min(CELLS) * (CELLS + 1) + i.min(CELLS)]
     }
 
-    /// Hauteur interpolée (bilinéaire) en un point du secteur.
+    /// Range les triangles du sol par cellule (celle de leur centre) : [`Self::height_at`] suit
+    /// alors la géométrie dessinée au lieu d'interpoler entre les coins.
+    pub fn set_triangles(&mut self, triangles: impl IntoIterator<Item = [Vec3; 3]>) {
+        let mut cells = vec![Vec::new(); CELLS * CELLS];
+        for t in triangles {
+            let c = (t[0] + t[1] + t[2]) / 3.0;
+            let i = ((c.x - self.origin.x) / CELL_SIZE).floor();
+            let j = ((c.z - self.origin.z) / CELL_SIZE).floor();
+            if (0.0..CELLS as f32).contains(&i) && (0.0..CELLS as f32).contains(&j) {
+                cells[j as usize * CELLS + i as usize].push(t);
+            }
+        }
+        self.cell_triangles = cells;
+    }
+
+    /// Hauteur du sol en un point du secteur : triangle de la cellule qui le contient, sinon
+    /// interpolation bilinéaire des coins.
     pub fn height_at(&self, x: f32, z: f32) -> f32 {
         let fx = ((x - self.origin.x) / CELL_SIZE).clamp(0.0, CELLS as f32 - 0.0001);
         let fz = ((z - self.origin.z) / CELL_SIZE).clamp(0.0, CELLS as f32 - 0.0001);
         let (i, j) = (fx.floor() as usize, fz.floor() as usize);
+        if let Some(h) = self
+            .cell_triangles
+            .get(j * CELLS + i)
+            .and_then(|ts| ts.iter().filter_map(|t| triangle_height(t, x, z)).reduce(f32::max))
+        {
+            return h;
+        }
         let (tx, tz) = (fx - i as f32, fz - j as f32);
         let h00 = self.corner(i, j);
         let h10 = self.corner(i + 1, j);
@@ -141,8 +182,92 @@ pub struct Terrain {
     failed: HashSet<(i32, i32)>,
     tiles_a: HashMap<u32, Option<Arc<MagPack>>>,
     tiles_b: HashMap<u32, Option<Arc<MagPack>>>,
+    /// Archives d'attributs `a%06dx.ma1` (grilles `.amf`).
+    tiles_attr: HashMap<u32, Option<Arc<MagPack>>>,
+    /// Blocage des secteurs chargés (cellules et segments du `.amf`).
+    blocking: HashMap<(i32, i32), SectorBlocking>,
     pub loads_per_frame: usize,
     pub last_center: Option<(i32, i32)>,
+}
+
+/// Blocage d'un secteur d'après son `C{sx},{sy}.amf` : cellules de 400 unités au sol bloqué et
+/// segments à ne pas franchir.
+#[derive(Debug, Clone, Default)]
+pub struct SectorBlocking {
+    pub cells: Vec<u32>,
+    pub lines: Vec<[Vec3; 2]>,
+}
+
+/// Coordonnée de cellule globale (400 unités) d'une coordonnée monde, comme Archonia
+/// (`x × 0,0025 + 6400` dans `FUN_140196ab0`) : secteur = cellule / 16, cellule locale = reste.
+pub fn global_cell(v: f32) -> i32 {
+    (v / CELL_SIZE + (SECTOR_OFFSET * CELLS as i32) as f32).floor() as i32
+}
+
+/// Recul d'Archonia devant une cellule bloquée : 0,05 cellule (`DAT_140e49bd0`).
+const BLOCK_MARGIN: f32 = 0.05 * CELL_SIZE;
+
+/// Arrêt d'un déplacement `from → to` (plan XZ) devant le segment `[a, b]` élargi de `radius`,
+/// d'après `FUN_1401822a0` : le segment ne bloque que dans un sens (normale `(-dz, dx)` de
+/// `a − b`) ; `None` s'il ne gêne pas.
+fn clip_segment(a: Vec3, b: Vec3, radius: f32, from: Vec3, to: Vec3) -> Option<Vec3> {
+    let (dx, dz) = (a.x - b.x, a.z - b.z);
+    let len = (dx * dx + dz * dz).sqrt();
+    if len < 1e-4 {
+        return None;
+    }
+    let (nx, nz) = (-dz / len, dx / len);
+    let (mx, mz) = (to.x - from.x, to.z - from.z);
+    let dot = mx * nx + mz * nz;
+    if dot > 0.0 {
+        return None;
+    }
+    let inside = |px: f32, pz: f32| {
+        (b.x - a.x) * (px - a.x) + (b.z - a.z) * (pz - a.z) >= 0.0 && (a.x - b.x) * (px - b.x) + (a.z - b.z) * (pz - b.z) >= 0.0
+    };
+    let dist = (from.x - a.x) * nx + (from.z - a.z) * nz;
+    let t = if dot != 0.0 { -(dist - radius) / dot } else { f32::NEG_INFINITY };
+    if t > 0.0 {
+        if t > 1.0 {
+            return None;
+        }
+        let (hx, hz) = (from.x + mx * t, from.z + mz * t);
+        let travelled = ((hx - from.x).powi(2) + (hz - from.z).powi(2)).sqrt();
+        if (mx * mx + mz * mz).sqrt() <= travelled || !inside(hx, hz) {
+            return None;
+        }
+        Some(Vec3::new(hx, to.y, hz))
+    } else {
+        // Déjà contre le segment, du côté bloquant : on reste sur place si l'on est dans sa bande.
+        if dist < 0.0 || dist > radius * 1.1 || !inside(from.x, from.z) {
+            return None;
+        }
+        Some(from)
+    }
+}
+
+/// Arrêt devant le cercle de rayon `radius` centré sur `c` (extrémité d'un segment,
+/// `FUN_140182070`).
+fn clip_circle(c: Vec3, radius: f32, from: Vec3, to: Vec3) -> Option<Vec3> {
+    let (mx, mz) = (to.x - from.x, to.z - from.z);
+    if (c.x - from.x) * mx + (c.z - from.z) * mz <= 0.0 {
+        return None;
+    }
+    let (fx, fz) = (from.x - c.x, from.z - c.z);
+    let a = mx * mx + mz * mz;
+    let half_b = fx * mx + fz * mz;
+    let disc = half_b * half_b - (fx * fx + fz * fz - radius * radius) * a;
+    if disc < 0.0 || a < 1e-8 {
+        return None;
+    }
+    let t = (-half_b - disc.sqrt()) / a;
+    if t > 1.0 {
+        return None;
+    }
+    if t < 0.0 {
+        return Some(from);
+    }
+    Some(Vec3::new(from.x + mx * t, to.y, from.z + mz * t))
 }
 
 impl Default for Terrain {
@@ -160,6 +285,8 @@ impl Terrain {
             failed: HashSet::new(),
             tiles_a: HashMap::new(),
             tiles_b: HashMap::new(),
+            tiles_attr: HashMap::new(),
+            blocking: HashMap::new(),
             loads_per_frame: 2,
             last_center: None,
         }
@@ -189,6 +316,25 @@ impl Terrain {
         loaded
     }
 
+    /// Géométrie `D{sx},{sy}.dff` d'un secteur du client.
+    fn client_sector(&mut self, assets: &Assets, sx: i32, sy: i32) -> Option<SectorGeometry> {
+        let b = self.tile(assets, 'b', tile_of(sx, sy))?;
+        let name = format!("D{sx},{sy}.dff");
+        let parsed = b
+            .unpack_named(&name)?
+            .map_err(anyhow::Error::from)
+            .and_then(|plain| SectorGeometry::parse(&plain).map_err(anyhow::Error::from));
+        parsed.inspect_err(|e| log::warn!("secteur {name} : {e}")).ok()
+    }
+
+    /// Sol et blocage d'un secteur du client, sans maillage ni texture (outils, tests).
+    pub fn load_ground(&mut self, assets: &Assets, sx: i32, sy: i32) -> bool {
+        self.load_blocking(assets, sx, sy);
+        let Some(sector) = self.client_sector(assets, sx, sy) else { return false };
+        self.heights.insert((sx, sy), ground_field(sx, sy, &sector.geometry));
+        true
+    }
+
     fn load_sector(
         &mut self,
         renderer: &mut Renderer,
@@ -196,6 +342,8 @@ impl Terrain {
         sx: i32,
         sy: i32,
     ) -> Option<SectorMeshes> {
+        // 0. Blocage du secteur (`C{sx},{sy}.amf`), quel que soit le sol dessiné.
+        self.load_blocking(assets, sx, sy);
         // 1. Un patch fournit un glTF pour ce secteur : posé à l'origine du secteur, hauteurs tirées de ses sommets.
         let key = format!("world/D{sx},{sy}.dff");
         if let Some(meshes) = patched_model_meshes(renderer, assets, &key) {
@@ -220,22 +368,7 @@ impl Terrain {
         }
         // 2. Géométrie du client.
         let tile = tile_of(sx, sy);
-        let b = self.tile(assets, 'b', tile)?;
-        let name = format!("D{sx},{sy}.dff");
-        let plain = match b.unpack_named(&name)? {
-            Ok(p) => p,
-            Err(e) => {
-                log::warn!("secteur {name} : {e}");
-                return None;
-            }
-        };
-        let sector = match SectorGeometry::parse(&plain) {
-            Ok(s) => s,
-            Err(e) => {
-                log::warn!("secteur {name} : {e}");
-                return None;
-            }
-        };
+        let sector = self.client_sector(assets, sx, sy)?;
         // Texture propre au secteur (dictionnaire R) : téléversée sous le nom du secteur.
         let r_name = format!("R{sx},{sy}");
         if renderer.texture(&r_name).is_none() {
@@ -262,10 +395,7 @@ impl Terrain {
             }
         }
         let mut geometry = sector.geometry;
-        self.heights.insert(
-            (sx, sy),
-            HeightField::from_vertices(sx, sy, &geometry.vertices),
-        );
+        self.heights.insert((sx, sy), ground_field(sx, sy, &geometry));
         // Un matériau sans texture de base (aucun observé depuis la lecture de l'extension
         // 0xfffff001) reçoit la texture du secteur. Elle couvre tout le secteur alors que les UV
         // sont par cellule : ce n'est qu'un repli.
@@ -298,6 +428,8 @@ impl Terrain {
             self.sectors
                 .retain(|&(sx, sy), _| (sx - cx).abs() <= r && (sy - cy).abs() <= r);
             self.heights
+                .retain(|&(sx, sy), _| (sx - cx).abs() <= r && (sy - cy).abs() <= r);
+            self.blocking
                 .retain(|&(sx, sy), _| (sx - cx).abs() <= r && (sy - cy).abs() <= r);
             self.failed
                 .retain(|&(sx, sy)| (sx - cx).abs() <= r && (sy - cy).abs() <= r);
@@ -365,6 +497,115 @@ impl Terrain {
             .map(|h| h.height_at(x, z))
     }
 
+    /// Lit le blocage d'un secteur (`C{sx},{sy}.amf` de `a%06dx.ma1`), une fois.
+    pub fn load_blocking(&mut self, assets: &Assets, sx: i32, sy: i32) {
+        if self.blocking.contains_key(&(sx, sy)) {
+            return;
+        }
+        let tile = tile_of(sx, sy);
+        let pack = self
+            .tiles_attr
+            .entry(tile)
+            .or_insert_with(|| assets.magpack('a', tile, "ma1").ok().map(Arc::new))
+            .clone();
+        let blocking = pack
+            .and_then(|p| p.unpack_named(&format!("C{sx},{sy}.amf"))?.ok())
+            .map(|bytes| SectorBlocking {
+                cells: crate::zones::parse_amf(&bytes).unwrap_or_default(),
+                lines: crate::zones::parse_amf_lines(&bytes),
+            })
+            .unwrap_or_default();
+        self.blocking.insert((sx, sy), blocking);
+    }
+
+    /// Blocage déjà connu d'un secteur (tests).
+    pub fn set_blocking(&mut self, sx: i32, sy: i32, blocking: SectorBlocking) {
+        self.blocking.insert((sx, sy), blocking);
+    }
+
+    /// Cellule globale (voir [`global_cell`]) au sol bloqué ; secteur inconnu = libre.
+    fn cell_blocked(&self, gx: i32, gz: i32) -> bool {
+        let n = CELLS as i32;
+        self.blocking
+            .get(&(gx.div_euclid(n), gz.div_euclid(n)))
+            .and_then(|b| b.cells.get((gz.rem_euclid(n) * n + gx.rem_euclid(n)) as usize))
+            .is_some_and(|&c| crate::zones::cell_ground_blocked(c))
+    }
+
+    /// Vrai si la cellule de (x, z) est au sol bloqué : Archonia refuse alors le déplacement
+    /// (`FUN_140183bd0` dans `FUN_140168070`).
+    pub fn blocked(&self, x: f32, z: f32) -> bool {
+        self.cell_blocked(global_cell(x), global_cell(z))
+    }
+
+    /// Point où s'arrête un déplacement `from → to` : avant la première cellule bloquée traversée
+    /// (recul de 0,05 cellule, `FUN_140196ab0`), puis devant les segments des secteurs traversés
+    /// élargis de `radius` (`FUN_140197780`). Départ dans une cellule bloquée : pas de mouvement.
+    /// La hauteur rendue est celle de `to` ; à recalculer au point d'arrêt.
+    pub fn clip_move(&self, from: Vec3, to: Vec3, radius: f32) -> Vec3 {
+        let (gx0, gz0) = (global_cell(from.x), global_cell(from.z));
+        if self.cell_blocked(gx0, gz0) {
+            return from;
+        }
+        let d = Vec3::new(to.x - from.x, 0.0, to.z - from.z);
+        let len = d.length();
+        let mut dest = to;
+        if len > 1e-3 {
+            // Parcours des cellules le long du segment (Amanatides–Woo).
+            let (mut gx, mut gz) = (gx0, gz0);
+            let (gx1, gz1) = (global_cell(to.x), global_cell(to.z));
+            let step_x = if d.x > 0.0 { 1 } else { -1 };
+            let step_z = if d.z > 0.0 { 1 } else { -1 };
+            let base = (SECTOR_OFFSET * CELLS as i32) as f32 * CELL_SIZE;
+            let boundary = |g: i32, s: i32| (g + (s > 0) as i32) as f32 * CELL_SIZE - base;
+            let t_of = |p: f32, v: f32, b: f32| if v.abs() < 1e-6 { f32::INFINITY } else { (b - p) / v };
+            let mut t_x = t_of(from.x, d.x, boundary(gx, step_x));
+            let mut t_z = t_of(from.z, d.z, boundary(gz, step_z));
+            let dt_x = if d.x.abs() < 1e-6 { f32::INFINITY } else { CELL_SIZE / d.x.abs() };
+            let dt_z = if d.z.abs() < 1e-6 { f32::INFINITY } else { CELL_SIZE / d.z.abs() };
+            let margin = BLOCK_MARGIN / len;
+            while (gx, gz) != (gx1, gz1) {
+                let t = if t_x < t_z {
+                    gx += step_x;
+                    let t = t_x;
+                    t_x += dt_x;
+                    t
+                } else {
+                    gz += step_z;
+                    let t = t_z;
+                    t_z += dt_z;
+                    t
+                };
+                if t > 1.0 {
+                    break;
+                }
+                if self.cell_blocked(gx, gz) {
+                    let t = (t - margin).max(0.0);
+                    dest = Vec3::new(from.x + d.x * t, to.y, from.z + d.z * t);
+                    break;
+                }
+            }
+        }
+        // Segments des secteurs couverts par le déplacement.
+        let (a, b) = (sector_of(from.x, from.z), sector_of(dest.x, dest.z));
+        for sx in a.0.min(b.0)..=a.0.max(b.0) {
+            for sy in a.1.min(b.1)..=a.1.max(b.1) {
+                let Some(sector) = self.blocking.get(&(sx, sy)) else { continue };
+                for [p, q] in &sector.lines {
+                    if let Some(hit) = clip_segment(*p, *q, radius, from, dest) {
+                        dest = hit;
+                    }
+                    for c in [p, q] {
+                        if let Some(hit) = clip_circle(*c, radius, from, dest) {
+                            dest = hit;
+                        }
+                    }
+                }
+            }
+        }
+        dest
+    }
+
     /// Premier point du terrain touché par un rayon (marche à pas fixe puis dichotomie).
     pub fn raycast(&self, origin: Vec3, dir: Vec3, max_dist: f32) -> Option<Vec3> {
         let dir = dir.normalize_or_zero();
@@ -399,6 +640,17 @@ impl Terrain {
         }
         None
     }
+}
+
+/// Hauteurs d'un secteur du client : coins de cellule et triangles de sa géométrie.
+fn ground_field(sx: i32, sy: i32, geometry: &Geometry) -> HeightField {
+    let mut field = HeightField::from_vertices(sx, sy, &geometry.vertices);
+    let vs = &geometry.vertices;
+    field.set_triangles(geometry.triangles.iter().filter_map(|t| {
+        let [i, j, k] = t.v.map(|i| i as usize);
+        Some([*vs.get(i)?, *vs.get(j)?, *vs.get(k)?])
+    }));
+    field
 }
 
 /// Textures des étages d'un matériau de sol : base, puis les entrées de l'extension `0xfffff001`
@@ -526,5 +778,71 @@ mod tests {
             sector_origin(272, 272),
             Vec3::new(-819200.0, 0.0, -819200.0)
         );
+    }
+
+    #[test]
+    fn triangle_heights_follow_the_drawn_ground() {
+        // Une cellule pliée le long de sa diagonale : le bilinéaire se tromperait au centre.
+        let o = sector_origin(272, 272);
+        let mut hf = HeightField::from_vertices(272, 272, &[o]);
+        let (a, b, c, d) = (o, o + Vec3::new(400.0, 0.0, 0.0), o + Vec3::new(0.0, 0.0, 400.0), o + Vec3::new(400.0, 400.0, 400.0));
+        hf.set_triangles([[a, b, d], [a, d, c]]);
+        assert!((hf.height_at(o.x + 300.0, o.z + 100.0) - 100.0).abs() < 1e-3);
+        assert!((hf.height_at(o.x + 100.0, o.z + 300.0) - 100.0).abs() < 1e-3);
+        assert!((hf.height_at(o.x + 200.0, o.z + 200.0) - 200.0).abs() < 1e-3);
+    }
+
+    /// Un pas vers une cellule au sol bloqué s'arrête 20 unités avant elle ; un départ bloqué ne
+    /// bouge pas ; un segment ne bloque que de son côté.
+    #[test]
+    fn moves_stop_before_blocked_cells_and_lines() {
+        let mut t = Terrain::new(1);
+        let mut cells = vec![0x0200u32; 256];
+        cells[5 * 16 + 7] = 0x0301; // cellule (7, 5) : sol bloqué
+        let o = sector_origin(300, 300);
+        let wall_a = o + Vec3::new(400.0, 0.0, 3000.0);
+        let wall_b = o + Vec3::new(400.0, 0.0, 4000.0);
+        t.set_blocking(300, 300, SectorBlocking { cells, lines: vec![[wall_a, wall_b]] });
+        let from = o + Vec3::new(5.5 * 400.0, 0.0, 5.5 * 400.0);
+        let to = o + Vec3::new(9.5 * 400.0, 0.0, 5.5 * 400.0);
+        assert!(t.blocked(o.x + 7.5 * 400.0, o.z + 5.5 * 400.0));
+        assert!(!t.blocked(from.x, from.z));
+        let stop = t.clip_move(from, to, 0.0);
+        assert!((stop.x - (o.x + 7.0 * 400.0 - 20.0)).abs() < 0.01, "{stop:?}");
+        assert!(!t.blocked(stop.x, stop.z));
+        // Trajet qui passe à côté : intact.
+        let by = o + Vec3::new(9.5 * 400.0, 0.0, 6.5 * 400.0);
+        assert_eq!(t.clip_move(o + Vec3::new(5.5 * 400.0, 0.0, 6.5 * 400.0), by, 0.0), by);
+        // Départ dans la cellule bloquée : pas de mouvement.
+        let inside = o + Vec3::new(7.5 * 400.0, 0.0, 5.5 * 400.0);
+        assert_eq!(t.clip_move(inside, to, 0.0), inside);
+        // Segment x = 400 (z 3000..4000), normale (-dz, dx) de a − b vers +x : arrêt en venant de +x…
+        let east = o + Vec3::new(800.0, 0.0, 3500.0);
+        let west = o + Vec3::new(0.0, 0.0, 3500.0);
+        let hit = t.clip_move(east, west, 0.0);
+        assert!((hit.x - (o.x + 400.0)).abs() < 0.01, "{hit:?}");
+        // … libre en venant de -x, et au-delà de ses extrémités.
+        assert_eq!(t.clip_move(west, east, 0.0), east);
+        let south = o + Vec3::new(0.0, 0.0, 2000.0);
+        assert_eq!(t.clip_move(o + Vec3::new(800.0, 0.0, 2000.0), south, 0.0), south);
+    }
+
+    /// Avec les données du client (`ARCHRUST_GAME_DIR`) : autour de Tullan, un pas vers une
+    /// cellule bloquée du `.amf` (rempart) s'arrête avant elle.
+    #[test]
+    fn tullan_blocked_cells_stop_the_walk() {
+        let Some(dir) = std::env::var_os("ARCHRUST_GAME_DIR") else { return };
+        let assets = Assets::new(Some(dir.into()), &[]);
+        let mut t = Terrain::new(1);
+        assert!(t.load_ground(&assets, 343, 412));
+        let o = sector_origin(343, 412);
+        let cell = |i: i32, j: i32| o + Vec3::new((i as f32 + 0.5) * CELL_SIZE, 0.0, (j as f32 + 0.5) * CELL_SIZE);
+        let (i, j) = (1..16)
+            .flat_map(|j| (1..16).map(move |i| (i, j)))
+            .find(|&(i, j)| t.blocked(cell(i, j).x, cell(i, j).z) && !t.blocked(cell(i - 1, j).x, cell(i - 1, j).z))
+            .expect("une cellule bloquée à côté d'une libre");
+        let stop = t.clip_move(cell(i - 1, j), cell(i, j), 0.0);
+        assert!((stop.x - (o.x + i as f32 * CELL_SIZE - 20.0)).abs() < 0.01, "{stop:?}");
+        assert!(!t.blocked(stop.x, stop.z));
     }
 }
