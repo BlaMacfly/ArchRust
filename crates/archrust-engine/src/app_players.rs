@@ -5,9 +5,10 @@
 //! `WorldEvent::SelfCharacter`, comme celles du joueur (op 25 puis 0) : un CID différent du sien en
 //! fait une entité, et ses objets portés vont dans l'équipement de cette entité, pas dans
 //! l'inventaire. Les déplacements (0x40, op 1) et le retrait suivent le chemin des autres entités.
+//! Métamorphosé (voir `app_morph.rs`), un changement d'équipement n'est pas redessiné et la tête n'est pas posée.
 
 use super::App;
-use crate::scene::{entity_meshes_with_equipment, Entity, Head};
+use crate::scene::{entity_meshes_with_head, Entity, Head};
 use archrust_netclient::world::{CharacterStats, EquipmentView, ItemRecord};
 use glam::{Mat4, Vec3};
 
@@ -144,22 +145,25 @@ impl App {
             // Propriétaire hors de vue : rien à afficher, mais pas dans l'inventaire non plus.
             return other_owner.is_some();
         };
-        if apply_worn_item(&mut self.entities[index].equipment, item) {
+        // Métamorphosé : l'équipement suit, le modèle n'est redessiné qu'à l'op 12 (voir `app_morph.rs`).
+        if apply_worn_item(&mut self.entities[index].equipment, item) && !self.morph_frozen_model(self.entities[index].cid) {
             self.reload_entity_meshes(index);
         }
         true
     }
 
-    /// Recharge le corps, la tête et l'équipement d'une entité ; la boîte de repère en cas d'échec.
+    /// Recharge le corps, la tête (pas pour un personnage métamorphosé) et l'équipement d'une entité ; la boîte
+    /// de repère en cas d'échec.
     pub(super) fn reload_entity_meshes(&mut self, index: usize) {
+        let head = (!self.morph_frozen_model(self.entities[index].cid)).then_some(self.entities[index].head);
         let Some(gpu) = self.gpu.as_mut() else { return };
         let fallback = gpu.marker.clone();
         let e = &self.entities[index];
-        let meshes = entity_meshes_with_equipment(
+        let meshes = entity_meshes_with_head(
             &mut gpu.renderer,
             &self.assets,
             e.tid,
-            e.head,
+            head,
             &e.equipment,
             &fallback,
         )

@@ -83,6 +83,10 @@ pub struct BuddyGlue {
     info: VecDeque<String>,
     /// Menu du joueur ciblé ouvert (`UI_TargetCharacterMenu`).
     target_menu: bool,
+    /// Entrée « Trade » montrée (`IsActivePrivateTradeMemu`, posé par le moteur, voir `app_trade.rs`).
+    pub trade_menu: bool,
+    /// « Trade » choisi : CID et nom du joueur ciblé, repris par `app_trade.rs`.
+    pub trade_chosen: Option<(i32, String)>,
     /// Fichier `IgnoreList.txt` (dossier des SavedVariables).
     ignore_path: Option<PathBuf>,
     messages: Option<HashMap<String, String>>,
@@ -334,7 +338,11 @@ pub fn panel(ctx: &egui::Context, glue: &mut BuddyGlue, target: Option<(i32, Str
     // Menu du joueur ciblé.
     match target {
         Some((cid, name)) => {
-            let mut entries = vec![TargetMenuUi::Invite, TargetMenuUi::Whisper];
+            let mut entries = vec![TargetMenuUi::Invite];
+            if glue.trade_menu {
+                entries.push(TargetMenuUi::Trade);
+            }
+            entries.push(TargetMenuUi::Whisper);
             if !glue.in_friends(&name) {
                 entries.push(TargetMenuUi::AddFriend);
             }
@@ -350,6 +358,7 @@ pub fn panel(ctx: &egui::Context, glue: &mut BuddyGlue, target: Option<(i32, Str
                             net.send(Command::Party(PartyCommand::Invite { cid: Some(cid), name: None }));
                         }
                     }
+                    TargetMenuUi::Trade => glue.trade_chosen = Some((cid, name.clone())),
                     TargetMenuUi::Whisper => {
                         ui.whisper_target = Some(name.clone());
                         ui.chat_focus = true;

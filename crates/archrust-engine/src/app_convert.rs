@@ -39,8 +39,9 @@ use std::collections::HashMap;
 
 /// Au-delà, la fenêtre du forgeron se ferme (comme celles des autres PNJ).
 const CLOSE_RANGE: f32 = 2200.0;
-/// Statut AgpmItem d'un objet du sac.
+/// Statut AgpmItem d'un objet du sac, d'un objet porté.
 const STATUS_INVENTORY: i8 = 2;
+const STATUS_EQUIP: i8 = 3;
 /// Genres (`Kind` d'itemdatatable.txt) : armure, arme ; type d'arme lance (`Type` 17).
 const KIND_ARMOR: i64 = 1;
 const KIND_WEAPON: i64 = 2;
@@ -73,6 +74,45 @@ struct ItemInfo {
     physical_rank: i64,
     /// Options du modèle (`OptionTID`, liste séparée par des `;`) : celles d'une rune sertie.
     options: Vec<i32>,
+    /// Groupes d'options liées du modèle (`Link_id`, `;`, 10 au plus ; `AgpdItemTemplate + 0x30c`).
+    links: Vec<i32>,
+}
+
+/// Colonnes d'itemoptiontable.txt que somme la fenêtre du personnage (chargeur FUN_1401d8c30), rangées par
+/// indice `k` de FUN_14051a150, et bornes de niveau d'une option liée.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub(super) struct OptionValues {
+    /// 2 taux critique (`skill_rate` si `skill_type` = 1), 3 dégâts critiques (`Critical`, quel que soit
+    /// `skill_type`), 4 `Ignore_Attribute_Defense_Rate`, 5 `Ignore_Physical_Defense_Rate`,
+    /// 6 `Critical_Defense_Rate`, 7 `StunResistance`, 8 « renvoi » : probabilité (`skill_rate` si `skill_type`
+    /// = 3, coup reçu changé en PV), 9 « renvoi » : quantité (`damage_convert_hp`). Valeurs brutes.
+    k: [i32; 10],
+    /// `Level_min`, `Level_max` (options liées).
+    level: (i32, i32),
+}
+
+impl OptionValues {
+    /// Valeurs d'une ligne, `num` donnant la colonne nommée (0 si vide ou absente).
+    fn of(num: impl Fn(&str) -> i32) -> Self {
+        let (skill_type, skill_rate) = (num("skill_type"), num("skill_rate"));
+        let mut k = [0; 10];
+        k[2] = if skill_type == 1 { skill_rate } else { 0 };
+        k[3] = num("Critical");
+        k[4] = num("Ignore_Attribute_Defense_Rate");
+        k[5] = num("Ignore_Physical_Defense_Rate");
+        k[6] = num("Critical_Defense_Rate");
+        k[7] = num("StunResistance");
+        k[8] = if skill_type == 3 { skill_rate } else { 0 };
+        k[9] = num("damage_convert_hp");
+        OptionValues { k, level: (num("Level_min"), num("Level_max")) }
+    }
+}
+
+/// Somme élément par élément (`int` d'Archonia : dépassement en boucle).
+fn add_into(acc: &mut [i32; 10], v: &[i32; 10]) {
+    for (a, b) in acc.iter_mut().zip(v) {
+        *a = a.wrapping_add(*b);
+    }
 }
 
 impl ItemInfo {
@@ -171,6 +211,10 @@ struct ConvertData {
     options: HashMap<i32, (String, bool)>,
     /// TID des runes (itemruneattributetable.txt).
     runes: std::collections::HashSet<i32>,
+    /// itemoptiontable.txt : TID → colonnes sommées par la fenêtre du personnage.
+    option_values: HashMap<i32, OptionValues>,
+    /// Options de chaque groupe lié (`Link_id` > 0), dans l'ordre du fichier (carte `AgpmItem + 0x18d8`).
+    link_groups: HashMap<i32, Vec<i32>>,
 }
 
 impl ConvertData {
@@ -190,6 +234,96 @@ impl ConvertData {
     fn is_rune(&self, tid: Option<i32>) -> bool {
         tid.is_some_and(|t| self.runes.contains(&t)) || self.info(tid).usable(USABLE_RUNE)
     }
+
+    /// Option liée du groupe `link` pour un niveau (FUN_1401c7f00) : la première du groupe, dans l'ordre du
+    /// fichier, avec `Level_min` ≤ niveau ≤ `Level_max`.
+    fn linked(&self, link: i32, level: i32) -> Option<&OptionValues> {
+        self.link_groups.get(&link)?.iter().filter_map(|t| self.option_values.get(t)).find(|o| o.level.0 <= level && level <= o.level.1)
+    }
+
+    /// Somme des `OptionTID` (5 au plus, `AgpdItemTemplate + 0x280`) du modèle `tid`.
+    fn template_options(&self, tid: i32, acc: &mut [i32; 10]) {
+        let Some(info) = self.items.get(&tid) else { return };
+        for o in info.options.iter().take(5).filter_map(|u| self.option_values.get(u)) {
+            add_into(acc, &o.k);
+        }
+    }
+
+    /// Liste interne de 50 `u16` d'un objet (`AgpdItem + 0x2c6`), remplie par le client lui-même : à la
+    /// réception de l'état de conversion (FUN_14028e150), pour chaque serti (1 à 8) dont le modèle est une rune
+    /// (`ItemType` 1, `Type` 9), chacune de ses 5 `OptionTID` passe par FUN_14032d620, qui range le TID de
+    /// l'option (s'il existe dans la table) à la première place libre, tant qu'il en reste. Archonia n'efface
+    /// pas la liste à une nouvelle réception (accumulation éventuelle non reproduite : la liste est tirée de
+    /// l'état connu).
+    fn rune_option_list(&self, filled: &[i32]) -> Vec<i32> {
+        let mut list = Vec::new();
+        if !(1..=8).contains(&filled.len()) {
+            return list;
+        }
+        for tid in filled {
+            let Some(info) = self.items.get(tid).filter(|i| i.usable(USABLE_RUNE)) else { continue };
+            for u in info.options.iter().take(5) {
+                if list.len() < 50 && self.option_values.contains_key(u) {
+                    list.push(*u);
+                }
+            }
+        }
+        list
+    }
+
+    /// Part d'un objet porté dans les caractéristiques secondaires, pour chaque indice `k` (FUN_14051a150) :
+    /// (a) options liées du modèle au niveau du personnage, (b) 5 options de l'objet (AGPMITEM champ 20),
+    /// (c) liste interne des runes, (d) `OptionTID` des modèles sertis ; (e) prestige (ajout d'Archonia, hors
+    /// EP8) : 0.
+    fn item_properties(&self, tid: i32, options: &[u16], filled: &[i32], level: i32) -> [i32; 10] {
+        let mut acc = [0; 10];
+        // (a) `Link_id` > 0 du modèle (10 au plus).
+        for link in self.items.get(&tid).map(|i| i.links.as_slice()).unwrap_or_default().iter().take(10).filter(|l| **l > 0) {
+            if let Some(o) = self.linked(*link, level) {
+                add_into(&mut acc, &o.k);
+            }
+        }
+        // (b) options tirées de l'objet.
+        for o in options.iter().take(5).filter_map(|t| self.option_values.get(&(*t as i32))) {
+            add_into(&mut acc, &o.k);
+        }
+        // (c) Incohérence d'Archonia, reproduite : la liste contient des TID d'*option*, que FUN_14051a150 relit
+        // comme des TID de *modèle d'objet* (FUN_1401af480) avant d'en sommer les `OptionTID`. La plupart ne
+        // tombent sur aucun modèle à options (la rune n'est donc pas comptée deux fois), mais quelques-uns
+        // coïncident avec un modèle qui en a (option 5012 → modèle 5012 « Logo Ring » : 5 options en plus).
+        for t in self.rune_option_list(filled) {
+            self.template_options(t, &mut acc);
+        }
+        // (d) modèles sertis.
+        for t in filled {
+            self.template_options(*t, &mut acc);
+        }
+        acc
+    }
+}
+
+/// itemoptiontable.txt (colonnes lues par nom, en-têtes anglais) : `Description` et `visible` (infobulles),
+/// colonnes de la fenêtre du personnage ([`OptionValues`]) et groupes liés (`Link_id`).
+fn load_option_table(d: &mut ConvertData, text: &str) {
+    let mut lines = text.lines();
+    let Some(header) = lines.next() else { return };
+    let cols: Vec<&str> = header.split('\t').map(str::trim).collect();
+    let col = |name: &str| cols.iter().position(|c| c.eq_ignore_ascii_case(name));
+    let (tid, desc, visible, link) = (col("tid"), col("Description"), col("visible"), col("Link_id"));
+    let names = ["skill_type", "skill_rate", "Critical", "damage_convert_hp", "Ignore_Physical_Defense_Rate", "Ignore_Attribute_Defense_Rate", "Critical_Defense_Rate", "StunResistance", "Level_min", "Level_max"];
+    let numeric: Vec<(&str, Option<usize>)> = names.iter().map(|n| (*n, col(n))).collect();
+    for line in lines {
+        let cells: Vec<&str> = line.split('\t').collect();
+        let get = |c: Option<usize>| c.and_then(|i| cells.get(i).copied()).unwrap_or("");
+        let int = |c: Option<usize>| get(c).trim().parse::<f64>().map_or(0, |v| v as i32);
+        let Ok(t) = get(tid).trim().parse::<i32>() else { continue };
+        d.options.insert(t, (get(desc).trim().trim_matches('"').to_string(), !get(visible).trim().is_empty()));
+        d.option_values.insert(t, OptionValues::of(|name| numeric.iter().find(|(n, _)| *n == name).map_or(0, |(_, c)| int(*c))));
+        let l = int(link);
+        if l > 0 {
+            d.link_groups.entry(l).or_default().push(t);
+        }
+    }
 }
 
 fn load_data(assets: &Assets) -> ConvertData {
@@ -202,7 +336,8 @@ fn load_data(assets: &Assets) -> ConvertData {
         let col = |name: &str| cols.iter().position(|c| c.eq_ignore_ascii_case(name));
         let (tid, kind, part, item_type, kind_type, spirit, rank, min_socket, physical) =
             (col("TID"), col("Kind"), col("Part"), col("ItemType"), col("Type"), col("Spirit Type"), col("Rank"), col("MinSocket"), col("PhysicalRank"));
-        let option_tid = col("OptionTID");
+        let (option_tid, link_id) = (col("OptionTID"), col("Link_id"));
+        let ids = |v: Option<&str>| v.map(|v| v.split(|c: char| !c.is_ascii_digit()).filter_map(|n| n.parse::<i32>().ok()).filter(|n| *n > 0).collect()).unwrap_or_default();
         for line in lines {
             let cells: Vec<&str> = line.split('\t').collect();
             let get = |c: Option<usize>| c.and_then(|i| cells.get(i).copied());
@@ -219,28 +354,15 @@ fn load_data(assets: &Assets) -> ConvertData {
                     min_socket: num(get(min_socket)),
                     physical_rank: num(get(physical)),
                     // « 5594;13207 », parfois entre crochets : « [20;135;40;1021] ».
-                    options: get(option_tid)
-                        .map(|v| v.split(|c: char| !c.is_ascii_digit()).filter_map(|n| n.parse::<i32>().ok()).filter(|n| *n > 0).collect())
-                        .unwrap_or_default(),
+                    options: ids(get(option_tid)),
+                    // « 9;16;29;22;30 ».
+                    links: ids(get(link_id)),
                 },
             );
         }
     }
     // itemoptiontable.txt (`ini_fr` d'abord : descriptions traduites) : tid, Description, …, visible.
-    let text = super::npc_glue::client_text(assets, "itemoptiontable.txt");
-    let mut lines = text.lines();
-    if let Some(header) = lines.next() {
-        let cols: Vec<&str> = header.split('\t').map(str::trim).collect();
-        let col = |name: &str| cols.iter().position(|c| c.eq_ignore_ascii_case(name));
-        let (tid, desc, visible) = (col("tid"), col("Description"), col("visible"));
-        for line in lines {
-            let cells: Vec<&str> = line.split('\t').collect();
-            let get = |c: Option<usize>| c.and_then(|i| cells.get(i).copied()).unwrap_or("");
-            if let Ok(t) = get(tid).trim().parse::<i32>() {
-                d.options.insert(t, (get(desc).trim().trim_matches('"').to_string(), !get(visible).trim().is_empty()));
-            }
-        }
-    }
+    load_option_table(&mut d, &super::npc_glue::client_text(assets, "itemoptiontable.txt"));
     // itemruneattributetable.txt : Item_Name, TID, …
     let text = super::npc_glue::client_text_in(assets, "ini", "itemruneattributetable.txt");
     let mut lines = text.lines();
@@ -352,6 +474,8 @@ pub struct ConvertGlue {
     version: u64,
     /// Infobulle épinglée par `/infobulle` (essais, captures).
     pinned_tip: Option<i32>,
+    /// Dernier calcul de la part des objets des caractéristiques secondaires.
+    properties_at: Option<std::time::Instant>,
 }
 
 impl ConvertGlue {
@@ -842,6 +966,7 @@ impl App {
             let labels = [378, 262, 379, 380].map(|id| super::npc_glue::sysstr(&assets, id).unwrap_or_default());
             self.hud.item_tips = items.iter().map(|i| (i.id, self.convert.tooltip(&assets, i, who, &labels))).collect();
         }
+        self.worn_properties_frame(&assets);
         if let Some(npc) = self.convert.npc {
             let me = self.player.as_ref().map(|p| p.position);
             let far = match (me, self.entities.iter().find(|e| e.cid == npc).map(|e| e.position)) {
@@ -857,6 +982,29 @@ impl App {
 }
 
 impl App {
+    /// Part des objets portés dans les caractéristiques secondaires de la fenêtre du personnage
+    /// (`CharacterStats::item_properties`, lue par `hud_status.rs`). Comme l'OnIdle d'AgcmUICharacter
+    /// (FUN_1404fd3e0) : au plus une fois par seconde, pour le joueur seul ; somme sur toutes les cases
+    /// d'équipement (FUN_14051aa90, sans contrôle de durabilité) au niveau du personnage.
+    fn worn_properties_frame(&mut self, assets: &Assets) {
+        if self.convert.properties_at.is_some_and(|t| t.elapsed() < std::time::Duration::from_millis(1000)) {
+            return;
+        }
+        self.convert.properties_at = Some(std::time::Instant::now());
+        self.convert.data(assets);
+        let glue = &self.convert;
+        let Some(d) = glue.data.as_ref() else { return };
+        let level = self.hud.stats.level.unwrap_or(0);
+        let mut acc = [0; 10];
+        for i in self.items.values().filter(|i| i.status == Some(STATUS_EQUIP)) {
+            let Some(tid) = i.template_id else { continue };
+            let options = glue.options.get(&i.id).map(Vec::as_slice).unwrap_or_default();
+            let filled = glue.states.get(&i.id).map(|s| s.filled.as_slice()).unwrap_or_default();
+            add_into(&mut acc, &d.item_properties(tid, options, filled, level));
+        }
+        self.hud.stats.item_properties = acc;
+    }
+
     /// Objet du sac par nom ou TID (le premier par IID).
     fn convert_find(&self, wanted: &str) -> Option<ItemRecord> {
         let wanted = wanted.trim().to_lowercase();
@@ -955,6 +1103,69 @@ mod tests {
         assert!(!admits(cuirass.race, knight.race) && admits(cuirass.class, knight.class));
         assert!(!admits(kilt.class, knight.class));
         assert!(admits(0, 3), "masque nul : tout le monde");
+    }
+
+    /// Lignes réelles d'itemoptiontable.txt (colonnes utiles seulement) : critique lié au niveau (groupe 22),
+    /// rune de critique, option « Critical » sans `skill_type`, conversion en PV, défense ignorée.
+    const OPTIONS: &str = "tid\tDescription\tskill_type\tskill_rate\tCritical\tdamage_convert_hp\tvisible\tLevel_min\tLevel_max\tLink_id\tIgnore_Physical_Defense_Rate\tStunResistance\n\
+        883\t15% chance on hit to strike your target for 250% damage.\t1\t15\t250\t\t1\t\t\t\t\t\n\
+        2151\t1% chance on hit to strike your target for 110% damage.\t1\t1\t110\t\t1\t1\t10\t22\t\t\n\
+        2152\t2% chance on hit to strike your target for 120% damage.\t1\t2\t120\t\t1\t11\t20\t22\t\t\n\
+        2153\t3% chance on hit to strike your target for 130% damage.\t1\t3\t130\t\t1\t21\t30\t22\t\t\n\
+        3191\tCritical Hit Rate +10%\t1\t10\t\t\t1\t\t\t\t\t\n\
+        3242\t5% chance when hit to convert 10% of damage taken into restored health.\t3\t5\t\t10\t1\t\t\t\t\t\n\
+        8061\tIgnores Defense with 1% chance during Attack\t\t\t\t\t1\t1\t10\t156\t1\t\n\
+        13822\tCritical Hit Rate +1%\t\t\t1\t\t1\t\t\t\t\t\n";
+
+    fn option_data() -> ConvertData {
+        let mut d = ConvertData::default();
+        load_option_table(&mut d, OPTIONS);
+        let model = |options: Vec<i32>, links: Vec<i32>, rune: bool| ItemInfo { item_type: if rune { 1 } else { 0 }, kind_type: if rune { USABLE_RUNE } else { 0 }, options, links, ..Default::default() };
+        // « Arm pad of Balakas » (Link_id 9;16;29;22;30), « Critical Hit Prayer Stone<Lv1> » (OptionTID 3191),
+        // « Conversion Prayer Stone Lv 1 » (OptionTID 3242).
+        d.items.insert(3919, model(vec![], vec![9, 16, 29, 22, 30], false));
+        d.items.insert(1890, model(vec![3191], vec![], true));
+        d.items.insert(609, model(vec![3242], vec![], true));
+        d
+    }
+
+    #[test]
+    fn somme_des_options_portees() {
+        let d = option_data();
+        // Règles du chargeur : `skill_rate` → taux critique si `skill_type` 1, « renvoi » si 3 ; `Critical`
+        // toujours (13822 « Critical Hit Rate +1% » donne +1 de dégâts critiques, pas de taux).
+        assert_eq!(d.option_values[&883].k[2..4], [15, 250]);
+        assert_eq!(d.option_values[&13822].k[2..4], [0, 1]);
+        assert_eq!(d.option_values[&3242].k[8..10], [5, 10]);
+        assert_eq!((d.option_values[&8061].k[5], d.option_values[&8061].level), (1, (1, 10)));
+        // Groupe 22 au niveau 15 : 2152 ; hors bornes : rien.
+        assert_eq!(d.linked(22, 15), d.option_values.get(&2152));
+        assert_eq!(d.linked(22, 31), None);
+        // Exemple de la spec : niveau 15, brassard (2152 : taux 2, dégâts 120) + rune 1890 sertie (3191 : taux 10).
+        let p = d.item_properties(3919, &[], &[1890], 15);
+        assert_eq!(p, [0, 0, 12, 120, 0, 0, 0, 0, 0, 0]);
+        // Options tirées (champ 20, 5 au plus) et rune de conversion sertie.
+        let p = d.item_properties(3919, &[13822, 0, 0, 0, 0, 883], &[1890, 609], 5);
+        assert_eq!(p, [0, 0, 1 + 10, 110 + 1, 0, 0, 0, 0, 5, 10]);
+        // Liste interne des runes : TID d'option (3191, 3242), relus comme TID de modèle. Un modèle 3191 qui
+        // porterait l'option 883 ajoute donc 15 / 250 (incohérence d'Archonia reproduite).
+        assert_eq!(d.rune_option_list(&[1890, 609]), vec![3191, 3242]);
+        let mut d = d;
+        d.items.insert(3191, ItemInfo { options: vec![883], ..Default::default() });
+        assert_eq!(d.item_properties(1, &[], &[1890], 15)[2..4], [10 + 15, 250]);
+    }
+
+    /// Avec les données du client (`ARCHRUST_GAME_DIR`) : la table réelle donne l'exemple de la spec.
+    #[test]
+    fn somme_des_options_du_client() {
+        let Some(dir) = std::env::var_os("ARCHRUST_GAME_DIR") else { return };
+        let assets = Assets::new(Some(dir.into()), &[]);
+        let d = load_data(&assets);
+        assert_eq!(d.option_values[&883].k[2..4], [15, 250]);
+        assert_eq!(d.option_values[&13822].k[2..4], [0, 1]);
+        assert_eq!(d.items[&3919].links, vec![9, 16, 29, 22, 30]);
+        assert_eq!(d.linked(22, 15), d.option_values.get(&2152));
+        assert_eq!(d.item_properties(3919, &[], &[1890], 15)[2..4], [12, 120]);
     }
 
     #[test]

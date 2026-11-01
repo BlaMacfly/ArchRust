@@ -12,9 +12,12 @@
 //!   FUN_1401a54b0) et des formules d'AgpmCombat pour un personnage joueur (drapeau 1 d'`AgpdCharacter+0xb8`).
 //!   Couleur (FUN_1407a6390) : `Color` si la valeur égale sa référence, `UpperColor` au-dessus, `LowerColor`
 //!   au-dessous ; la référence (facteurs du modèle au niveau du personnage) n'est connue qu'en partie, les
-//!   autres lignes restent en `Color`. Sans valeur : taux et dégâts critiques, résistance et défense ignorées,
-//!   résistances aux critiques et à l'étourdissement, renvoi de dégâts (somme des options des objets portés,
-//!   runes, conversions et prestige, FUN_14051aa90, plus une part des compétences, non relevée).
+//!   autres lignes restent en `Color`.
+//! * Taux et dégâts critiques, résistance et défense ignorées, résistances aux critiques et à
+//!   l'étourdissement, renvoi de dégâts (8 lignes, format `%d%%`) : part des compétences (AGPMSKILL champ 9,
+//!   `CharacterStats::skill_attach`) + part des objets portés (options liées, options tirées, runes et
+//!   sertis, FUN_14051aa90 ; `CharacterStats::item_properties`, calculée dans `app_convert.rs`), référence 0
+//!   pour la couleur. Le prestige d'Archonia (hors EP8) compte pour 0.
 
 use super::*;
 use archrust_netclient::world::factor_part as fp;
@@ -154,6 +157,12 @@ fn positive(v: i64) -> (i64, Tone) {
     (v, if v > 0 { Tone::Upper } else { Tone::Normal })
 }
 
+/// Caractéristique secondaire : part des compétences + part des objets (somme `int`), couleur par rapport à 0.
+fn secondary(skill: i32, items: i32) -> (i64, Tone) {
+    let v = i64::from(skill.wrapping_add(items));
+    (v, compare(0, v))
+}
+
 /// Couleur des points de meurtrier selon leur palier (FUN_1401793e0 : 40, 60, 100).
 fn murderer_tone(points: i32) -> Tone {
     match points {
@@ -258,6 +267,17 @@ fn property_value(func: &str, st: &CharacterStats, basis: &Basis) -> Option<(i64
         "IgnoreTargetRangeDodge" => (prop(cp::IGNORE, 4)?, Tone::Normal),
         "IgnoreTargetCriticalRes" => (prop(cp::IGNORE, 5)?, Tone::Normal),
         "IgnoreTargetStunRes" => (prop(cp::IGNORE, 6)?, Tone::Normal),
+        // `AgpdSkillAttachData[décalage] + cache_objets[k]` (FUN_1405190a0), référence 0.
+        "RateCritical" => secondary(st.skill_attach.critical_rate, st.item_properties[2]),
+        "CriticalDamage" => secondary(st.skill_attach.critical_damage, st.item_properties[3]),
+        "IgnoreTargetRegistance" => secondary(st.skill_attach.ignore_resistance, st.item_properties[4]),
+        "IgnoreTargetDefense" => secondary(st.skill_attach.ignore_defense, st.item_properties[5]),
+        "CriticalRegistance" => secondary(st.skill_attach.critical_resistance, st.item_properties[6]),
+        // Écart d'Archonia reproduit (FUN_1407ad760, 1407ad80d–1407ad866) : la part des objets (k = 7,
+        // `StunResistance`) est lue puis écrasée aussitôt ; seule la part des compétences s'affiche.
+        "StunRegistance" => secondary(st.skill_attach.stun_resistance, 0),
+        "ReflectDamageRate" => secondary(st.skill_attach.reflect_rate, st.item_properties[8]),
+        "RefectDamage" => secondary(st.skill_attach.reflect_amount, st.item_properties[9]),
         "MovementTenacity" => positive(prop(cp::TENACITY, 0)?),
         "AttackTenacity" => positive(prop(cp::TENACITY, 1)?),
         "CastTenacity" => positive(prop(cp::TENACITY, 2)?),
@@ -440,6 +460,31 @@ mod tests {
         assert_eq!(v("MurdererLevel", &st), Some((2, Tone::Named("Yellow"))));
         st.properties.insert((archrust_netclient::world::character_property_op::TENACITY, 2), 15);
         assert_eq!(v("CastTenacity", &st), Some((15, Tone::Upper)));
-        assert_eq!(v("RateCritical", &st), None);
+        // Caractéristiques secondaires : 0 % en blanc tant que rien n'est reçu.
+        assert_eq!(v("RateCritical", &st), Some((0, Tone::Normal)));
+    }
+
+    #[test]
+    fn caracteristiques_secondaires() {
+        let basis = Basis::default();
+        let mut st = CharacterStats::default();
+        let v = |f: &str, st: &CharacterStats| property_value(&format!("fn_CharacterProperty_{f}"), st, &basis);
+        // Exemple de la spec : objets (option liée 2152 + rune 1890) → taux 12, dégâts 120 ; compétences : +3
+        // de taux, −5 de résistance aux critiques, 4 d'étourdissement.
+        st.item_properties[2] = 12;
+        st.item_properties[3] = 120;
+        st.item_properties[7] = 9;
+        st.skill_attach.critical_rate = 3;
+        st.skill_attach.critical_resistance = -5;
+        st.skill_attach.stun_resistance = 4;
+        assert_eq!(v("RateCritical", &st), Some((15, Tone::Upper)));
+        assert_eq!(v("CriticalDamage", &st), Some((120, Tone::Upper)));
+        assert_eq!(v("CriticalRegistance", &st), Some((-5, Tone::Lower)));
+        assert_eq!(v("IgnoreTargetDefense", &st), Some((0, Tone::Normal)));
+        // Part des objets de l'étourdissement jamais affichée (écart d'Archonia).
+        assert_eq!(v("StunRegistance", &st), Some((4, Tone::Upper)));
+        st.item_properties[8] = 5;
+        st.item_properties[9] = 10;
+        assert_eq!((v("ReflectDamageRate", &st), v("RefectDamage", &st)), (Some((5, Tone::Upper)), Some((10, Tone::Upper))));
     }
 }

@@ -121,6 +121,13 @@ pub struct CharacterStats {
     pub properties: std::collections::BTreeMap<(i8, u8), i32>,
     /// Victoires et défaites en PvP (AgpmPvP op 0), reportées par le moteur.
     pub pvp: Option<(i64, i64)>,
+    /// Part des compétences des caractéristiques secondaires (AGPMSKILL champ 9, voir
+    /// [`crate::skills::SkillAttach`]), reportée par le moteur ; 0 partout tant que rien n'est reçu.
+    pub skill_attach: crate::skills::SkillAttach,
+    /// Part des objets portés de ces caractéristiques, par indice `k` d'Archonia (2 taux critique, 3 dégâts
+    /// critiques, 4 résistance ignorée, 5 défense ignorée, 6 résistance aux critiques, 7 étourdissement,
+    /// 8 et 9 « renvoi » ; FUN_14051aa90), calculée par le moteur au plus une fois par seconde.
+    pub item_properties: [i32; 10],
 }
 
 /// Opérations d'AGPMCHARACTER sans champ propre (Archonia, `FUN_140173f10` cas 0x22 à 0x24) : le client
@@ -369,6 +376,8 @@ pub enum WorldEvent {
     Buddy(crate::buddy::BuddyEvent),
     /// Courrier (AgpmMailBox, voir `mail`).
     Mail(crate::mail::MailEvent),
+    /// Échange entre joueurs (AgpmPrivateTrade 0x07, voir `trade`).
+    Trade(crate::trade::TradeEvent),
     /// Réparation chez les forgerons et durabilité des objets (voir `repair`).
     Repair(crate::repair::RepairEvent),
     /// Montures (AgpmRide et bit 1 de l'octet d'état, voir `ride`).
@@ -466,6 +475,8 @@ pub enum Command {
     Buddy(crate::buddy::BuddyCommand),
     /// Courrier (voir `mail`).
     Mail(crate::mail::MailCommand),
+    /// Échange entre joueurs (voir `trade`).
+    Trade(crate::trade::TradeCommand),
     /// Maison des ventes (voir `auction`).
     Auction(crate::auction::AuctionCommand),
     /// Commutateur d'équipement (voir `itemset`).
@@ -749,6 +760,10 @@ pub fn extra_events(p: &Incoming) -> Vec<WorldEvent> {
             out.extend(crate::skills::decode_skill_block(b));
         }
     }
+    // Champ 9 d'AGPMSKILL porté par une autre opération que la 3 (traduite par `skills::translate`).
+    if p.packet_type == packet_type::SKILL && p.op() != Some(crate::skills::op::ATTACH) {
+        out.extend(p.packet.as_ref().and_then(|packet| crate::skills::attach_of(&packet.values)).map(WorldEvent::Skill));
+    }
     out
 }
 
@@ -840,6 +855,10 @@ pub fn translate(p: &Incoming) -> WorldEvent {
     }
     if let Some(ev) = p.packet.as_ref().and_then(|packet| crate::mail::translate(p.packet_type, &packet.values)) {
         return WorldEvent::Mail(ev);
+    }
+    // Échange entre joueurs (voir `trade`).
+    if let Some(ev) = p.packet.as_ref().and_then(|packet| crate::trade::translate(p.packet_type, &packet.values)) {
+        return WorldEvent::Trade(ev);
     }
     // Maison des ventes, commutateur d'équipement (voir `auction`, `itemset`).
     if let Some(ev) = p.packet.as_ref().and_then(|packet| crate::auction::translate(p.packet_type, &packet.values)) {
@@ -1187,6 +1206,8 @@ fn item_record(values: &[Option<Value>], operation: u8) -> Option<ItemRecord> {
         Some(100) => 8, // Bank
         // Entrepôt de guilde : case au champ 7 comme le sac (Archonia FUN_1401b4d00).
         Some(53) => 7,
+        // Grille d'échange entre joueurs : case au champ 7, comme ArchCore l'envoie (voir `trade`).
+        Some(6) => 7,
         _ => usize::MAX,
     };
     let grid = field(grid_field)
@@ -1588,6 +1609,10 @@ impl WorldClient {
                         }
                         Some(Command::Repair(c)) => {
                             let (schema, values) = crate::repair::command_packet(&c, self.cid);
+                            self.conn.send(schema, &values).await
+                        }
+                        Some(Command::Trade(c)) => {
+                            let (schema, values) = crate::trade::command_packet(&c, self.cid);
                             self.conn.send(schema, &values).await
                         }
                         Some(Command::Mail(c)) => {

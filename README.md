@@ -63,6 +63,7 @@ Licence : [GPL-3.0-or-later](LICENSE.md).
 | Usure et réparation (`UI_EquipStatus`, `UI_Repair`), montures (modèle de la monture, cavalier en animation à cheval), maison des ventes (`UI_Auction`, `UI_SalesBox2`), commutateur d'équipement (`UI_SwitchEditor`), coiffeur (`UI_Customizing`) | 🟡 testé contre les paquets d'ArchCore (tests sans affichage), à confirmer en jeu |
 | Invocations et familiers (`UI_TargetSummonsMenu`), heure du monde, ciel d'après `skyset.ini` (nuages, étoiles, lune, brouillard, lumière), pluie et neige | 🟡 testé contre les paquets d'ArchCore (tests sans affichage), à confirmer en jeu |
 | Shrines (`UI_Shrine_info`), annonces du Battleground, fenêtre des boss (`UI_Boss`), sièges (fenêtres du siège, carving), ArchLord, taxes (`UI_TaxSteward`, `UI_TaxView`) | 🟡 testé contre les paquets d'ArchCore (tests sans affichage), à confirmer en jeu |
+| Échange entre joueurs (`UI_PrivateTrade`, demande et boîte oui/non, entrée « Trade » du menu du joueur ciblé), métamorphose et évolution du Dragon Scion (modèle de la forme, règles d'équipement et de cible), effets d'Archonia (particules, traînées, dépendances entre éléments, lumières), caractéristiques secondaires de `Character_Status` (critiques, ignorances, renvois, résistances) | 🟡 testé contre les paquets et les données d'ArchCore (tests sans affichage), à confirmer en jeu |
 | Armes et lances dessinées en main, montures glTF animées, déplacement au clavier, fenêtre des macros (`UI_SkillMacro`), aperçu 3D du coiffeur | ⏳ à faire |
 
 ## Démarrage rapide

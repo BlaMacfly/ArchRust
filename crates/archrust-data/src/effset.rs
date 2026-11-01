@@ -19,6 +19,12 @@
 //! (`A_CID_D.mp3`, joué par Archonia depuis `SOUND\STREAM\` en boucle), `f32` volume (1,1).
 //! Un bloc qui n'est pas une suite d'effets son est balayé à la recherche de noms `*.mp3`
 //! terminés par 0 (repli, signalé par [`EffectSet::scanned`]).
+//!
+//! Le décodage complet ([`EffectSets::decode`], [`decode_block`]) lit textures, **dépendances**
+//! ([`EffDep`] : base enfant posée sur le repère de sa base parente ou sur un nœud HAnim de son
+//! modèle, [`EffectSetData::attachments`]), bases (planches, particules, traînées, objets,
+//! lumières [`LightParams`], sons, cadres mobiles [`MovingFrameParams`], planches au sol) et
+//! animations, ainsi que les drapeaux du jeu ([`set_flag`]).
 
 use std::collections::HashMap;
 
@@ -159,8 +165,109 @@ pub struct EffBase {
     pub particles: Option<Particles>,
     /// Paramètres d'une traînée (type 3), décodés depuis `extra`.
     pub tail: Option<TailParams>,
+    /// Lumière (type 5) et cadre mobile (type 7), décodés depuis `extra`.
+    pub light: Option<LightParams>,
+    pub moving_frame: Option<MovingFrameParams>,
     pub anims: Vec<EffAnim>,
 }
+
+/// Lumière (type 5, `AgcdEffLight`), 0x30 octets lus d'un bloc en mémoire +0x70 (lecteur
+/// FUN_1409034a0, écrivain FUN_1409035d0, noms des champs : écrivain texte FUN_1408e7c60). Seuls
+/// `light_type` et `cone_angle` sont lus à l'exécution (création FUN_140833eb0) ; position, rotation,
+/// `surfaceProp` et couleur de matériau ne servent qu'aux écrivains.
+#[derive(Debug, Clone, PartialEq)]
+pub struct LightParams {
+    /// 0x00 `LightType` : 0 point (`rpLIGHTPOINT`), 1 projecteur doux, 2 projecteur.
+    pub light_type: u32,
+    /// 0x04 `pos`, 0x10 `rotAngle` (inutilisés).
+    pub pos: [f32; 3],
+    pub rot: [f32; 3],
+    /// 0x1c `conAngle` (degrés) : `RpLightSetConeAngle`.
+    pub cone_angle: f32,
+    /// 0x20 `surfaceProp`, 0x2c `materialColr` RwRGBA (inutilisés).
+    pub surface: [f32; 3],
+    pub material: [u8; 4],
+}
+
+/// Rayon d'une lumière d'effet (DAT_140e4a14c, `RpLightSetRadius` à la création) ; l'animation
+/// d'échelle le remplace par `échelle.x × 300` (FUN_1408f44e0).
+pub const LIGHT_RADIUS: f32 = 300.0;
+
+fn light_params(x: &[u8]) -> Option<LightParams> {
+    Some(LightParams {
+        light_type: u32_at(x, 0)?,
+        pos: vec3_at(x, 4)?,
+        rot: vec3_at(x, 0x10)?,
+        cone_angle: f32_at(x, 0x1c)?,
+        surface: vec3_at(x, 0x20)?,
+        material: x.get(0x2c..0x30)?.try_into().ok()?,
+    })
+}
+
+/// Cadre mobile (type 7, `AgcdEffMFrm`), six mots (lecteur FUN_140903780, écrivain texte
+/// FUN_1408e7f30). **Jamais joué par Archonia** : la mise à jour (FUN_14083cbc0) ne traite que
+/// `MFrmType == 1` (spline) et tue le contrôleur pour tout autre type ; or les 165 cadres mobiles
+/// des données sont de type 0 (secousse), dont la fonction FUN_1409038c0 n'est appelée nulle part.
+/// Décodé pour la documentation seulement.
+#[derive(Debug, Clone, PartialEq)]
+pub struct MovingFrameParams {
+    /// 0x00 `MFrmType` : 0 secousse, 1 spline.
+    pub mfrm_type: u32,
+    /// 0x04 `ShakeFrm_Axis` : 0–2 axes du repère secoué, 3–5 axes du monde, 6–8 axes de la caméra,
+    /// 9 direction au hasard dans le plan XZ.
+    pub axis: u32,
+    /// 0x08 `ShakeFrm_Whose` : 0 caméra, 1 porteur (redondant avec les drapeaux du jeu).
+    pub whose: u32,
+    /// 0x0c amplitude, 0x10 durée (ms), 0x14 nombre d'oscillations.
+    pub amplitude: f32,
+    pub duration: u32,
+    pub cycle: f32,
+}
+
+fn moving_frame_params(x: &[u8]) -> Option<MovingFrameParams> {
+    Some(MovingFrameParams { mfrm_type: u32_at(x, 0)?, axis: u32_at(x, 4)?, whose: u32_at(x, 8)?, amplitude: f32_at(x, 12)?, duration: u32_at(x, 16)?, cycle: f32_at(x, 20)? })
+}
+
+/// Dépendance entre deux bases d'un jeu (12 octets après les textures, rattachement
+/// FUN_1408386d0) : la base enfant est posée sur le repère animé de la base parente.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct EffDep {
+    /// Indice de la base parente (16 bits bas du premier mot si `dep_flag::HANIM_NODE`).
+    pub parent: u32,
+    /// Avec `dep_flag::HANIM_NODE` : ID du nœud HAnim (16 bits hauts) du modèle de l'objet parent.
+    pub node: Option<u32>,
+    pub child: u32,
+    pub flags: u32,
+}
+
+/// Drapeaux d'une dépendance (FUN_1408386d0).
+pub mod dep_flag {
+    /// Drapeaux de la base enfant `|= 0x80` (enfant qui n'est pas une traînée ; sens non relevé).
+    pub const CHILD_0X80: u32 = 0x1;
+    /// Rattachement à un nœud HAnim du modèle de l'objet parent.
+    pub const HANIM_NODE: u32 = 0x2;
+}
+
+/// Drapeaux d'un jeu (fiche 0x2c, mémoire `AgcdEffSet` +0x8c, relevés dans FUN_140714b60).
+pub mod set_flag {
+    /// Jeu orienté vers la cible.
+    pub const TO_TARGET: u32 = 0x4;
+    /// Cadre mobile : repère inséré au-dessus du porteur (0x80), de la cible (0x100) ou de la
+    /// caméra (0x200) ; sans effet visible dans Archonia (voir [`super::MovingFrameParams`]).
+    pub const MOVING_FRAME: u32 = 0x40;
+    /// Traînée à deux nœuds : bords sur les nœuds HAnim 702 (haut) et 701 (bas) du porteur.
+    pub const TWO_NODE_TAIL: u32 = 0x400;
+}
+
+/// Nœuds HAnim des bords d'une traînée à deux nœuds (`RpHAnimIDGetIndex` 0x2be et 0x2bd dans
+/// FUN_140714b60) : bord haut (A) et bord bas (B).
+pub const TAIL_NODE_TOP: u32 = 702;
+pub const TAIL_NODE_BOTTOM: u32 = 701;
+
+/// Hauteurs d'une traînée indépendante d'un jeu sans [`set_flag::TWO_NODE_TAIL`], codées en dur
+/// par FUN_140714b60 (0x428c0000, 0xc1a00000) à la place de celles des données (aucun cas livré).
+pub const TAIL_DEFAULT_TOP: f32 = 70.0;
+pub const TAIL_DEFAULT_BOTTOM: f32 = -20.0;
 
 /// Paramètres d'un système de particules.
 #[derive(Debug, Clone, PartialEq)]
@@ -431,9 +538,53 @@ pub struct EffectSetData {
     pub name: String,
     /// Durée du jeu (ms, premier champ après le nom).
     pub life: u32,
+    /// Drapeaux du jeu (fiche 0x2c, [`set_flag`]).
+    pub flags: u32,
     /// Textures : (indice, nom, masque).
     pub textures: Vec<(u32, String, String)>,
+    /// Dépendances (base parente → base enfant), dans l'ordre du bloc.
+    pub deps: Vec<EffDep>,
     pub bases: Vec<EffBase>,
+}
+
+/// Rattachement d'une base : à la base parente `parent` (et à son nœud HAnim `node`), sinon au
+/// repère du jeu.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Attach {
+    pub parent: usize,
+    pub node: Option<u32>,
+}
+
+impl EffectSetData {
+    /// Parent de chaque base d'après les dépendances, comme FUN_1408386d0 ; `None` si Archonia
+    /// arrête le jeu : indice hors des bases, traînée enfant d'une traînée, d'un son ou d'un cadre
+    /// mobile (types 3, 6, 7), base parente d'elle-même ou boucle de rattachement. Une base
+    /// rattachée deux fois garde la dernière dépendance (`RwFrameAddChild` la déplace). Le nœud
+    /// HAnim n'est gardé que pour un parent objet (seul à avoir un modèle, FUN_1404db0b0).
+    pub fn attachments(&self) -> Option<Vec<Option<Attach>>> {
+        let n = self.bases.len();
+        let mut out: Vec<Option<Attach>> = vec![None; n];
+        for d in &self.deps {
+            let (p, c) = (d.parent as usize, d.child as usize);
+            let (parent, child) = (self.bases.get(p)?, self.bases.get(c)?);
+            if p == c || (child.kind == base_kind::TAIL && matches!(parent.kind, base_kind::TAIL | base_kind::SOUND | base_kind::MOVING_FRAME)) {
+                return None;
+            }
+            out[c] = Some(Attach { parent: p, node: d.node.filter(|_| parent.kind == base_kind::OBJECT) });
+        }
+        // Pas de boucle : chaque chaîne de parents se termine en au plus `n` pas.
+        for i in 0..n {
+            let (mut j, mut steps) = (i, 0);
+            while let Some(a) = out[j] {
+                j = a.parent;
+                steps += 1;
+                if steps > n {
+                    return None;
+                }
+            }
+        }
+        Some(out)
+    }
 }
 
 fn f32_at(b: &[u8], o: usize) -> Option<f32> {
@@ -542,15 +693,29 @@ fn base_layout(kind: u32) -> Option<(bool, usize)> {
     })
 }
 
+/// Lit une dépendance (12 octets) : `u32 parent` (drapeau 2 : 16 bits bas = indice, 16 bits hauts =
+/// ID de nœud HAnim), `u32 enfant`, `u32 drapeaux`.
+fn read_dep(b: &[u8], o: usize) -> Option<EffDep> {
+    let (a, child, flags) = (u32_at(b, o)?, u32_at(b, o + 4)?, u32_at(b, o + 8)?);
+    Some(if flags & dep_flag::HANIM_NODE != 0 { EffDep { parent: a & 0xffff, node: Some(a >> 16), child, flags } } else { EffDep { parent: a, node: None, child, flags } })
+}
+
+/// Bloc d'un jeu décodé : textures, dépendances, bases.
+pub type DecodedBlock = (Vec<(u32, String, String)>, Vec<EffDep>, Vec<EffBase>);
+
 /// Décode le bloc d'un jeu (`textures`, `bases`, `deps` : compteurs de la fiche).
-pub fn decode_block(block: &[u8], textures: usize, bases: usize, deps: usize) -> Option<(Vec<(u32, String, String)>, Vec<EffBase>)> {
+pub fn decode_block(block: &[u8], textures: usize, bases: usize, deps: usize) -> Option<DecodedBlock> {
     let mut o = 0;
     let mut tex = Vec::with_capacity(textures);
     for _ in 0..textures {
         tex.push((u32_at(block, o)?, text_at(block, o + 4, 64)?, text_at(block, o + 68, 64)?));
         o += 0x84;
     }
-    o += deps * 12;
+    let mut dep_list = Vec::with_capacity(deps.min(1024));
+    for _ in 0..deps {
+        dep_list.push(read_dep(block, o)?);
+        o += 12;
+    }
     let mut out = Vec::with_capacity(bases);
     for _ in 0..bases {
         let kind = u32_at(block, o)?;
@@ -587,8 +752,11 @@ pub fn decode_block(block: &[u8], textures: usize, bases: usize, deps: usize) ->
                     base_kind::PSYS_SBH => sbh_params(extra).map(Particles::BlackHole),
                     _ => None,
                 };
-                if kind == base_kind::TAIL {
-                    base.tail = tail_params(extra);
+                match kind {
+                    base_kind::TAIL => base.tail = tail_params(extra),
+                    base_kind::LIGHT => base.light = light_params(extra),
+                    base_kind::MOVING_FRAME => base.moving_frame = moving_frame_params(extra),
+                    _ => {}
                 }
             }
         }
@@ -600,7 +768,7 @@ pub fn decode_block(block: &[u8], textures: usize, bases: usize, deps: usize) ->
         }
         out.push(base);
     }
-    (o == block.len()).then_some((tex, out))
+    (o == block.len()).then_some((tex, dep_list, out))
 }
 
 fn u32_at(b: &[u8], o: usize) -> Option<u32> {
@@ -682,14 +850,14 @@ impl EffectSets {
         Self { sets, records, var: std::sync::Arc::new(var_file.to_vec()) }
     }
 
-    /// Jeu complet : textures, bases et animations. Fiche : 0x24 durée, 0x68 nombre de textures,
-    /// 0x6c nombre de bases, 0x70 nombre de dépendances, 0x74/0x78 bloc.
+    /// Jeu complet : textures, dépendances, bases et animations. Fiche : 0x24 durée, 0x2c drapeaux,
+    /// 0x68 nombre de textures, 0x6c nombre de bases, 0x70 nombre de dépendances, 0x74/0x78 bloc.
     pub fn decode(&self, id: u32) -> Option<EffectSetData> {
         let r = self.records.get(&id)?;
         let (offset, len) = (u32_at(r, 0x74)? as usize, u32_at(r, 0x78)? as usize);
         let block = self.var.get(offset..offset + len)?;
-        let (textures, bases) = decode_block(block, u32_at(r, 0x68)? as usize, u32_at(r, 0x6c)? as usize, u32_at(r, 0x70)? as usize)?;
-        Some(EffectSetData { id, name: crate::ini::decode_cp949(cstr(&r[4..36])), life: u32_at(r, 0x24)?, textures, bases })
+        let (textures, deps, bases) = decode_block(block, u32_at(r, 0x68)? as usize, u32_at(r, 0x6c)? as usize, u32_at(r, 0x70)? as usize)?;
+        Some(EffectSetData { id, name: crate::ini::decode_cp949(cstr(&r[4..36])), life: u32_at(r, 0x24)?, flags: u32_at(r, 0x2c)?, textures, deps, bases })
     }
 
     pub fn get(&self, id: u32) -> Option<&EffectSet> {
@@ -775,7 +943,8 @@ mod tests {
         s[4..14].copy_from_slice(b"EA0044.WAV");
         s[136..140].copy_from_slice(&1.1f32.to_le_bytes());
         b.extend(&s);
-        let (tex, bases) = decode_block(&b, 1, 3, 0).expect("bloc décodé");
+        let (tex, deps, bases) = decode_block(&b, 1, 3, 0).expect("bloc décodé");
+        assert!(deps.is_empty());
         assert_eq!(tex, vec![(0, "S0000102".to_string(), String::new())]);
         assert_eq!(bases.len(), 3);
         let board = &bases[0];
@@ -792,6 +961,50 @@ mod tests {
         let mut long = b.clone();
         long.push(0);
         assert!(decode_block(&long, 1, 3, 0).is_none());
+    }
+
+    /// Dépendances (12 o après les textures), lumière (0x30 o) et cadre mobile (24 o).
+    #[test]
+    fn deps_light_and_moving_frame_decode() {
+        let mut b = Vec::new();
+        // Deux dépendances : objet 0 → traînée 1 ; nœud HAnim 5 de l'objet 0 → lumière 2.
+        put(&mut b, &[0, 1, 0]);
+        put(&mut b, &[(5 << 16), 2, dep_flag::HANIM_NODE | dep_flag::CHILD_0X80]);
+        header(&mut b, base_kind::OBJECT, 0, 0, 0, 0);
+        put(&mut b, &[2, u32::MAX, 0, 0, 0, 0, 0, 0]);
+        b.extend([0u8; 64]);
+        put(&mut b, &[0]);
+        header(&mut b, base_kind::TAIL, 0, 1000, 0, 0);
+        put(&mut b, &[3, u32::MAX, 0, 0, 0, 0, 0, 0]);
+        put(&mut b, &[20, 50, 1000, 700f32.to_bits(), (-700f32).to_bits()]);
+        // Lumière de l'EID 51 : point, cône 30°, surfaceProp −1, matériau blanc ; échelle 2 → 0.
+        header(&mut b, base_kind::LIGHT, 0, 75, 0x4, 1);
+        put(&mut b, &[0, 0, 0, 0, 0, 0, 0, 30f32.to_bits()]);
+        put(&mut b, &[(-1f32).to_bits(); 3]);
+        put(&mut b, &[u32::MAX]);
+        put(&mut b, &[anim_kind::SCALE, 0, 75, 1, 2, 0, 2f32.to_bits(), 2f32.to_bits(), 2f32.to_bits(), 75, 0, 0, 0]);
+        // Cadre mobile de l'EID 3622 : secousse, axe Y du monde, caméra, 15, 1000 ms, 10.
+        header(&mut b, base_kind::MOVING_FRAME, 0, 1000, 0, 0);
+        put(&mut b, &[0, 4, 0, 15f32.to_bits(), 1000, 10f32.to_bits()]);
+        let (_, deps, bases) = decode_block(&b, 0, 4, 2).expect("bloc décodé");
+        assert_eq!(deps[0], EffDep { parent: 0, node: None, child: 1, flags: 0 });
+        assert_eq!(deps[1], EffDep { parent: 0, node: Some(5), child: 2, flags: 3 });
+        let l = bases[2].light.as_ref().expect("lumière");
+        assert_eq!((l.light_type, l.cone_angle, l.surface, l.material), (0, 30.0, [-1.0; 3], [0xff; 4]));
+        assert_eq!(bases[2].anims[0].keys, AnimKeys::Vec3(vec![(0, [2.0; 3]), (75, [0.0; 3])]));
+        let m = bases[3].moving_frame.as_ref().expect("cadre mobile");
+        assert_eq!((m.mfrm_type, m.axis, m.whose, m.amplitude, m.duration, m.cycle), (0, 4, 0, 15.0, 1000, 10.0));
+        // Rattachements : traînée sur l'objet, lumière sur le nœud 5 de l'objet.
+        let set = EffectSetData { deps: deps.clone(), bases: bases.clone(), ..Default::default() };
+        let at = set.attachments().expect("jeu jouable");
+        assert_eq!(at, vec![None, Some(Attach { parent: 0, node: None }), Some(Attach { parent: 0, node: Some(5) }), None]);
+        // Traînée enfant d'un cadre mobile, indice hors des bases, boucle : jeu arrêté.
+        let bad = |deps: Vec<EffDep>| EffectSetData { deps, bases: bases.clone(), ..Default::default() }.attachments();
+        assert!(bad(vec![EffDep { parent: 3, node: None, child: 1, flags: 0 }]).is_none());
+        assert!(bad(vec![EffDep { parent: 9, node: None, child: 1, flags: 0 }]).is_none());
+        assert!(bad(vec![EffDep { parent: 0, node: None, child: 2, flags: 0 }, EffDep { parent: 2, node: None, child: 0, flags: 0 }]).is_none());
+        // Compteur de dépendances faux : fin de bloc décalée, refusé.
+        assert!(decode_block(&b, 0, 4, 1).is_none());
     }
 
     #[test]
@@ -827,6 +1040,52 @@ mod tests {
         let lv = sets.decode(3610).unwrap();
         assert_eq!(lv.name, "LevelUp(Main)");
         assert!(lv.bases.iter().any(|b| b.clump.as_ref().is_some_and(|c| c.0 == "K0004300.ECL")));
+        // Dépendances et traînées (relevé de la spec) : 713 traînées, dont 710 enfants d'une base
+        // (objet 429, planche 264, trou noir 16, particules 1) ; drapeau de dépendance toujours 0.
+        let all: Vec<EffectSetData> = sets.iter().filter_map(|s| sets.decode(s.id)).collect();
+        let mut tails = 0;
+        let mut parents: HashMap<u32, usize> = HashMap::new();
+        let mut dep_flags: HashMap<u32, usize> = HashMap::new();
+        let mut refused = Vec::new();
+        for s in &all {
+            for d in &s.deps {
+                *dep_flags.entry(d.flags).or_default() += 1;
+                // Nœuds HAnim : toujours sur un objet (ex. jeu 14, K0000e00.ECL, nœuds 990 à 993).
+                if d.node.is_some() {
+                    assert_eq!(s.bases[d.parent as usize].kind, base_kind::OBJECT, "jeu {}", s.id);
+                }
+            }
+            let Some(at) = s.attachments() else {
+                refused.push(s.id);
+                continue;
+            };
+            for (i, b) in s.bases.iter().enumerate().filter(|(_, b)| b.kind == base_kind::TAIL) {
+                tails += 1;
+                if let Some(a) = at[i] {
+                    *parents.entry(s.bases[a.parent].kind).or_default() += 1;
+                    let t = b.tail.as_ref().unwrap();
+                    assert!(t.top != 0.0 || t.bottom != 0.0, "jeu {} : traînée sans hauteurs", s.id);
+                }
+            }
+        }
+        assert!(refused.is_empty(), "jeux refusés : {refused:?}");
+        // 5 207 dépendances : 5 191 sans drapeau, 3 avec le drapeau 1, 13 sur un nœud HAnim.
+        assert_eq!((dep_flags[&0], dep_flags[&1], dep_flags[&2]), (5191, 3, 13));
+        assert_eq!(tails, 713);
+        assert_eq!(parents.values().sum::<usize>(), 710);
+        assert_eq!((parents[&base_kind::OBJECT], parents[&base_kind::BOARD], parents[&base_kind::PSYS_SBH], parents[&base_kind::PSYS]), (429, 264, 16, 1));
+        // Traînées indépendantes : seulement dans les trois jeux à deux nœuds (drapeau 0x400).
+        let two: Vec<u32> = all.iter().filter(|s| s.flags & set_flag::TWO_NODE_TAIL != 0).map(|s| s.id).collect();
+        assert_eq!(two, vec![2627, 2960, 6082]);
+        // Une seule lumière (EID 51), cadres mobiles tous de type 0 (secousse).
+        let lights: Vec<(u32, &EffBase)> = all.iter().flat_map(|s| s.bases.iter().map(move |b| (s.id, b))).filter(|(_, b)| b.kind == base_kind::LIGHT).collect();
+        assert_eq!(lights.len(), 1);
+        assert_eq!(lights[0].0, 51);
+        let l = lights[0].1.light.as_ref().unwrap();
+        assert_eq!((l.light_type, l.cone_angle), (0, 30.0));
+        let mfrm: Vec<&MovingFrameParams> = all.iter().flat_map(|s| s.bases.iter()).filter_map(|b| b.moving_frame.as_ref()).collect();
+        assert_eq!(mfrm.len(), 165);
+        assert!(mfrm.iter().all(|m| m.mfrm_type == 0));
     }
 
     #[test]

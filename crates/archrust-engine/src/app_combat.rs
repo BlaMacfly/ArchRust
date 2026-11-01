@@ -192,15 +192,25 @@ impl App {
 
     /// Vrai si le modèle porte les bits « attaquable » et « ciblable » et n'est pas un joueur (un
     /// joueur ne s'attaque qu'en combat de guildes, voir `guild.state.is_enemy`).
+    /// Le modèle courant compte (monstre métamorphosé par une Mutation : type de la forme, `FUN_140170d10`).
     fn combat_attackable(&mut self, tid: i32) -> bool {
-        let assets = &self.assets;
-        let t = self.combat.types.get_or_insert_with(|| character_types(assets)).get(&tid).copied().unwrap_or(0);
+        let t = self.combat_char_type(tid);
         t & ATTACKABLE_TYPE == ATTACKABLE_TYPE && t & TYPE_PC == 0
     }
 
+    /// Type de personnage du TID (`CharacterDataTable.txt`), 0 s'il est inconnu.
+    pub(super) fn combat_char_type(&mut self, tid: i32) -> u32 {
+        let assets = &self.assets;
+        self.combat.types.get_or_insert_with(|| character_types(assets)).get(&tid).copied().unwrap_or(0)
+    }
+
     /// Le personnage `cid` (modèle `tid`) peut-il être attaqué : monstre, joueur ennemi, ou invocation selon la règle
-    /// de `app_summons.rs` (jamais la sienne).
+    /// de `app_summons.rs` (jamais la sienne). Jamais si le joueur ou la cible est métamorphosé en animal (`Type` & 8,
+    /// voir `app_morph.rs`).
     fn combat_can_attack(&mut self, cid: i32, tid: Option<i32>) -> bool {
+        if !self.morph_allows_attack(cid) {
+            return false;
+        }
         if let Some(ok) = self.summons_attackable(cid) {
             return ok;
         }

@@ -151,6 +151,9 @@ pub mod item_flag {
     pub const BOUND_MASK: u32 = 0x7;
     /// Lié définitivement : jamais en vente (843).
     pub const BOUND_FOREVER: u32 = 1 << 30;
+    /// DISARMAMENT (« désarmé », `+0x218 & 0x1000`) : objet que `FUN_1401bca10` refuse de porter ou de retirer
+    /// (voir `morph` et `app_morph.rs`).
+    pub const DISARMAMENT: u32 = 0x1000;
 }
 
 fn mini_packet(s: &'static Schema, pairs: &[(usize, Value)]) -> Value {

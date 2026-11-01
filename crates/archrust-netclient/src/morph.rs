@@ -16,6 +16,12 @@
 //! ```
 //!
 //! L'op 13 reçue du serveur (rappel 0x35 d'Archonia, abonné inconnu) n'est pas traduite.
+//!
+//! Les ops 11 et 12 valent pour **n'importe quel personnage**, monstres compris (`FUN_1401698d0` cherche le CID
+//! quel que soit son type ; la Mutation lancée sur un monstre en change le modèle) : aucun filtre ici ni dans
+//! `app_morph.rs`. Sous métamorphose ou évolution, le client contrôle aussi les déplacements d'objets de l'op 2
+//! d'AGPMITEM (`FUN_1401b4d00` → `FUN_1401bca10`, drapeau DISARMAMENT `auction::item_flag::DISARMAMENT` du
+//! champ 19) : voir `app_morph.rs`.
 
 use archrust_protocol::packet::Value;
 use archrust_protocol::schema::{main, packet_type, Schema};
@@ -170,6 +176,11 @@ mod tests {
         assert_eq!(translate(0x02, &v), Some(MorphEvent::Evolve { cid: 42, tid: 1722 }));
         let v = decoded(c, &[(0, Value::I8(27)), (1, Value::I32(42)), (2, Value::I32(1724))]);
         assert_eq!(translate(0x02, &v), Some(MorphEvent::RestoreEvolution { cid: 42, tid: 1724 }));
+        // Monstre (CID quelconque) : mêmes ops 11 / 12 que pour un joueur (Mutation, 101 Rooster).
+        let v = decoded(c, &[(0, Value::I8(11)), (1, Value::I32(900_123)), (2, Value::I32(101))]);
+        assert_eq!(translate(0x02, &v), Some(MorphEvent::Transform { cid: 900_123, tid: 101 }));
+        let v = decoded(c, &[(0, Value::I8(12)), (1, Value::I32(900_123))]);
+        assert_eq!(translate(0x02, &v), Some(MorphEvent::Restore { cid: 900_123 }));
         // L'op 13 reçue n'est pas traduite ; l'op 1 non plus.
         let v = decoded(c, &[(0, Value::I8(13)), (1, Value::I32(42))]);
         assert_eq!(translate(0x02, &v), None);
@@ -178,6 +189,18 @@ mod tests {
         assert_eq!(state_of(0x02, &v), Some(MorphEvent::State { cid: 42, transformed: true, evolved: true }));
         let v = decoded(c, &[(0, Value::I8(1)), (1, Value::I32(42)), (18, Value::I8(0x01))]);
         assert_eq!(state_of(0x02, &v), None);
+    }
+
+    #[test]
+    fn deplacement_et_drapeau_desarme() {
+        // AGPMITEM op 2 : objet 77 porté (3) rangé dans le sac (2), drapeaux d'état (champ 19) avec DISARMAMENT.
+        let i = main::ITEM;
+        let v = decoded(i, &[(0, Value::U8(2)), (2, Value::I32(77)), (4, Value::I32(42)), (19, Value::I32(0x1000))]);
+        assert_eq!(translate(0x04, &v), None, "laissé à `world` (contrôle dans app_morph.rs)");
+        match crate::auction::item_flags_of(&v) {
+            Some(crate::auction::AuctionEvent::ItemFlags { iid: 77, flags }) => assert_ne!(flags & crate::auction::item_flag::DISARMAMENT, 0),
+            other => panic!("{other:?}"),
+        }
     }
 
     #[test]

@@ -19,7 +19,31 @@
 //! degrés par seconde, cumulée comme FUN_1408f4020), déplacement linéaire, coordonnées de texture
 //! (image par paliers, FUN_1408f45b0), spline (`effect/animation/*.ESP`, position seulement).
 //! Mélanges : `sky_render::EffectBlend`. Systèmes de particules (types 1 et 2) : `effect_particles.rs`.
-//! Traînées (type 3) : `effect_particles.rs`. Lumières et cadres mobiles ne sont pas encore rendus.
+//! Traînées (type 3) : `effect_particles.rs`.
+//!
+//! Dépendances (FUN_1408386d0) : une base enfant est posée sur le repère animé de sa base parente
+//! (`RwFrameAddChild`), ou sur un nœud HAnim du modèle de l'objet parent ; l'échelle animée du parent
+//! passe aux enfants. Une traînée enfant (710 des 713) prend le repère du contrôleur parent avec ses
+//! hauteurs h1/h2 ; une traînée indépendante d'un jeu sans drapeau 0x400 prend le repère du jeu avec
+//! 70 / −20 codés en dur (aucun cas) ; avec 0x400, bords sur les nœuds HAnim 702 (haut) et 701 (bas)
+//! du porteur, lus en monde chaque image, et jeu non joué si un nœud manque (FUN_140714b60). La
+//! hiérarchie interrogée est celle du personnage (`AgcdCharacter`+0x80, passée par FUN_140570410 en
+//! +0x20 des paramètres d'événement puis recopiée par FUN_140570c20), pas celle de l'arme portée.
+//! Les jeux concernés (2627, 2960, 6082) visent des modèles sans ces nœuds (seuls les modèles
+//! d'armes `d*.ecl` en ont) : ils ne sont pas joués, comme dans Archonia.
+//!
+//! Lumières (type 5, FUN_140833eb0, FUN_14083cb10) : lumière ponctuelle au repère de la base, rayon
+//! 300 (× échelle.x de l'animation 8), couleur de l'animation de couleur / 255 (blanc sinon) ; elle
+//! éclaire terrain, objets et personnages (`render::PointLight`, `shader.wgsl`, `terrain.wgsl`) avec
+//! l'atténuation `1 − d/R` (choix d'ArchRust : celle du pilote RenderWare est inconnue), au plus
+//! [`MAX_EFFECT_LIGHTS`], les plus proches de la caméra. Repère libre (drapeaux 0x28/0x40) non traité
+//! (aucun cas : la seule lumière, EID 51, a les drapeaux 0x4).
+//!
+//! Cadres mobiles (type 7) : **rien n'est rendu, fidèlement**. Archonia insère bien un repère au-dessus
+//! du porteur ou de la caméra (drapeau de jeu 0x40), mais sa mise à jour (FUN_14083cbc0) ne traite que
+//! `MFrmType == 1` (spline) et tue le contrôleur sinon ; les 165 cadres des données sont de type 0
+//! (secousse) et la fonction de secousse FUN_1409038c0 n'est appelée nulle part. Le format est décodé
+//! (`effset::MovingFrameParams`) et documenté dans `docs/FORMATS.md`.
 //!
 //! Options GFX (`OP_Effect`, `OP_TurnOffAllEffects`) : niveau 0 = aucun effet ; l'interface (montée de
 //! niveau, apprentissage) demande `EffectUI` ≥ 1 ; les compétences des autres joueurs se masquent.
@@ -31,7 +55,7 @@ use super::App;
 use crate::assets::Assets;
 use crate::render::{EffectDraw, Vertex};
 use crate::sky_render::EffectBlend;
-use archrust_data::effset::{anim_kind, base_kind, AnimKeys, EffAnim, EffBase, EffectSetData, Spline};
+use archrust_data::effset::{anim_kind, base_kind, set_flag, AnimKeys, Attach, EffAnim, EffBase, EffectSetData, Spline, TailParams, LIGHT_RADIUS, TAIL_DEFAULT_BOTTOM, TAIL_DEFAULT_TOP, TAIL_NODE_BOTTOM, TAIL_NODE_TOP};
 use archrust_data::rw::Clump;
 use archrust_netclient::skills::{learn_result, SkillEvent};
 use archrust_netclient::WorldEvent;
@@ -118,6 +142,33 @@ struct Instance {
     emitters: Vec<Option<particles::Emitter>>,
     /// Traînées (type 3), par indice de base.
     trails: Vec<Option<particles::Trail>>,
+    /// Rattachement de chaque base (dépendances du jeu, `EffectSetData::attachments`).
+    attach: Vec<Option<Attach>>,
+}
+
+/// Au plus autant de lumières d'effet appliquées (les plus proches de la caméra) : les shaders
+/// d'Archonia acceptent `LightPosition1…7` en plus de la lumière principale (FUN_1408633b0, déduit).
+pub const MAX_EFFECT_LIGHTS: usize = 8;
+
+/// Lumière d'effet (type 5) d'une image : position monde, rayon, couleur (0–1).
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct EffectLight {
+    pub position: Vec3,
+    pub radius: f32,
+    pub color: [f32; 3],
+}
+
+/// Lumière d'une base de type 5 à l'instant `tb` dans le repère `frame` (FUN_140833eb0,
+/// FUN_14083cb10) : rayon 300, ou `échelle.x × 300` avec une animation d'échelle (FUN_1408f44e0) ;
+/// couleur de l'animation de couleur / 255, blanc sinon (FUN_140834b80). Seules les lumières
+/// ponctuelles existent dans les données (`LightType` 0) : les projecteurs (1, 2) sont traités en
+/// point. `None` si le rayon est nul.
+fn base_light(base: &EffBase, tb: u32, frame: Mat4) -> Option<EffectLight> {
+    base.light.as_ref()?;
+    let st = base_state(base, tb);
+    let has_scale = base.anims.iter().any(|a| a.kind == anim_kind::SCALE);
+    let radius = if has_scale { st.scale.x * LIGHT_RADIUS } else { LIGHT_RADIUS };
+    (radius > 0.0).then(|| EffectLight { position: frame.w_axis.truncate(), radius, color: [st.color[0], st.color[1], st.color[2]] })
 }
 
 #[derive(Default)]
@@ -395,6 +446,60 @@ impl EffectsGlue {
         }
         out
     }
+
+    /// Matrice (espace du modèle) du nœud HAnim `node` du modèle d'un objet d'effet, dans la pose
+    /// du fichier (les animations RtAnim des objets ne sont pas jouées).
+    fn clump_node(&mut self, assets: &Assets, base: &EffBase, node: u32) -> Option<Mat4> {
+        let clump = self.clump(assets, &base.clump.as_ref()?.0)?;
+        let i = clump.frames.iter().position(|f| f.hanim.as_ref().is_some_and(|h| h.node_id == node))?;
+        clump.world_matrices().get(i).copied()
+    }
+
+    /// Repère (monde) sur lequel la base `i` est posée : celui de sa base parente (et du nœud HAnim
+    /// désigné de son modèle), sinon `root`, le repère du jeu (FUN_1408386d0 : `RwFrameAddChild`).
+    fn attach_frame(&mut self, assets: &Assets, inst: &Instance, root: Mat4, t: u32, i: usize, frames: &mut [Option<Mat4>]) -> Mat4 {
+        let Some(a) = inst.attach.get(i).copied().flatten() else { return root };
+        let parent = self.base_frame(assets, inst, root, t, a.parent, frames);
+        match a.node {
+            // Nœud absent du modèle : Archonia arrête le jeu ; ici repère de l'objet (repli).
+            Some(node) => parent * self.clump_node(assets, &inst.set.bases[a.parent], node).unwrap_or(Mat4::IDENTITY),
+            None => parent,
+        }
+    }
+
+    /// Repère animé (monde) de la base `i` à l'instant `t` du jeu : repère d'attache × position,
+    /// rotation, rotations animées, déplacements (linéaire, spline) et échelle de la base. L'échelle
+    /// (animation 8) entre dans le repère et passe aux enfants (`RwFrameScale` de FUN_1408f44e0),
+    /// sauf pour les particules (elle porte sur les particules), les traînées et les lumières (elle
+    /// règle le rayon). Une base pas encore partie garde son repère de départ.
+    fn base_frame(&mut self, assets: &Assets, inst: &Instance, root: Mat4, t: u32, i: usize, frames: &mut [Option<Mat4>]) -> Mat4 {
+        if let Some(m) = frames[i] {
+            return m;
+        }
+        let parent = self.attach_frame(assets, inst, root, t, i, frames);
+        let base = &inst.set.bases[i];
+        let tb = t.saturating_sub(base.delay);
+        let mut st = base_state(base, tb);
+        st.offset += self.spline_offset(assets, base, tb);
+        if base.particles.is_some() || matches!(base.kind, base_kind::TAIL | base_kind::LIGHT) {
+            st.scale = Vec3::ONE;
+        }
+        let m = parent * base_matrix(base, &st);
+        frames[i] = Some(m);
+        m
+    }
+}
+
+/// Les [`MAX_EFFECT_LIGHTS`] lumières les plus proches de `eye`, pour le moteur de rendu.
+fn nearest_lights(mut lights: Vec<EffectLight>, eye: Vec3) -> Vec<crate::render::PointLight> {
+    lights.sort_by(|a, b| a.position.distance_squared(eye).total_cmp(&b.position.distance_squared(eye)));
+    lights.into_iter().take(MAX_EFFECT_LIGHTS).map(|l| crate::render::PointLight { position: l.position, radius: l.radius, color: l.color }).collect()
+}
+
+/// Position et orientation (sans échelle) d'une matrice monde.
+fn frame_of(m: Mat4) -> particles::Frame {
+    let (_, rotation, position) = m.to_scale_rotation_translation();
+    particles::Frame { position, rotation }
 }
 
 impl App {
@@ -456,13 +561,26 @@ impl App {
         p
     }
 
-    fn effects_spawn(&mut self, p: Placed, anchor: Anchor, at: (Vec3, f32)) {
+    /// Lance un jeu ; `false` s'il n'est pas joué (absent, dépendances invalides, nœuds manquants).
+    fn effects_spawn(&mut self, p: Placed, anchor: Anchor, at: (Vec3, f32)) -> bool {
         let assets = self.assets.clone();
         let Some(set) = self.effects.set(&assets, p.eid) else {
             log::debug!("effet {} : jeu absent ou non décodé", p.eid);
-            return;
+            return false;
         };
         log::debug!("effet {} « {} » : {} base(s)", p.eid, set.name, set.bases.len());
+        // Dépendances impossibles (FUN_1408386d0) : le jeu est arrêté.
+        let Some(attach) = set.attachments() else {
+            log::debug!("effet {} : dépendances invalides, jeu non joué", p.eid);
+            return false;
+        };
+        // Traînée à deux nœuds (drapeau 0x400) : sans les nœuds 701 et 702 dans la hiérarchie du
+        // porteur, le jeu entier n'est pas joué (FUN_140714b60 → FUN_1408d9df0).
+        let Anchor::Character(cid) = anchor;
+        if set.flags & set_flag::TWO_NODE_TAIL != 0 && [TAIL_NODE_TOP, TAIL_NODE_BOTTOM].iter().any(|&n| self.effects_node_matrix(cid, n).is_none()) {
+            log::debug!("effet {} : nœuds 701/702 absents du porteur {cid}, jeu non joué", p.eid);
+            return false;
+        }
         if self.effects.active.len() >= MAX_ACTIVE {
             let i = self.effects.active.iter().position(|i| !i.permanent).unwrap_or(0);
             self.effects.active.remove(i);
@@ -474,7 +592,8 @@ impl App {
             emitters.push(b.particles.is_some().then(|| particles::Emitter::new(self.effects.seed)));
         }
         let trails = set.bases.iter().map(|b| b.tail.is_some().then(particles::Trail::default)).collect();
-        self.effects.active.push(Instance { sounded: vec![false; set.bases.len()], set, born: Instant::now(), anchor, last: at, offset: p.offset, scale: p.scale, life, node: p.node, delay: p.delay, permanent: self.effects.spawning, emitters, trails });
+        self.effects.active.push(Instance { sounded: vec![false; set.bases.len()], set, born: Instant::now(), anchor, last: at, offset: p.offset, scale: p.scale, life, node: p.node, delay: p.delay, permanent: self.effects.spawning, emitters, trails, attach });
+        true
     }
 
     /// Effets d'un ensemble nommé d'`ee_common_char.txt` (`LV_UP`, `LEARN_SK`…).
@@ -541,9 +660,11 @@ impl App {
         let assets = self.assets.clone();
         match self.effects.set(&assets, eid) {
             Some(set) => {
-                let msg = format!("Effet {eid} « {} » : {} base(s), {} ms.", set.name, set.bases.len(), set_life(&set));
-                self.effects_spawn(Placed { eid, offset: Vec3::ZERO, scale: 1.0, node: 0, delay: 0 }, Anchor::Character(cid), at);
-                msg
+                if self.effects_spawn(Placed { eid, offset: Vec3::ZERO, scale: 1.0, node: 0, delay: 0 }, Anchor::Character(cid), at) {
+                    format!("Effet {eid} « {} » : {} base(s), {} ms.", set.name, set.bases.len(), set_life(&set))
+                } else {
+                    format!("Effet {eid} « {} » non joué (dépendances ou nœuds 701/702 du porteur manquants).", set.name)
+                }
             }
             None => format!("Effet {eid} introuvable."),
         }
@@ -567,6 +688,7 @@ impl App {
         let cam = particles::CameraAxes { right, up };
         let mut sounds: Vec<String> = Vec::new();
         let mut batches: HashMap<(Option<String>, EffectBlend), Vec<Vertex>> = HashMap::new();
+        let mut lights: Vec<EffectLight> = Vec::new();
         let assets = self.assets.clone();
         let mut active = std::mem::take(&mut self.effects.active);
         active.retain(|i| i.permanent || (now - i.born).as_millis() as u32 <= i.delay + i.life);
@@ -592,6 +714,27 @@ impl App {
                 Mat4::from_translation(pos + inst.offset) * turn * Mat4::from_scale(Vec3::splat(inst.scale))
             };
             let set = inst.set.clone();
+            // Repères animés des bases, dépendances comprises (une base enfant suit le repère de sa
+            // parente), et repère d'attache des traînées enfants (repère du contrôleur parent).
+            let n = set.bases.len();
+            let mut frames: Vec<Option<Mat4>> = vec![None; n];
+            let mut tail_frames: Vec<Option<Mat4>> = vec![None; n];
+            for bi in 0..n {
+                self.effects.base_frame(&assets, inst, root, t, bi, &mut frames);
+                if set.bases[bi].tail.is_some() && inst.attach.get(bi).is_some_and(|a| a.is_some()) {
+                    tail_frames[bi] = Some(self.effects.attach_frame(&assets, inst, root, t, bi, &mut frames));
+                }
+            }
+            // Traînée à deux nœuds (drapeau 0x400) : bord haut sur le nœud 702, bas sur le 701, lus en
+            // monde à chaque image sur le porteur (sa position courante, même pour un effet posé).
+            let two_node = set.flags & set_flag::TWO_NODE_TAIL != 0;
+            let node_edges = two_node
+                .then(|| {
+                    let (p, y) = self.effects_anchor_of(cid).unwrap_or(inst.last);
+                    let m = Mat4::from_translation(p) * Mat4::from_rotation_y(y.to_radians());
+                    Some(((m * self.effects_node_matrix(cid, TAIL_NODE_TOP)?).w_axis.truncate(), (m * self.effects_node_matrix(cid, TAIL_NODE_BOTTOM)?).w_axis.truncate()))
+                })
+                .flatten();
             for (bi, base) in set.bases.iter().enumerate() {
                 // Fin d'une base (FUN_14083ff40) : seule une base sans boucle (mode 0) s'arrête à la fin
                 // de sa durée ; les autres vivent jusqu'à la fin du jeu.
@@ -607,15 +750,13 @@ impl App {
                     continue;
                 }
                 let blend = EffectBlend::from_data(base.blend.unwrap_or(0));
-                let mut st = base_state(base, tb);
-                st.offset += self.effects.spline_offset(&assets, base, tb);
+                let st = base_state(base, tb);
+                let m = frames[bi].unwrap_or(root);
                 let texture = usize::try_from(base.texture).ok().and_then(|i| set.textures.get(i)).map(|t| t.1.clone()).filter(|n| !n.is_empty());
                 if let Some(Some(emitter)) = inst.emitters.get_mut(bi) {
                     // Particules : les animations 0, 1, 8 et 9 portent sur les particules, les autres
-                    // déplacent l'émetteur.
-                    st.scale = Vec3::ONE;
-                    let (_, rotation, position) = (root * base_matrix(base, &st)).to_scale_rotation_translation();
-                    let frame = particles::Frame { position, rotation };
+                    // déplacent l'émetteur (repère sans échelle, voir `base_frame`).
+                    let frame = frame_of(m);
                     emitter.emit(base, t, &frame, &cam);
                     let out = batches.entry((texture, blend)).or_default();
                     for s in emitter.sprites(base, t, &frame, &cam, inst.scale) {
@@ -624,11 +765,22 @@ impl App {
                     continue;
                 }
                 if let (Some(p), Some(Some(trail))) = (&base.tail, inst.trails.get_mut(bi)) {
-                    // Traînée : bords sur le repère de l'émetteur, couleur des animations de la base.
+                    // Traînée (FUN_14083d8b0) : couleur des animations de la base ; bords selon le chemin
+                    // de création (FUN_1408386d0, FUN_140714b60).
                     let color = st.color;
-                    st.scale = Vec3::ONE;
-                    let (_, rotation, position) = (root * base_matrix(base, &st)).to_scale_rotation_translation();
-                    let edges = particles::Trail::edges(base, p, &particles::Frame { position, rotation }, inst.scale);
+                    let edges = if let Some(pm) = tail_frames[bi] {
+                        // Enfant d'une dépendance (710 des 713 traînées) : repère de la base parente,
+                        // h1/h2 des données.
+                        particles::Trail::edges(base, p, &frame_of(pm), inst.scale)
+                    } else if two_node {
+                        let Some(e) = node_edges else { continue };
+                        e
+                    } else {
+                        // Indépendante, jeu sans 0x400 : repère du jeu, hauteurs 70 / −20 codées en dur
+                        // (aucun cas dans les données).
+                        let q = TailParams { top: TAIL_DEFAULT_TOP, bottom: TAIL_DEFAULT_BOTTOM, ..p.clone() };
+                        particles::Trail::edges(base, &q, &frame_of(root), inst.scale)
+                    };
                     trail.update(p, t, edges);
                     let out = batches.entry((texture, blend)).or_default();
                     for q in trail.ribbon(edges) {
@@ -639,10 +791,14 @@ impl App {
                     }
                     continue;
                 }
+                if base.kind == base_kind::LIGHT {
+                    // Lumière : ajoutée à l'éclairage du terrain, des objets et des personnages.
+                    lights.extend(base_light(base, tb, m));
+                    continue;
+                }
                 if st.color[3] <= 0.0 {
                     continue;
                 }
-                let m = root * base_matrix(base, &st);
                 match base.kind {
                     base_kind::BOARD | base_kind::TERRAIN_BOARD => {
                         let out = batches.entry((texture, blend)).or_default();
@@ -706,7 +862,7 @@ impl App {
                             }
                         }
                     }
-                    // Lumières, cadres mobiles : pas encore rendus.
+                    // Cadres mobiles (type 7) : jamais joués par Archonia (voir l'en-tête du module).
                     _ => {}
                 }
             }
@@ -726,6 +882,8 @@ impl App {
         // Mélange alpha d'abord, puis les additions et soustractions.
         draws.sort_by_key(|d| d.blend as u8);
         gpu.renderer.effects = draws;
+        let eye = view.inverse().w_axis.truncate();
+        gpu.renderer.point_lights = nearest_lights(lights, eye);
     }
 }
 
@@ -794,5 +952,126 @@ mod tests {
         assert_eq!((spline.points.len(), spline.closed), (5, false));
         let (start, end) = (spline.position(0.0), spline.position(1.0));
         assert!(start[1] < 80.0 && end[1] > 200.0, "{start:?} → {end:?}");
+    }
+
+    /// Lumière de l'EID 51 : rayon 2 × 300 → 0 sur 75 ms, couleur de l'animation / 255, au repère.
+    #[test]
+    fn light_radius_color_and_nearest() {
+        use archrust_data::effset::LightParams;
+        let base = EffBase {
+            kind: base_kind::LIGHT,
+            life: 75,
+            loop_opt: 2,
+            light: Some(LightParams { light_type: 0, pos: [0.0; 3], rot: [0.0; 3], cone_angle: 30.0, surface: [-1.0; 3], material: [0xff; 4] }),
+            anims: vec![
+                EffAnim { kind: anim_kind::SCALE, flags: 0, life: 75, loop_opt: 1, keys: AnimKeys::Vec3(vec![(0, [2.0; 3]), (75, [0.0; 3])]) },
+                EffAnim { kind: anim_kind::COLOR, flags: 0, life: 0, loop_opt: 1, keys: AnimKeys::Color(vec![(0, [0x9a, 0x92, 0xff, 0xcc])]) },
+            ],
+            ..Default::default()
+        };
+        let frame = Mat4::from_translation(Vec3::new(10.0, 20.0, 30.0));
+        let l = base_light(&base, 0, frame).unwrap();
+        assert_eq!((l.position, l.radius), (Vec3::new(10.0, 20.0, 30.0), 600.0));
+        assert!((l.color[0] - 0x9a as f32 / 255.0).abs() < 1e-6 && l.color[2] == 1.0);
+        assert!((base_light(&base, 37, frame).unwrap().radius - 300.0 * 2.0 * 38.0 / 75.0).abs() < 1.0);
+        assert!(base_light(&base, 75, frame).is_none(), "rayon nul");
+        // Sans animation : rayon 300, blanc.
+        let plain = EffBase { anims: Vec::new(), ..base.clone() };
+        assert_eq!(base_light(&plain, 0, frame), Some(EffectLight { position: frame.w_axis.truncate(), radius: 300.0, color: [1.0; 3] }));
+        // Au plus huit, les plus proches de la caméra.
+        let many: Vec<EffectLight> = (0..12).rev().map(|i| EffectLight { position: Vec3::X * i as f32 * 100.0, radius: 300.0, color: [1.0; 3] }).collect();
+        let near = nearest_lights(many, Vec3::ZERO);
+        assert_eq!(near.len(), MAX_EFFECT_LIGHTS);
+        assert_eq!((near[0].position.x, near[7].position.x), (0.0, 700.0));
+    }
+
+    /// Repères : une base enfant suit le repère animé (échelle comprise) de sa parente.
+    #[test]
+    fn dependent_base_follows_parent_frame() {
+        let parent = EffBase {
+            kind: base_kind::OBJECT,
+            position: [0.0, 100.0, 0.0],
+            anims: vec![EffAnim { kind: anim_kind::ROTATION, flags: 0, life: 0, loop_opt: 1, keys: AnimKeys::Rotation { axis: [0.0, 0.0, 1.0], keys: vec![(0, 90.0)] } }],
+            ..Default::default()
+        };
+        let child = EffBase { kind: base_kind::BOARD, position: [10.0, 0.0, 0.0], ..Default::default() };
+        let set = Arc::new(EffectSetData { deps: vec![archrust_data::effset::EffDep { parent: 0, node: None, child: 1, flags: 0 }], bases: vec![parent, child], ..Default::default() });
+        let attach = set.attachments().unwrap();
+        let inst = Instance { set, born: Instant::now(), anchor: Anchor::Character(0), last: (Vec3::ZERO, 0.0), offset: Vec3::ZERO, scale: 1.0, sounded: vec![false; 2], life: 1000, node: 0, delay: 0, permanent: false, emitters: vec![None, None], trails: vec![None, None], attach };
+        let assets = Assets::new(None, &[]);
+        let mut glue = EffectsGlue::default();
+        let mut frames = vec![None; 2];
+        let root = Mat4::from_translation(Vec3::new(1000.0, 0.0, 0.0));
+        // 90 °/s pendant 1 s autour de Z : l'axe X de l'objet devient Y ; l'enfant (10, 0, 0) suit.
+        let m = glue.base_frame(&assets, &inst, root, 1000, 1, &mut frames);
+        assert!((m.w_axis.truncate() - Vec3::new(1000.0, 110.0, 0.0)).length() < 1e-3, "{}", m.w_axis);
+        // Repère d'attache de l'enfant = repère de l'objet.
+        let pm = glue.attach_frame(&assets, &inst, root, 1000, 1, &mut frames);
+        assert!((pm.w_axis.truncate() - Vec3::new(1000.0, 100.0, 0.0)).length() < 1e-3);
+    }
+
+    /// Avec les données du client : traînées dépendantes des jeux 127 (catapulte, sur des objets,
+    /// ±700 / ±500) et 231 (sur une planche, −400 / 200) posées sur le repère de leur parente avec
+    /// les hauteurs des données ; les 710 traînées dépendantes du client ont un repère d'attache.
+    #[test]
+    fn dependent_trails_ride_parent_frames() {
+        let Some(dir) = std::env::var_os("ARCHRUST_GAME_DIR") else { return };
+        let assets = Assets::new(Some(std::path::PathBuf::from(dir)), &[]);
+        let mut glue = EffectsGlue::default();
+        let root = Mat4::from_translation(Vec3::new(5000.0, 0.0, 5000.0));
+        let mut checked = 0;
+        for eid in [127u32, 231] {
+            let set = glue.set(&assets, eid).expect("jeu");
+            let attach = set.attachments().unwrap();
+            let n = set.bases.len();
+            let inst = Instance { set: set.clone(), born: Instant::now(), anchor: Anchor::Character(0), last: (Vec3::ZERO, 0.0), offset: Vec3::ZERO, scale: 1.0, sounded: vec![false; n], life: 1000, node: 0, delay: 0, permanent: false, emitters: vec![None; n], trails: vec![None; n], attach: attach.clone() };
+            for (i, b) in set.bases.iter().enumerate() {
+                let (Some(p), Some(a)) = (&b.tail, attach[i]) else { continue };
+                let mut frames = vec![None; n];
+                let t = b.delay + 300;
+                let parent = glue.base_frame(&assets, &inst, root, t, a.parent, &mut frames);
+                let pm = glue.attach_frame(&assets, &inst, root, t, i, &mut frames);
+                assert_eq!(pm, parent, "jeu {eid} base {i} : repère du parent");
+                let f = frame_of(pm);
+                let (top, bottom) = particles::Trail::edges(b, p, &f, 1.0);
+                assert!(((top - bottom).length() - (p.top - p.bottom).abs()).abs() < 1e-2, "jeu {eid} base {i}");
+                assert!((top - f.position).length() - p.top.abs() < 1e-2);
+                checked += 1;
+            }
+        }
+        assert!(checked >= 3, "{checked}");
+        let sets = assets.effect_sets();
+        let dependent = sets.iter().filter_map(|s| sets.decode(s.id)).map(|s| {
+            let at = s.attachments().unwrap();
+            s.bases.iter().enumerate().filter(|(i, b)| b.kind == base_kind::TAIL && at[*i].is_some()).count()
+        });
+        assert_eq!(dependent.sum::<usize>(), 710);
+    }
+
+    /// Avec les données du client (`ARCHRUST_GAME_DIR`) : les modèles qui jouent les traînées à deux
+    /// nœuds (2627 Evelikos 2103, 2960 Sky Dragon Summoner 1939 / 2111, 6082 archer 1) n'ont **pas**
+    /// les nœuds HAnim 701 / 702 dans leur squelette : ces nœuds sont ceux des modèles d'objets
+    /// (armes `d*.ecl`, ex. `d0000002.ecl`) et de trois créatures (`a00006bb`, `a00006bc`, `a00006c4`).
+    /// Archonia cherche ces nœuds dans la hiérarchie du personnage (`AgcdCharacter`+0x80,
+    /// FUN_140570410 → FUN_140570c20 → FUN_140714b60), pas dans l'arme : ces trois jeux ne sont pas joués.
+    #[test]
+    fn two_node_tail_models_lack_nodes_701_702() {
+        let Some(dir) = std::env::var_os("ARCHRUST_GAME_DIR") else { return };
+        let assets = Assets::new(Some(std::path::PathBuf::from(dir)), &[]);
+        let ids = |f: &str| -> std::collections::BTreeSet<u32> {
+            assets.clump("character", f).map(|c| c.frames.iter().filter_map(|f| f.hanim.as_ref().map(|h| h.node_id)).collect()).unwrap_or_default()
+        };
+        for tid in [2103, 1939, 2111, 1] {
+            let files = crate::scene::models_for_tid(&assets, tid);
+            assert!(!files.is_empty(), "TID {tid} sans modèle");
+            for f in &files {
+                let n = ids(f);
+                assert!(!n.is_empty() && !n.contains(&TAIL_NODE_TOP) && !n.contains(&TAIL_NODE_BOTTOM), "TID {tid} {f} : {n:?}");
+            }
+        }
+        for f in ["d0000002.ecl", "a00006bb.ecl"] {
+            let n = ids(f);
+            assert!(n.contains(&TAIL_NODE_TOP) && n.contains(&TAIL_NODE_BOTTOM), "{f} : {n:?}");
+        }
     }
 }

@@ -952,8 +952,13 @@ Le lecteur des sons (`EffectSet::sounds`) est gardé pour l'ambiance. Le décoda
 FUN_1408db680 → FUN_1408da030) et lit exactement les 3 428 jeux du client :
 
 ```text
-fiche (124 o) : 0x24 durée (ms), 0x68 nb textures, 0x6c nb bases, 0x70 nb dépendances, 0x74/0x78 bloc
+fiche (124 o) : 0x24 durée (ms), 0x2c drapeaux du jeu, 0x68 nb textures, 0x6c nb bases,
+       0x70 nb dépendances, 0x74/0x78 bloc
 bloc : textures (0x84 o : u32 indice, char[64] nom, char[64] masque), dépendances (12 o), bases
+dépendance : u32 parent (drapeau 2 : 16 bits bas = indice de base, 16 bits hauts = ID de nœud HAnim
+       du modèle de l'objet parent), u32 enfant, u32 drapeaux (1 : drapeaux de l'enfant |= 0x80,
+       2 : nœud HAnim) — FUN_1408386d0 ; 5 207 dans le client : 5 191 sans drapeau, 3 drapeau 1,
+       13 nœud HAnim (toujours sur un objet, ex. jeu 14 : K0000e00.ECL, nœuds 990–993)
 base : u32 type, char[32] titre, u32 délai, u32 durée, u32 boucle, u32 drapeaux, u32 nb animations
        (FUN_1408f8610) ; types 0, 1, 2, 3, 4, 8 : + u32 mélange, i32 texture, vec3 position,
        vec3 rotation (FUN_1408f86f0) ; puis selon le type :
@@ -1002,11 +1007,39 @@ spline (animation 6, effect/animation/*.ESP) : morceau RW 0x0C = char[32], i32 n
 nœud des données d'effet (FUN_140573480) : > 0 nœud HAnim suivi, 0 personnage suivi, −1 position
   de départ, −2 au-dessus de la tête (HEIGHT + 50) suivi, −3 nœud au hasard, −4 + HEIGHT,
   −5 décalage tourné ; délai (GAP, ms) divisé par la vitesse d'animation (FUN_140570c20)
+drapeaux du jeu (fiche 0x2c, FUN_140714b60) : 0x4 orienté vers la cible, 0x40 cadre mobile (repère
+  inséré au-dessus du porteur 0x80, de la cible 0x100 ou de la caméra 0x200), 0x400 traînée à
+  deux nœuds ; 0x1, 0x2, 0x10 non relevés
+dépendances (FUN_1408386d0) : enfant non traînée → son repère devient enfant du repère du parent
+  (ou du nœud HAnim) ; l'échelle animée du parent (RwFrameScale, FUN_1408f44e0) passe aux enfants.
+  Enfant traînée → mode à un repère sur le repère du contrôleur parent, h1/h2 = hauteurs de la
+  traînée ; parent traînée, son ou cadre mobile (3, 6, 7) : jeu arrêté. 710 des 713 traînées sont
+  enfants (parents : objet 429, planche 264, trou noir 16, particules 1)
+traînée indépendante (FUN_140714b60) : jeu sans 0x400 → repère du jeu, h1 = 70, h2 = −20 codés en
+  dur (aucun cas) ; jeu 0x400 (2627, 2960, 6082) → bord haut = nœud HAnim 702, bas = 701 de la
+  hiérarchie du porteur, en monde chaque image ; un nœud manquant : jeu non joué. Hiérarchie =
+  AgcmStartEventEffectParams +0x20 = AgcdCharacter+0x80, celle du clump du personnage
+  (FUN_140570410 → FUN_140570c20 → use-info +0x30), pas celle de l'arme. Ces ID ne sont que dans
+  les modèles d'armes (d*.ecl) et de trois créatures (a00006bb, a00006bc, a00006c4), pas dans ceux
+  des porteurs des trois jeux (TID 2103, 1939, 2111, 1) : ils ne sont pas joués (fidèle)
+lumière (type 5, 0x30 o, FUN_1409034a0) : u32 LightType (0 point, 1 projecteur doux, 2 projecteur),
+  vec3 pos, vec3 rotAngle, f32 conAngle (degrés), vec3 surfaceProp, RwRGBA materialColr ; seuls le
+  type et le cône servent. Rayon 300 (DAT_140e4a14c), × échelle.x avec l'animation 8 ; couleur =
+  animation de couleur / 255 (blanc sinon) ; repère identité enfant du repère du jeu ; ajoutée au
+  monde RW (terrain, objets, personnages). Une seule dans le client : EID 51 (point, R 600 → 0 en
+  75 ms, couleur 9A 92 FF). ArchRust : lumière ponctuelle additive, att = 1 − d/R (choix : celle du
+  pilote D3D9 est inconnue), au plus 8, les plus proches de la caméra (shader.wgsl, terrain.wgsl)
+cadre mobile (type 7, 24 o, FUN_140903780) : u32 MFrmType (0 secousse, 1 spline), u32 axe (0–2
+  repère secoué, 3–5 monde, 6–8 caméra, 9 hasard XZ), u32 « Whose » (0 caméra, 1 porteur),
+  f32 amplitude, u32 durée (ms), f32 nombre d'oscillations. Jamais joué par Archonia : la mise à
+  jour (FUN_14083cbc0) ne traite que le type 1 et tue le contrôleur sinon, les 165 cadres des
+  données sont de type 0 et la secousse FUN_1409038c0 n'est appelée nulle part → ArchRust ne
+  rend rien (fidèle)
 ```
 
-Pas encore rendus : lumières (5), cadres mobiles (7, déplacent un cadre cible le long d'une spline :
-FUN_14083cbc0), traînée à deux nœuds d'arme, effets des objets équipés (0x40 sur les objets),
-conditions 0x2, 0x8, 0x10, 0x20, 0x80, ailes et capes des colliers.
+Pas encore rendus : lumières projecteurs (aucune dans les données), repère libre des bases
+(drapeaux 0x28/0x40), animations RtAnim des objets d'effet, effets des objets équipés (0x40 sur les
+objets), conditions 0x2, 0x8, 0x10, 0x20, 0x80, ailes et capes des colliers.
 
 ## Production (récolte, cuisine, alchimie)
 
@@ -1057,8 +1090,28 @@ pièce jointe, 5 tout retirer (S → C). Pour 1, 2 et 4 le client ne remplit que
 
 Dans ArchRust (`app_buddy.rs`, `hud_buddy.rs`, `app_mail.rs`, `hud_mail.rs`) : `UI_BuddyList`, `UI_BanList`,
 `UI_AddBuddyList`, `UI_AddBanList` (menu Communauté, touche N, `/amis`, `/ignores`), « Menu » d'un joueur ciblé
-(`UI_TargetUserMenu` → `UI_TargetCharacterMenu` : Invite, Whisper, Add Friend, Ignore User) ; `MailBox`,
+(`UI_TargetUserMenu` → `UI_TargetCharacterMenu` : Invite, Trade, Whisper, Add Friend, Ignore User) ; `MailBox`,
 `MailWrite`, `MailRead` (menu Communauté, touche U, `/courrier`), papier à lettre 3601 exigé pour écrire.
+
+## Échange entre joueurs
+
+**AgpmPrivateTrade 0x07** (drapeaux 2, Archonia `FUN_1406614f0`) : I8 op, I32 CID, I32 CID de l'autre, I32 IID,
+I32 TID, I64 argent, PACKET case d'origine, PACKET case visée (mini `ITEM_GRID` : 3 × I16 sac, ligne, colonne),
+I32 argument. Client → serveur (champ 1 = soi) : 1 demande (2 cible), 4 accepter, 5 annuler (demande, refus, croix ;
+le client n'envoie jamais l'op 25), 9 proposer (3 IID, 6 case du sac, 7 case de la grille, 8 genre : 0 grille,
+2 grille Ex), 10 reprendre (3 IID, 5 statut d'arrivée 2 / 13 / 15, 6 case d'échange, 7 case du sac),
+16 / 18 verrouiller / déverrouiller, 21 prêt, 23 or (5, positif, borné à l'or porté). Serveur → client :
+3 demande reçue (Archonia lit le demandeur au champ **2** ; ArchCore l'envoie au champ 1), 6 début (1 soi,
+2 l'autre), 5 fin, 0 résultat (8 au champ 8 : échange fait), 16 / 18 son verrou, 17 / 19 celui de l'autre,
+20 les deux verrouillés, 21 / 22 soi / l'autre prêt, 23 / 24 or de soi / de l'autre, 26 / 27 pièces Chantra,
+25 cible qui refuse les échanges. Objets proposés : AGPMITEM statut 6, case au champ 7 (op 2 les siens, op 0
+avec l'autre pour propriétaire) ; grille de 1 × 3 × 4.
+
+Dans ArchRust (`archrust-netclient/src/trade.rs`, `app_trade.rs`, `hud_trade.rs`) : entrée « Trade » de
+`UI_TargetCharacterMenu` (`CONTROL_32674`, cachée sur soi, au palier de meurtrier 2 de l'un des deux et sous
+métamorphose sauf l'ArchLord), `UI_PrivateTradeRequest` (sysstr 520), `UI_PrivateTradeYesNo` (sysstr 519),
+`UI_PrivateTrade` (glisser du sac vers sa grille, de sa grille vers le sac), `UI_PrivateTrade_Money`. Ni grilles
+Ex ni pièces Chantra (inconnues d'ArchCore).
 
 ## Usure et réparation
 
@@ -1319,6 +1372,16 @@ Relevés dans Archonia (`morph.rs`, `skills.rs` d'`archrust-netclient` ; `app_mo
   `Transform_Restore_Notice` à l'échéance.
 - **ItemEvolutionTable.txt** (`slayer orbiter scion summoner`, clé = colonne `scion`) : objet porté par un
   DragonScion de classe 1 / 2 / 4 dessiné avec l'objet de sa colonne (case vide ou objet absent : lui-même).
+- **Ops 11 / 12 sur un monstre** : mêmes champs (`{1 CID, 2 TID}`) ; le client les applique à tout personnage
+  (Mutation sur un monstre : modèle de la forme, type de la forme pour l'attaque et le ciblage).
+- **Équipement sous la forme** (`FUN_1401bca10`, métamorphosé ou évolué, sauf `Kind` 0x20 monture) : itemdatatable
+  `Race` / `Class` (listes `1;2` → masques `1 << (n − 1)`), `Gender` (> 0 : égal), `Level` (à l'équipement
+  seulement) contre `FACTOR_TYPE` {0 race, 1 sexe, 2 classe} et le niveau ; drapeau d'état DISARMAMENT `0x1000`
+  (AGPMITEM champ 19) → refus. AGPMITEM op 2 d'un objet du joueur : porté (3) → 2, 13 ou 51 contrôlé sans niveau,
+  → 3 contrôlé avec ; refusé → paquet ignoré par le client.
+- **Type de personnage** (`CharacterDataTable.txt` colonne `Type`, du gabarit courant) : forme `& 8` (animaux de la
+  Mutation, potions 408 à 416) → le joueur n'attaque pas et n'est pas attaqué ; compétence de SKILL_SPEC `target` 1
+  sur une forme sans `0x10000 | 0x20000` refusée. Race comparée (Shrines) : gabarit d'origine.
 
 ## Niveau MJ, carte du monde et fenêtre du personnage
 
@@ -1342,9 +1405,24 @@ Relevés dans Archonia (`morph.rs`, `skills.rs` d'`archrust-netclient` ; `app_mo
   (rappels 0x88-0x8a) — 34 : 12 valeurs « ignore » (résistance physique, blocage, blocage de compétence, esquives
   au corps à corps et à distance, résistance aux critiques, à l'étourdissement, …) ; 35 : ténacités (déplacement,
   attaque, incantation, recharge) ; 36 : dégâts dans la durée (+, −, héroïques +, −).
-- Non relevé jusqu'au bout : critiques, défense/résistance ignorées, résistances aux critiques et à l'étourdissement,
-  renvoi = options des objets portés (itemoptiontable, runes, conversions, prestige ; FUN_14051aa90) + part des
-  compétences.
+- **Caractéristiques secondaires** (8 lignes `%d%%` : taux et dégâts critiques, résistance élémentaire et défense
+  ignorées, résistances aux critiques et à l'étourdissement, « renvoi » probabilité et quantité) = part des
+  compétences + part des objets, couleur par rapport à 0 (blanc 0, vert > 0, rouge < 0). Étourdissement : part des
+  compétences seule (Archonia lit la part des objets puis l'écrase, FUN_1407ad760).
+  - **AGPMSKILL champ 9** (MEMORY_BLOCK, longueur u32) : pour tout paquet AGPMSKILL dont la base (champ 2,
+    `SKILL_BASE`) est de type 3 (personnage), Archonia copie 220 octets (0xDC, sans contrôle de longueur) dans
+    `AgpdSkillAttachData + 0x6b0`, quelle que soit l'opération ; l'op 3 ne porte que cela (pas de réponse). `i32`
+    lus : 0x08 taux critique, 0x0c dégâts critiques, 0x2c / 0x3c « renvoi » (coup reçu changé en PV : probabilité,
+    quantité), 0xa4 défense ignorée, 0xa8 résistance ignorée, 0xb0 résistance aux critiques, 0xbc étourdissement ;
+    le reste à 0 (`skills::SkillAttach`). Le client ne calcule pas cette part : seulement les effets de compétences.
+  - **Part des objets** (FUN_14051aa90 / FUN_14051a150, recalculée au plus une fois par seconde pour le joueur,
+    toutes les cases d'équipement, sans contrôle de durabilité) : options liées du modèle (`Link_id` d'itemdatatable,
+    10 au plus → première option du groupe, dans l'ordre du fichier, avec `Level_min` ≤ niveau ≤ `Level_max`) +
+    5 options de l'objet (AGPMITEM champ 20) + liste interne de 50 `u16` (TID des `OptionTID` des runes serties,
+    relus par erreur comme TID de modèle dont on somme les `OptionTID`) + `OptionTID` des modèles sertis ; prestige
+    (Archonia) = 0. Colonnes d'itemoptiontable : `skill_rate` → taux critique si `skill_type` 1, « renvoi »
+    probabilité si 3 ; `Critical` → dégâts critiques ; `damage_convert_hp` → « renvoi » quantité ;
+    `Ignore_Physical_Defense_Rate`, `Ignore_Attribute_Defense_Rate`, `Critical_Defense_Rate`, `StunResistance`.
 
 ## Inconnues
 

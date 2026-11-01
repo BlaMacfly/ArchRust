@@ -14,6 +14,8 @@
 //! AGPMSKILL op 7 (1 identifiant, 6 action : 0 type, 1 cible en mini SKILL_BASE (3, CID))
 //!     → op 7 diffusé (2 lanceur ; action : 1 cible, 5 incantation, 6 durée, 7 relance en ms)
 //!     → op 8 (action 2 : 1 cible, 2 facteurs du résultat comme pour le combat)
+//! AGPMSKILL op 3 (2 base (3, CID), 9 bloc de 220 octets) : part des compétences des caractéristiques secondaires
+//!     (voir [`SkillAttach`]) ; Archonia copie le champ 9 de tout paquet AGPMSKILL qui le porte.
 //! ```
 
 use crate::world::{ActionFactorPoints, WorldEvent};
@@ -24,6 +26,8 @@ use archrust_protocol::schema::{main, mini, packet_type, Schema};
 pub mod op {
     pub const ADD: i64 = 0;
     pub const UPDATE: i64 = 2;
+    /// Données attachées du personnage (champ 9 seul ; FUN_1402f5b70 n'a pas de cas 3).
+    pub const ATTACH: i64 = 3;
     pub const CAST: i64 = 7;
     pub const CAST_RESULT: i64 = 8;
 }
@@ -76,6 +80,62 @@ const FACTORS_DIRT: usize = 11;
 
 /// Fonction « maître des compétences » d'un PNJ.
 const SKILL_MASTER_FUNCTION: i32 = 25;
+
+/// Taille du bloc du champ 9 d'AGPMSKILL que copie Archonia (FUN_1402f5850 : 0xDC octets vers
+/// `AgpdSkillAttachData + 0x6b0`, sans contrôle de longueur).
+pub const ATTACH_BLOCK_SIZE: usize = 0xdc;
+
+/// Part des compétences des caractéristiques secondaires de la fenêtre du personnage, lue dans le champ 9
+/// d'AGPMSKILL (i32 petit-boutistes ; les autres octets du bloc ne sont lus par aucune fenêtre). Décalage dans
+/// le bloc → champ d'`AgpdSkillAttachData` → ligne :
+/// 0x08 → 0x6b8 taux critique, 0x0c → 0x6bc dégâts critiques, 0x2c → 0x6dc et 0x3c → 0x6ec « renvoi de
+/// dégâts » (probabilité et quantité d'un coup reçu changé en PV), 0xa4 → 0x754 défense ignorée,
+/// 0xa8 → 0x758 résistance élémentaire ignorée, 0xb0 → 0x760 résistance aux critiques, 0xbc → 0x76c résistance
+/// à l'étourdissement.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct SkillAttach {
+    pub critical_rate: i32,
+    pub critical_damage: i32,
+    pub reflect_rate: i32,
+    pub reflect_amount: i32,
+    pub ignore_defense: i32,
+    pub ignore_resistance: i32,
+    pub critical_resistance: i32,
+    pub stun_resistance: i32,
+}
+
+impl SkillAttach {
+    /// Décalages dans le bloc, dans l'ordre des champs.
+    pub const OFFSETS: [usize; 8] = [0x08, 0x0c, 0x2c, 0x3c, 0xa4, 0xa8, 0xb0, 0xbc];
+
+    /// Valeurs d'un bloc ; un bloc trop court se lit à 0 au-delà de sa fin (Archonia lirait au-delà).
+    pub fn decode(block: &[u8]) -> Self {
+        let at = |o: usize| block.get(o..o + 4).map_or(0, |b| i32::from_le_bytes(b.try_into().unwrap()));
+        let [a, b, c, d, e, f, g, h] = Self::OFFSETS.map(at);
+        SkillAttach { critical_rate: a, critical_damage: b, reflect_rate: c, reflect_amount: d, ignore_defense: e, ignore_resistance: f, critical_resistance: g, stun_resistance: h }
+    }
+
+    /// Bloc de 220 octets nuls hormis les 8 valeurs (ce que doit envoyer le serveur).
+    pub fn encode(&self) -> Vec<u8> {
+        let mut out = vec![0u8; ATTACH_BLOCK_SIZE];
+        let v = [self.critical_rate, self.critical_damage, self.reflect_rate, self.reflect_amount, self.ignore_defense, self.ignore_resistance, self.critical_resistance, self.stun_resistance];
+        for (o, x) in Self::OFFSETS.iter().zip(v) {
+            out[*o..*o + 4].copy_from_slice(&x.to_le_bytes());
+        }
+        out
+    }
+}
+
+/// Champ 9 d'un paquet AGPMSKILL dont la base (champ 2) désigne un personnage (type 3), quelle que soit
+/// l'opération (FUN_1402f5850 le copie avant de traiter l'opération).
+pub fn attach_of(values: &[Option<Value>]) -> Option<SkillEvent> {
+    let block = bytes(values, 9)?;
+    let (_, b) = decode_mini(mini::SKILL_BASE, bytes(values, 2)?).ok()?;
+    if int(&b, 0)? != 3 {
+        return None;
+    }
+    Some(SkillEvent::Attach { cid: int(&b, 1)? as i32, data: SkillAttach::decode(block) })
+}
 
 /// Demandes de compétences.
 #[derive(Debug, Clone, PartialEq)]
@@ -142,6 +202,8 @@ pub enum SkillEvent {
     Learned { tid: i32, result: i32 },
     /// Résultat d'une amélioration (0x3B op 3) : 0 faite, sinon `upgrade_result`.
     Upgraded { id: i32, result: i32 },
+    /// Part des compétences des caractéristiques secondaires d'un personnage (AGPMSKILL champ 9).
+    Attach { cid: i32, data: SkillAttach },
 }
 
 fn int(values: &[Option<Value>], i: usize) -> Option<i64> {
@@ -165,10 +227,12 @@ fn base_cid(b: Option<&[u8]>) -> Option<i32> {
     int(&v, 1).map(|v| v as i32)
 }
 
-/// Paquet AGPMSKILL (op 0, 2, 7, 8) ou 0x3B traduit, sinon `None`.
+/// Paquet AGPMSKILL (op 0, 2, 3, 7, 8) ou 0x3B traduit, sinon `None`. Le champ 9 des autres opérations est
+/// relevé à part (`world::extra_events`, [`decode_skill_block`]).
 pub fn translate(t: u8, values: &[Option<Value>]) -> Option<WorldEvent> {
     match t {
         packet_type::SKILL => match int(values, 0)? {
+            op::ATTACH => attach_of(values).map(WorldEvent::Skill),
             op::ADD => Some(WorldEvent::Skill(SkillEvent::Known {
                 owner: base_cid(bytes(values, 2)).unwrap_or(0),
                 id: int(values, 1)? as i32,
@@ -245,8 +309,10 @@ pub fn decode_skill_block(mut b: &[u8]) -> Vec<WorldEvent> {
         }
         let (one, rest) = b.split_at(len);
         b = rest;
-        if let Some(ev) = decode_packet(main::SKILL, one).ok().and_then(|p| translate(packet_type::SKILL, &p.values)) {
-            out.push(ev);
+        let Ok(p) = decode_packet(main::SKILL, one) else { continue };
+        out.extend(translate(packet_type::SKILL, &p.values));
+        if int(&p.values, 0) != Some(op::ATTACH) {
+            out.extend(attach_of(&p.values).map(WorldEvent::Skill));
         }
     }
     out
@@ -295,5 +361,36 @@ mod tests {
         assert_eq!((int(&v, 0), int(&v, 1), base_cid(bytes(&v, 2)), int(&a, 0), base_cid(bytes(&a, 1))), (Some(7), Some(5), Some(42), Some(4), Some(42)));
         let (s, v) = command_packet(&SkillCommand::Learn { npc: 9, tid: 57 }, 42);
         assert_eq!((s.id, int(&v, 0), int(&v, 4)), (0x3b, Some(1), Some(57)));
+    }
+
+    #[test]
+    fn donnees_attachees_du_personnage() {
+        let k = main::SKILL;
+        // Bloc de 220 octets : i32 aux décalages 0x08, 0x0c, 0x2c, 0x3c, 0xa4, 0xa8, 0xb0, 0xbc.
+        let mut block = vec![0u8; ATTACH_BLOCK_SIZE];
+        for (i, o) in SkillAttach::OFFSETS.iter().enumerate() {
+            block[*o..*o + 4].copy_from_slice(&(i as i32 + 1).to_le_bytes());
+        }
+        block[0x10..0x14].copy_from_slice(&99i32.to_le_bytes());
+        let want = SkillAttach { critical_rate: 1, critical_damage: 2, reflect_rate: 3, reflect_amount: 4, ignore_defense: 5, ignore_resistance: 6, critical_resistance: 7, stun_resistance: 8 };
+        assert_eq!(SkillAttach::decode(&block), want);
+        assert_eq!(SkillAttach::decode(&want.encode()), want);
+        // Bloc tronqué : ce qui manque vaut 0.
+        assert_eq!(SkillAttach::decode(&block[..0x30]), SkillAttach { critical_rate: 1, critical_damage: 2, reflect_rate: 3, ..Default::default() });
+        // Op 3 : base (3, CID) et champ 9.
+        let p = build_packet(k, &sparse(k, &[(0, Value::I8(3)), (2, base(42)), (9, Value::Block(block.clone()))])).unwrap();
+        let d = decode_packet(k, &p).unwrap();
+        assert!(matches!(translate(packet_type::SKILL, &d.values), Some(WorldEvent::Skill(SkillEvent::Attach { cid: 42, data })) if data == want));
+        // Base qui ne désigne pas un personnage : ignorée.
+        let s = mini::SKILL_BASE;
+        let other = Value::Packet(build_mini(s, &[Some(Value::I8(1)), Some(Value::I32(42))]).unwrap());
+        let p = build_packet(k, &sparse(k, &[(0, Value::I8(3)), (2, other), (9, Value::Block(block.clone()))])).unwrap();
+        assert!(translate(packet_type::SKILL, &decode_packet(k, &p).unwrap().values).is_none());
+        // Autre opération qui porte le champ 9 (op 0 dans le bloc de la vue optimisée) : les deux événements.
+        let p = build_packet(k, &sparse(k, &[(0, Value::I8(0)), (1, Value::I32(1)), (2, base(42)), (3, factors(2)), (4, Value::I32(222)), (9, Value::Block(block))])).unwrap();
+        let evs = decode_skill_block(&p);
+        assert_eq!(evs.len(), 2);
+        assert!(matches!(evs[0], WorldEvent::Skill(SkillEvent::Known { id: 1, level: 2, .. })));
+        assert!(matches!(evs[1], WorldEvent::Skill(SkillEvent::Attach { cid: 42, data }) if data == want));
     }
 }

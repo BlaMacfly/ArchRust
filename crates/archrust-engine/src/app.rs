@@ -83,6 +83,9 @@ mod buddy_glue;
 #[path = "app_mail.rs"]
 mod mail_glue;
 
+#[path = "app_trade.rs"]
+mod trade_glue;
+
 #[path = "app_repair.rs"]
 mod repair_glue;
 
@@ -299,6 +302,8 @@ pub struct App {
     buddy: buddy_glue::BuddyGlue,
     /// Courrier : boîte aux lettres, lecture, écriture, voir `app_mail.rs`.
     mail: mail_glue::MailGlue,
+    /// Échange entre joueurs : demande, fenêtre d'échange, voir `app_trade.rs`.
+    trade: trade_glue::TradeGlue,
     /// Usure et réparation chez les forgerons, voir `app_repair.rs`.
     repair: repair_glue::RepairGlue,
     /// Montures : modèles, cavaliers, refus à cheval, voir `app_ride.rs`.
@@ -446,6 +451,7 @@ impl App {
             product: Default::default(),
             buddy: Default::default(),
             mail: Default::default(),
+            trade: Default::default(),
             repair: Default::default(),
             ride: Default::default(),
             auction: Default::default(),
@@ -1322,6 +1328,7 @@ impl App {
                 // Amis, ignorés et courriers renvoyés par le serveur.
                 self.buddy_reset();
                 self.mail_reset();
+                self.trade_reset();
                 self.auction_reset();
                 self.itemset_reset();
             }
@@ -1473,8 +1480,16 @@ impl App {
                 }
             }
             WorldEvent::ItemChanged(item) => {
+                // Grille d'échange entre joueurs (statut 6) : objets de l'autre à part (voir `app_trade.rs`).
+                if self.trade_item(&item) {
+                    return;
+                }
                 // Objet porté par un autre joueur : son équipement, pas l'inventaire.
                 if self.other_player_item(&item) {
+                    return;
+                }
+                // Métamorphosé ou évolué : déplacement refusé par FUN_1401bca10 ignoré (voir `app_morph.rs`).
+                if self.morph_ignores_item(&item) {
                     return;
                 }
                 if item.operation == 1
@@ -1526,7 +1541,10 @@ impl App {
             WorldEvent::Nature(ev) => self.nature_event(ev),
             WorldEvent::CharacterSeen(c) => {
                 if let Some(index) = self.entities.iter().position(|e| e.cid == c.cid) {
-                    if self.entities[index].equipment != c.equipment {
+                    // Métamorphosé : l'équipement suit sans être redessiné (voir `app_morph.rs`).
+                    if self.entities[index].equipment != c.equipment && self.morph_frozen_model(c.cid) {
+                        self.entities[index].equipment = c.equipment;
+                    } else if self.entities[index].equipment != c.equipment {
                         if let Some(gpu) = self.gpu.as_mut() {
                             let fallback = gpu.marker.clone();
                             let head = self.entities[index].head;
@@ -1648,6 +1666,8 @@ impl App {
             // Amis et ignorés (0x2B), courrier (0x2D) : voir `app_buddy.rs`, `app_mail.rs`.
             WorldEvent::Buddy(ev) => self.on_buddy_event(ev),
             WorldEvent::Mail(ev) => self.on_mail_event(ev),
+            // Échange entre joueurs (0x07), voir `app_trade.rs`.
+            WorldEvent::Trade(ev) => self.on_trade_event(ev),
             // Réparation et durabilité (0x34, AGPMITEM champ 10), montures (0x4D) : voir `app_repair.rs`,
             // `app_ride.rs`.
             WorldEvent::Repair(ev) => self.on_repair_event(ev),
@@ -1755,6 +1775,7 @@ impl App {
                 self.guild_reset();
                 self.buddy_reset();
                 self.mail_reset();
+                self.trade_reset();
                 self.auction_reset();
                 self.itemset_reset();
                 self.ui.push_chat(format!("[système] déconnecté : {why}"));
@@ -2509,6 +2530,12 @@ impl App {
         let skill_views = self.skills_views();
         // Siège : joueur et résurrection de siège (voir `app_siege.rs`).
         let siege_me = self.siege_me();
+        // Échange entre joueurs : entrée « Trade » pour le joueur ciblé, refus (voir `app_trade.rs`).
+        let trade_frame = {
+            let me = self.player.as_ref().map_or(0, |p| p.cid);
+            let target = self.addons.target_cid().filter(|c| *c != me && self.entities.iter().any(|e| e.cid == *c && e.is_player));
+            self.trade_frame(target)
+        };
 
         let Some(gpu) = &mut self.gpu else {
             return Ok(());
@@ -2664,6 +2691,8 @@ impl App {
                     worldmap_glue::panel(ctx, &mut self.worldmap, self.player.as_ref().map(|p| p.position), &mut self.hud, &self.assets);
                 }
                 // Entrepôt de guilde avant la banque : un objet de l'entrepôt lâché dans le sac y est repris.
+                // Objet de la grille d'échange lâché dans le sac : repris (voir `app_trade.rs`).
+                trade_glue::item_requests(&self.trade, &mut item_requests, self.net.as_ref());
                 guild_glue::item_requests(&self.guild, &mut item_requests, self.net.as_ref());
                 npc_glue::panel(ctx, &mut self.npc, &npc_views, &mut item_requests, &self.items, &mut self.hud, &self.assets, self.net.as_ref(), &mut self.ui);
                 // Fenêtre de rémission du pardonneur (voir `app_pvp.rs`).
@@ -2678,12 +2707,15 @@ impl App {
                 // Potions refusées à cheval ou métamorphosé.
                 ride_glue::item_requests(&mut self.ride, &self.items, &mut item_requests, &mut self.hud, &self.assets, &mut self.ui);
                 // Passeports métamorphosé, objet d'oubli des compétences évolué (voir `app_morph.rs`).
-                morph_glue::item_requests(&mut self.morph, &self.items, &mut item_requests, &mut self.hud, &self.assets, &mut self.ui);
+                morph_glue::item_requests(&mut self.morph, &self.items, &self.auction.item_flags, &mut item_requests, &mut self.hud, &self.assets, &mut self.ui);
                 // Fabrication, PNJ et compétences de production, barre de la récolte.
                 product_glue::panel(ctx, &mut self.product, &self.items, &mut self.hud, &self.assets, self.net.as_ref(), &mut self.ui);
                 // Amis, ignorés, menu d'un joueur ciblé (voir `app_buddy.rs`) ; courrier (voir `app_mail.rs`).
                 let player_target = self.addons.target_cid().filter(|c| *c != me).and_then(|cid| self.entities.iter().find(|e| e.cid == cid && e.is_player)).map(|e| (e.cid, e.name.clone()));
+                // Entrée « Trade » du menu et fenêtres de l'échange (voir `app_trade.rs`).
+                self.buddy.trade_menu = trade_frame.menu;
                 buddy_glue::panel(ctx, &mut self.buddy, player_target, &mut self.hud, &self.assets, self.net.as_ref(), &mut self.ui);
+                trade_glue::panel(ctx, &mut self.trade, &trade_frame, self.buddy.trade_chosen.take(), &self.items, &mut self.hud, &self.assets, self.net.as_ref(), &mut self.ui);
                 mail_glue::panel(ctx, &mut self.mail, &self.items, &player_name, &mut self.hud, &self.assets, self.net.as_ref(), &mut self.ui);
                 // Maison des ventes (« Sell » de l'inventaire compris) et commutateur d'équipement.
                 let player_pos = self.player.as_ref().map(|p| p.position);

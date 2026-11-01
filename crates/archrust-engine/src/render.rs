@@ -81,6 +81,35 @@ struct Globals {
     light_color: [f32; 4],
     fog_color: [f32; 4],
     fog_range: [f32; 4],
+    /// Lumières d'effet (`app_effects.rs`, type 5) : xyz position, w rayon ; rgb couleur ; x nombre.
+    point_pos: [[f32; 4]; MAX_POINT_LIGHTS],
+    point_color: [[f32; 4]; MAX_POINT_LIGHTS],
+    point_count: [f32; 4],
+}
+
+/// Lumières ponctuelles d'effet appliquées au plus (tableaux `point_*` des shaders).
+pub const MAX_POINT_LIGHTS: usize = 8;
+
+/// Lumière ponctuelle d'un effet d'Archonia (`AgcdEffLight`) : éclaire terrain, objets et
+/// personnages dans sa sphère, en plus du soleil et de l'ambiante (voir `shader.wgsl`).
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct PointLight {
+    pub position: Vec3,
+    pub radius: f32,
+    /// Couleur (0–1).
+    pub color: [f32; 3],
+}
+
+/// Tableaux des shaders pour `lights` (les [`MAX_POINT_LIGHTS`] premières) : positions et rayons,
+/// couleurs, nombre.
+fn pack_point_lights(lights: &[PointLight]) -> ([[f32; 4]; MAX_POINT_LIGHTS], [[f32; 4]; MAX_POINT_LIGHTS], [f32; 4]) {
+    let (mut pos, mut color) = ([[0.0; 4]; MAX_POINT_LIGHTS], [[0.0; 4]; MAX_POINT_LIGHTS]);
+    let n = lights.len().min(MAX_POINT_LIGHTS);
+    for (i, l) in lights.iter().take(n).enumerate() {
+        pos[i] = [l.position.x, l.position.y, l.position.z, l.radius];
+        color[i] = [l.color[0], l.color[1], l.color[2], 1.0];
+    }
+    (pos, color, [n as f32, 0.0, 0.0, 0.0])
 }
 
 /// Brouillard par défaut (sans ciel d'Archonia) : de 30 000 à 90 000 unités, au plus 85 %.
@@ -179,6 +208,8 @@ pub struct Renderer {
     /// Effets d'Archonia de l'image (`app_effects.rs`) : lots (texture, mélange, sommets en
     /// coordonnées du monde), dessinés après les particules dans l'ordre de la liste.
     pub effects: Vec<EffectDraw>,
+    /// Lumières des effets de l'image (`app_effects.rs`), au plus [`MAX_POINT_LIGHTS`].
+    pub point_lights: Vec<PointLight>,
     sky: crate::sky_render::SkyRenderer,
     /// Demande de capture de la prochaine image (lue dans `take_capture`).
     pub capture_next: bool,
@@ -475,6 +506,7 @@ impl Renderer {
             particles: None,
             flares: Vec::new(),
             effects: Vec::new(),
+            point_lights: Vec::new(),
             sky,
             capture_next: false,
             captured: None,
@@ -723,6 +755,7 @@ impl Renderer {
             Err(e) => return Err(e.into()),
         };
         let view = frame.texture.create_view(&Default::default());
+        let (point_pos, point_color, point_count) = pack_point_lights(&self.point_lights);
         let globals = Globals {
             view_proj: view_proj.to_cols_array_2d(),
             light_dir: self.light_dir.extend(0.0).to_array(),
@@ -731,6 +764,9 @@ impl Renderer {
             light_color: self.light_color,
             fog_color: self.fog_color,
             fog_range: self.fog_range,
+            point_pos,
+            point_color,
+            point_count,
         };
         self.queue
             .write_buffer(&self.globals_buf, 0, bytemuck::bytes_of(&globals));
@@ -1046,4 +1082,22 @@ fn bounds(vertices: &[Vertex]) -> (Vec3, f32) {
     }
     let center = (min + max) * 0.5;
     (center, (max - center).length())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Lumières d'effet : au plus huit dans les tableaux des shaders, taille de `Globals` multiple de 16.
+    #[test]
+    fn point_lights_pack() {
+        let l = PointLight { position: Vec3::new(1.0, 2.0, 3.0), radius: 600.0, color: [0.6, 0.57, 1.0] };
+        let (pos, color, count) = pack_point_lights(&[l; 10]);
+        assert_eq!(count[0], MAX_POINT_LIGHTS as f32);
+        assert_eq!(pos[7], [1.0, 2.0, 3.0, 600.0]);
+        assert_eq!(color[0], [0.6, 0.57, 1.0, 1.0]);
+        let (_, _, none) = pack_point_lights(&[]);
+        assert_eq!(none[0], 0.0);
+        assert_eq!(std::mem::size_of::<Globals>() % 16, 0);
+    }
 }

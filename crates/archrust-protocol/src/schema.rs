@@ -75,6 +75,8 @@ pub mod packet_type {
     pub const CHAR_MANAGER: u8 = 0x03;
     pub const ITEM: u8 = 0x04;
     pub const SKILL: u8 = 0x05;
+    /// AgpmPrivateTrade : échange entre joueurs, drapeaux 2 octets.
+    pub const PRIVATE_TRADE: u8 = 0x07;
     pub const PARTY: u8 = 0x08;
     pub const PARTY_MANAGEMENT: u8 = 0x09;
     pub const LOGIN: u8 = 0x0d;
@@ -338,6 +340,19 @@ pub mod main {
         f!(Int32),          // 1 CID de l'auteur
         f!(Int32),          // 2 CID de la cible
         f!(Char, 49),       // 3 nom
+    ]);
+
+    // AgpmPrivateTrade (0x07) — drapeaux 2 : échange entre joueurs (Archonia `FUN_1406614f0`).
+    schema!(pub PRIVATE_TRADE = "AGPMPRIVATETRADE", T::PRIVATE_TRADE, 2, [
+        f!(Int8),           // 0 opération
+        f!(Int32),          // 1 CID
+        f!(Int32),          // 2 CID de l'autre joueur
+        f!(Int32),          // 3 IID
+        f!(Int32),          // 4 TID
+        f!(Int64),          // 5 argent (op 10 : statut d'arrivée de l'objet repris)
+        f!(Packet),         // 6 case d'origine (mini ITEM_GRID)
+        f!(Packet),         // 7 case visée (mini ITEM_GRID)
+        f!(Int32),          // 8 argument (résultat, genre de grille)
     ]);
 
     // AgpmGuild (0x15) — drapeaux 4 : guildes. Les champs 1 à 4 portent aussi le code, les textes et les
@@ -767,6 +782,7 @@ pub mod main {
             T::MAILBOX => MAILBOX,
             T::EVENT_QUEST => EVENT_QUEST,
             T::QUEST => QUEST,
+            T::PRIVATE_TRADE => PRIVATE_TRADE,
             T::PARTY => PARTY,
             T::PARTY_MANAGEMENT => PARTY_MANAGEMENT,
             T::CONFIG => CONFIG,

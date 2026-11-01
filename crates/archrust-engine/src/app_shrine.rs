@@ -19,7 +19,8 @@
 //!   `_Occupy`), +0xA8 / (+0x70 en gravure, +0x78 sinon) en secondes.
 //! * **Noms** (`FUN_140825a20`) : joueur dans une région de Shrine (236-283), autre joueur de race différente →
 //!   couleur `SH_HUMAN/ORC/MOONELF/DRAGONSCION_NAME` de color.ini `[SHRINE]` ; même race → couleur par défaut
-//!   (pas de couleur de meurtrier).
+//!   (pas de couleur de meurtrier). La race est celle des facteurs (`+0x470`), d'origine sous métamorphose : prise
+//!   du gabarit d'avant la forme (`App::morph_origin_tid`, voir `app_morph.rs`).
 //! * **Battleground** (`FUN_14062ec70`) : type 2 sysstr 780 / 782, type 4 sysstr 781 / 783 (vert, 15 s), type 5
 //!   texte du paquet au centre (sa couleur, 15 s) ; les autres types vont à une fenêtre d'AgcmUISiegeWar
 //!   qu'ArchRust n'a pas : discussion.
@@ -319,8 +320,10 @@ impl App {
         self.zone_region.as_ref().is_some_and(|z| SHRINE_REGIONS.contains(&(z.region as u32)))
     }
 
+    /// Race « d'origine » (`FUN_14017fbf0` : gabarit d'avant la métamorphose, voir `app_morph.rs`).
     fn shrine_my_race(&mut self) -> Option<i32> {
-        let tid = self.player.as_ref()?.tid;
+        let p = self.player.as_ref()?;
+        let tid = self.morph_origin_tid(p.cid, p.tid);
         let assets = self.assets.clone();
         self.shrine.race_of_tid(&assets, tid)
     }
@@ -486,6 +489,7 @@ impl App {
             return None;
         }
         let tid = self.entities.iter().find(|e| e.cid == cid && e.is_player)?.tid;
+        let tid = self.morph_origin_tid(cid, tid);
         let assets = self.assets.clone();
         let (mine, theirs) = (self.shrine_my_race(), self.shrine.race_of_tid(&assets, tid));
         let (Some(mine), Some(theirs)) = (mine, theirs) else { return None };

@@ -60,6 +60,7 @@ and the [ArchCore](https://github.com/BlaMacfly/ArchCore) server emulator. This 
 | Wear and repair (`UI_EquipStatus`, `UI_Repair`), mounts (mount model, rider in riding animation), auction house (`UI_Auction`, `UI_SalesBox2`), equipment switcher (`UI_SwitchEditor`), stylist (`UI_Customizing`) | 🟡 tested against ArchCore packets (headless tests), to confirm in game |
 | Summons and pets (`UI_TargetSummonsMenu`), world time, sky from `skyset.ini` (clouds, stars, moon, fog, light), rain and snow | 🟡 tested against ArchCore packets (headless tests), to confirm in game |
 | Shrines (`UI_Shrine_info`), Battleground announcements, boss window (`UI_Boss`), sieges (siege windows, carving), ArchLord, taxes (`UI_TaxSteward`, `UI_TaxView`) | 🟡 tested against ArchCore packets (headless tests), to confirm in game |
+| Trade between players (`UI_PrivateTrade`, request and yes/no box, "Trade" entry of the target player menu), metamorphosis and Dragon Scion evolution (form model, equipment and targeting rules), Archonia effects (particles, trails, dependencies between elements, lights), secondary stats of `Character_Status` (criticals, ignores, reflects, resistances) | 🟡 tested against ArchCore packets and data (headless tests), to be confirmed in game |
 | Weapons and lances drawn in hand, animated glTF mounts, keyboard movement, macro window (`UI_SkillMacro`), stylist 3D preview | ⏳ to do |
 
 ## Quick start

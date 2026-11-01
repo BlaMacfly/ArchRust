@@ -27,13 +27,38 @@
 //!   (`IsEvolutionNotUseInitSkillItem`). Potions 346 à 348 : voir `app_ride.rs` (inventaire) et
 //!   [`refused_item`] (barre de raccourcis).
 //!
+//!
+//! Pendant la transformation (relevé suite, `SPEC-METAMORPHOSE-2`) :
+//! * l'équipement se change **normalement** ; sous métamorphose **ou** évolution, sauf une monture (genre 0x20),
+//!   le client ajoute le contrôle `FUN_1401bca10` ([`equip_permitted`]) contre les facteurs **courants** (race,
+//!   sexe, classe ; d'origine sous métamorphose, de la forme sous évolution) et le drapeau DISARMAMENT : complet,
+//!   niveau compris, pour porter (`FUN_140311b60`), sans le niveau pour retirer (`FUN_140312b00`, `FUN_1401c4330`) ;
+//!   une demande refusée n'est pas envoyée (sans message, comme les erreurs « EquipItem() Error ») et un
+//!   déplacement de l'op 2 d'AGPMITEM qui échoue (porté → 2, 13, 51 ; → 3) est **ignoré** (`FUN_1401b4d00`) ;
+//! * métamorphosé (`+0x600`), un changement d'équipement **n'est pas redessiné** (`FUN_1407523a0`,
+//!   `FUN_140754c60`) : tout est rattaché au modèle à l'op 11 / 12 (`FUN_1404b43a0`) ; visage et coiffure ne sont
+//!   pas posés (`FUN_1404b48d0`) ;
+//! * attaque d'un PJ (`FUN_1402d8e80`) : refusée si l'attaquant est métamorphosé dans une forme de `Type` & 8
+//!   (animal : Mutation, potions 408 à 416), ou si la cible l'est ; une cible non joueur doit être attaquable
+//!   (0x10000, gabarit **courant**, `FUN_140170d10`, voir `app_combat.rs`) ;
+//! * compétence sur un ennemi (`target` 1 de SKILL_SPEC, `FUN_1402f8e20`) : refusée sur une cible métamorphosée
+//!   dont la forme n'a pas 0x10000 et 0x20000 ;
+//! * « même race » (`FUN_14017fbf0`) : gabarit d'origine d'un personnage métamorphosé ([`App::morph_origin_tid`],
+//!   couleurs des Shrines dans `app_shrine.rs`) ;
+//! * menu d'échange privé (`FUN_14053e080`) inactif si l'un des deux est métamorphosé, sauf l'ArchLord
+//!   ([`private_trade_active`]) ;
+//! * ops 11 / 12 pour tout personnage en vue, monstres compris (le modèle du monstre change).
+//!
 //! Écarts : le rappel 0x35 de l'op 13 reçue et le champ `+0xb38` qui bloque l'op 26 ne sont pas reproduits ; les
-//! actions sociales n'existent pas encore dans ArchRust ; l'infobulle des icônes n'a que le texte 665.
+//! actions sociales n'existent pas encore dans ArchRust ; l'infobulle des icônes n'a que le texte 665. Dans
+//! `FUN_1401bca10`, le niveau maximal du gabarit d'objet (`+0x1f0`, colonne inconnue) et les règles de région des
+//! montures ne sont pas repris ; le bit GM (0x10) de l'attaquant n'est pas connu du client ; `UI_TargetInfo` n'affiche ni niveau ni couleur
+//! (`FUN_1404fe410` : gabarit d'origine) et ArchRust ne calcule pas la croissance par niveau.
 
 use super::App;
 use crate::assets::Assets;
 use crate::hud::{HudState, ItemUi};
-use crate::scene::{entity_meshes_with_equipment, Head};
+use crate::scene::{entity_meshes_with_head, Head};
 use crate::ui::UiState;
 use archrust_netclient::morph::{use_result, MorphCommand, MorphEvent};
 use archrust_netclient::skills::SkillCommand;
@@ -55,6 +80,25 @@ const TRANSFORM_TARGET_EVOLUTION: i64 = 5;
 const NOTICE_EVERY: Duration = Duration::from_secs(60);
 const TEXTURE_TRANSFORM: &str = "Cancel_Transform.png";
 const TEXTURE_EVOLUTION: &str = "UI_MainGrid_BtnRestoreEvolution.png";
+/// `ItemType` d'itemdatatable : objet qui se porte.
+const ITEM_TYPE_EQUIP: i64 = 0;
+/// Genre (« Kind », gabarit d'objet `+0x3cc`) d'une monture : hors du contrôle sous métamorphose.
+const KIND_MOUNT: i64 = 0x20;
+/// Statuts d'objet d'AgpmItem contrôlés par `FUN_1401b4d00` (op 2).
+const STATUS_INVENTORY: i8 = 2;
+const STATUS_EQUIP: i8 = 3;
+const STATUS_SUB_INVENTORY: i8 = 13;
+const STATUS_CASH_INVENTORY: i8 = 51;
+/// `target` de SKILL_SPEC : compétence lancée sur un ennemi.
+const SKILL_TARGET_ENEMY: i64 = 1;
+
+/// Bits du type de personnage (colonne `Type` de CharacterDataTable.txt, gabarit `+0x258`).
+pub(super) mod char_type {
+    /// CREATURE : formes animales (Mutation, potions 408 à 416).
+    pub const CREATURE: u32 = 0x8;
+    pub const ATTACKABLE: u32 = 0x10000;
+    pub const TARGETABLE: u32 = 0x20000;
+}
 
 /// État d'un personnage (`AgpdCharacter` : `+0x600` métamorphosé, `+0x604` évolué, `+0x608…+0x610` origine).
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
@@ -158,13 +202,89 @@ impl Countdown {
     }
 }
 
-/// Colonnes utiles d'itemdatatable.txt : `ItemType`, `Type`, `SubType`, `Polymorph Dur`.
+/// Colonnes utiles d'itemdatatable.txt : `ItemType`, `Type`, `SubType`, `Polymorph Dur`, et les restrictions
+/// d'un équipement (`Kind`, `Level`, `Race`, `Class`, `Gender` ; races et classes en masques `1 << (n − 1)`).
 #[derive(Debug, Clone, Copy, Default)]
 struct ItemRow {
     item_type: i64,
     use_type: i64,
     sub_type: i64,
     duration_ms: u64,
+    kind: i64,
+    level: i64,
+    race_mask: u32,
+    class_mask: u32,
+    gender: i64,
+}
+
+/// Facteurs courants d'un personnage (`+0x470`, bloc CharType : race, sexe, classe ; niveau du bloc statut) ;
+/// −1 : inconnu.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct CharFactors {
+    race: i32,
+    gender: i32,
+    class: i32,
+    level: i32,
+}
+
+/// Bit de la race ou de la classe `n` dans un masque de restriction (`1 << (n − 1)`, sur 5 bits comme le client :
+/// −1 inconnu → bit 30).
+fn restriction_bit(n: i32) -> u32 {
+    1u32 << ((n - 1) & 0x1f)
+}
+
+/// `FUN_1401bca10` pour un PJ : classe, race, sexe, niveau minimal (sauf `without_level`), DISARMAMENT.
+fn equip_permitted(row: &ItemRow, c: CharFactors, flags: u32, without_level: bool) -> bool {
+    if row.class_mask != 0 && row.class_mask & restriction_bit(c.class) == 0 {
+        return false;
+    }
+    if row.race_mask != 0 && row.race_mask & restriction_bit(c.race) == 0 {
+        return false;
+    }
+    if row.gender > 0 && row.gender != c.gender as i64 {
+        return false;
+    }
+    if !without_level && row.level > 0 && row.level > c.level as i64 {
+        return false;
+    }
+    flags & archrust_netclient::auction::item_flag::DISARMAMENT == 0
+}
+
+/// Contrôle ajouté sous métamorphose ou évolution (`changed_form`) : `None` hors de ce cas et pour une monture,
+/// sinon `FUN_1401bca10` complet pour porter (`equip`), sans le niveau pour retirer.
+fn morph_equip_check(row: &ItemRow, changed_form: bool, c: CharFactors, flags: u32, equip: bool) -> Option<bool> {
+    (changed_form && row.kind != KIND_MOUNT).then(|| equip_permitted(row, c, flags, !equip))
+}
+
+/// Op 2 d'AGPMITEM sur un objet du joueur (`FUN_1401b4d00`) : `true` si le client l'ignore (objet porté rangé en
+/// 2, 13 ou 51, ou objet porté, refusés par [`morph_equip_check`]).
+fn ignores_update(row: &ItemRow, changed_form: bool, c: CharFactors, flags: u32, current: Option<i8>, new: Option<i8>) -> bool {
+    let equip = match (current, new) {
+        (Some(STATUS_EQUIP), Some(STATUS_INVENTORY | STATUS_SUB_INVENTORY | STATUS_CASH_INVENTORY)) => false,
+        (cur, Some(STATUS_EQUIP)) if cur != Some(STATUS_EQUIP) => true,
+        _ => return false,
+    };
+    morph_equip_check(row, changed_form, c, flags, equip) == Some(false)
+}
+
+/// Attaque d'un PJ (hors GM) permise par `FUN_1402d8e80` : ni lui ni la cible métamorphosés dans une forme de
+/// `Type` & 8 (`me_form`, `target_form` : type de la forme, `None` hors métamorphose).
+fn attack_permitted(me_form: Option<u32>, target_form: Option<u32>) -> bool {
+    let animal = |f: Option<u32>| f.is_some_and(|t| t & char_type::CREATURE != 0);
+    !animal(me_form) && !animal(target_form)
+}
+
+/// Compétence sur un ennemi permise sur une cible (`FUN_1402f8e20`) : une forme (`target_form`) doit être
+/// attaquable et ciblable.
+fn skill_target_permitted(enemy_skill: bool, target_form: Option<u32>) -> bool {
+    let both = char_type::ATTACKABLE | char_type::TARGETABLE;
+    !enemy_skill || target_form.is_none_or(|t| t & both == both)
+}
+
+/// Menu d'échange privé actif (`FUN_14053e080`) : chacun des deux, s'il est métamorphosé, doit être l'ArchLord
+/// (`(métamorphosé, ArchLord)` pour soi puis la cible).
+fn private_trade_active(me: (bool, bool), target: (bool, bool)) -> bool {
+    (!me.0 || me.1) && (!target.0 || target.1)
 }
 
 #[derive(Default)]
@@ -172,6 +292,8 @@ struct MorphData {
     items: HashMap<i32, ItemRow>,
     /// Compétences d'évolution (SKILL_SPEC `transform_target` 5).
     evolution_skills: HashSet<i32>,
+    /// Compétences lancées sur un ennemi (SKILL_SPEC `target` 1).
+    enemy_skills: HashSet<i32>,
     sysstr: HashMap<u32, String>,
 }
 
@@ -189,12 +311,31 @@ fn load_data(assets: &Assets) -> MorphData {
         let cols: Vec<&str> = header.split('\t').map(str::trim).collect();
         let col = |name: &str| cols.iter().position(|c| c.eq_ignore_ascii_case(name));
         let (tid, item_type, use_type, sub_type, dur) = (col("TID"), col("ItemType"), col("Type"), col("SubType"), col("Polymorph Dur"));
+        let (kind, level, race, class, gender) = (col("Kind"), col("Level"), col("Race"), col("Class"), col("Gender"));
         for line in lines {
             let cells: Vec<&str> = line.split('\t').collect();
             let num = |c: Option<usize>| c.and_then(|i| cells.get(i)).and_then(|v| v.trim().parse::<f64>().ok()).map(|v| v as i64).unwrap_or(0);
+            // Liste « 1;2;3 » → masque.
+            let mask = |c: Option<usize>| {
+                let list = c.and_then(|i| cells.get(i)).copied().unwrap_or_default();
+                list.split(';').filter_map(|v| v.trim().parse::<i32>().ok()).filter(|&v| v > 0).fold(0u32, |m, v| m | restriction_bit(v))
+            };
             let t = num(tid) as i32;
             if t > 0 {
-                d.items.insert(t, ItemRow { item_type: num(item_type), use_type: num(use_type), sub_type: num(sub_type), duration_ms: num(dur).max(0) as u64 });
+                d.items.insert(
+                    t,
+                    ItemRow {
+                        item_type: num(item_type),
+                        use_type: num(use_type),
+                        sub_type: num(sub_type),
+                        duration_ms: num(dur).max(0) as u64,
+                        kind: num(kind),
+                        level: num(level),
+                        race_mask: mask(race),
+                        class_mask: mask(class),
+                        gender: num(gender),
+                    },
+                );
             }
         }
     }
@@ -212,10 +353,15 @@ fn load_data(assets: &Assets) -> MorphData {
     let mut rows = spec.lines().map(|l| l.split('\t').map(str::trim).collect::<Vec<_>>());
     if let Some(header) = rows.next() {
         let transform = header.iter().position(|h| h.eq_ignore_ascii_case("transform_target"));
+        let target = header.iter().position(|h| h.eq_ignore_ascii_case("target"));
         for row in rows {
-            let value = transform.and_then(|i| row.get(i)).and_then(|v| v.parse::<i64>().ok());
-            if value == Some(TRANSFORM_TARGET_EVOLUTION) {
-                d.evolution_skills.extend(row.first().and_then(|n| by_name.get(*n)).into_iter().flatten());
+            let value = |c: Option<usize>| c.and_then(|i| row.get(i)).and_then(|v| v.parse::<i64>().ok());
+            let tids = row.first().and_then(|n| by_name.get(*n)).into_iter().flatten();
+            if value(transform) == Some(TRANSFORM_TARGET_EVOLUTION) {
+                d.evolution_skills.extend(tids.clone());
+            }
+            if value(target) == Some(SKILL_TARGET_ENEMY) {
+                d.enemy_skills.extend(tids);
             }
         }
     }
@@ -312,12 +458,47 @@ fn race_class(hud: &HudState) -> Option<(i32, i32)> {
     Some((*f.get(&(factor_part::TYPE, 0))?, *f.get(&(factor_part::TYPE, 2))?))
 }
 
-/// Clic droit sur un objet du sac refusé métamorphosé ou évolué (passeport, objet d'oubli des compétences). Avant
-/// `app_items::panel`.
-pub fn item_requests(glue: &mut MorphGlue, items: &HashMap<i32, ItemRecord>, requests: &mut Vec<ItemUi>, hud: &mut HudState, assets: &Assets, ui: &mut UiState) {
+/// Facteurs courants du joueur (`FACTOR_TYPE` 0 race, 1 sexe, 2 classe ; niveau).
+fn char_factors(hud: &HudState) -> CharFactors {
+    let f = &hud.stats.factors;
+    let get = |part: u8, i: u8| f.get(&(part, i)).copied();
+    CharFactors {
+        race: get(factor_part::TYPE, 0).unwrap_or(-1),
+        gender: get(factor_part::TYPE, 1).unwrap_or(-1),
+        class: get(factor_part::TYPE, 2).unwrap_or(-1),
+        level: hud.stats.level.or(get(factor_part::STATUS, 7)).unwrap_or(-1),
+    }
+}
+
+/// Demande de l'interface qui porte (`Some(true)`) ou retire (`Some(false)`) un objet, avec son identifiant.
+fn equip_request(r: &ItemUi, items: &HashMap<i32, ItemRecord>, d: &MorphData) -> Option<(i32, bool)> {
+    match *r {
+        ItemUi::Activate { iid, worn: true } => Some((iid, false)),
+        ItemUi::DropOnBag { drag, .. } if drag.worn => Some((drag.iid, false)),
+        ItemUi::Activate { iid, worn: false } if d.item(items.get(&iid).and_then(|i| i.template_id)).item_type == ITEM_TYPE_EQUIP => Some((iid, true)),
+        ItemUi::DropOnEquip(drag) if !drag.worn => Some((drag.iid, true)),
+        _ => None,
+    }
+}
+
+/// Clic droit sur un objet du sac refusé métamorphosé ou évolué (passeport, objet d'oubli des compétences), et
+/// équipement porté ou retiré refusé par `FUN_1401bca10` sous métamorphose ou évolution (`flags` : drapeaux
+/// d'état des objets, AGPMITEM champ 19). Avant `app_items::panel`.
+#[allow(clippy::too_many_arguments)]
+pub fn item_requests(glue: &mut MorphGlue, items: &HashMap<i32, ItemRecord>, flags: &HashMap<i32, u32>, requests: &mut Vec<ItemUi>, hud: &mut HudState, assets: &Assets, ui: &mut UiState) {
     let (transformed, archlord, race_class) = (glue.transformed(glue.me), glue.archlord, race_class(hud));
+    let changed_form = transformed || glue.evolved(glue.me);
+    let factors = char_factors(hud);
     let d = glue.data(assets);
     requests.retain(|r| {
+        if let Some((iid, equip)) = equip_request(r, items, d) {
+            let row = d.item(items.get(&iid).and_then(|i| i.template_id));
+            if morph_equip_check(&row, changed_form, factors, flags.get(&iid).copied().unwrap_or(0), equip) == Some(false) {
+                log::info!("objet {iid} : {} refusé sous la forme courante (FUN_1401bca10)", if equip { "équipement" } else { "retrait" });
+                return false;
+            }
+            return true;
+        }
         let ItemUi::Activate { iid, worn: false } = *r else { return true };
         let row = d.item(items.get(&iid).and_then(|i| i.template_id));
         let Some(refusal) = refused_item(row, transformed, archlord, race_class, false) else { return true };
@@ -356,10 +537,11 @@ impl App {
             if let Some(h) = head {
                 p.head = h;
             }
-            let (tid, head, worn) = (p.tid, p.head, p.equipment.clone());
+            // Métamorphosé : ni visage ni coiffure (FUN_1404b48d0).
+            let (tid, head, worn) = (p.tid, (!self.morph.transformed(cid)).then_some(p.head), p.equipment.clone());
             let Some(gpu) = self.gpu.as_mut() else { return };
             let fallback = gpu.player_marker.clone();
-            let meshes = entity_meshes_with_equipment(&mut gpu.renderer, &self.assets, tid, head, &worn, &fallback).unwrap_or_else(|err| {
+            let meshes = entity_meshes_with_head(&mut gpu.renderer, &self.assets, tid, head, &worn, &fallback).unwrap_or_else(|err| {
                 log::warn!("métamorphose du joueur (TID {tid}) : {err:#}");
                 vec![(fallback.clone(), Mat4::IDENTITY)]
             });
@@ -562,6 +744,93 @@ impl App {
         self.morph.transformed(me) || self.morph.evolved(me)
     }
 
+    /// Personnage métamorphosé (`+0x600`) : son équipement n'est pas redessiné et sa tête n'est pas posée
+    /// (`FUN_1407523a0`, `FUN_140754c60`, `FUN_1404b48d0`) ; tout est rechargé à l'op 12.
+    pub(super) fn morph_frozen_model(&self, cid: i32) -> bool {
+        self.morph.transformed(cid)
+    }
+
+    /// TID qui donne la race « d'origine » (`FUN_14017fbf0`) : celui d'avant la métamorphose s'il est connu, sinon
+    /// `current`.
+    pub(super) fn morph_origin_tid(&self, cid: i32, current: i32) -> i32 {
+        match self.morph.states.get(&cid) {
+            Some(MorphState { transformed: true, origin: Some((tid, _)), .. }) if *tid != 0 => *tid,
+            _ => current,
+        }
+    }
+
+    /// Type (`CharacterDataTable.txt`) de la forme d'un personnage métamorphosé en vue, sinon `None`.
+    fn morph_form_type(&mut self, cid: i32) -> Option<u32> {
+        if !self.morph.transformed(cid) {
+            return None;
+        }
+        let (tid, _) = self.morph_current(cid)?;
+        Some(self.combat_char_type(tid))
+    }
+
+    /// Attaque de `target` permise (`FUN_1402d8e80`) : ni le joueur ni la cible dans une forme de `Type` & 8.
+    pub(super) fn morph_allows_attack(&mut self, target: i32) -> bool {
+        let me = self.morph_me();
+        let (mine, theirs) = (self.morph_form_type(me), self.morph_form_type(target));
+        let ok = attack_permitted(mine, theirs);
+        if !ok {
+            log::info!("attaque de {target} : refusée (forme animale, FUN_1402d8e80)");
+        }
+        ok
+    }
+
+    /// Compétence `tid` sur `target` permise (`FUN_1402f8e20`) : une compétence sur un ennemi ne vise pas une forme
+    /// ni attaquable ni ciblable.
+    pub(super) fn morph_allows_skill_target(&mut self, tid: i32, target: i32) -> bool {
+        if target == self.morph_me() {
+            return true;
+        }
+        let assets = self.assets.clone();
+        let enemy = self.morph.data(&assets).enemy_skills.contains(&tid);
+        let form = self.morph_form_type(target);
+        let ok = skill_target_permitted(enemy, form);
+        if !ok {
+            log::info!("compétence {tid} sur {target} : cible métamorphosée non ciblable (FUN_1402f8e20)");
+        }
+        ok
+    }
+
+    /// Menu d'échange privé actif avec `target` (`FUN_14053e080`, « IsActivePrivateTradeMemu ») : entrée « Trade »
+    /// de `UI_TargetCharacterMenu` (voir `app_trade.rs`).
+    pub(super) fn morph_allows_private_trade(&self, target: i32) -> bool {
+        let name = self.entities.iter().find(|e| e.cid == target).map(|e| e.name.as_str()).unwrap_or_default();
+        let me = (self.morph.transformed(self.morph_me()), self.archlord_is_me());
+        private_trade_active(me, (self.morph.transformed(target), !name.is_empty() && self.archlord.is(name)))
+    }
+
+    /// `/porter` (`equip`) ou `/ranger` refusé sous métamorphose ou évolution (même contrôle que [`item_requests`]).
+    pub(super) fn morph_refuses_equip(&mut self, item: &ItemRecord, equip: bool) -> bool {
+        let assets = self.assets.clone();
+        let (changed_form, factors) = (self.morph_changed_form(), char_factors(&self.hud));
+        let flags = self.auction.item_flags.get(&item.id).copied().unwrap_or(0);
+        let row = self.morph.data(&assets).item(item.template_id);
+        morph_equip_check(&row, changed_form, factors, flags, equip) == Some(false)
+    }
+
+    /// Op 2 d'AGPMITEM sur un objet du joueur ignorée sous métamorphose ou évolution (`FUN_1401b4d00`).
+    pub(super) fn morph_ignores_item(&mut self, item: &ItemRecord) -> bool {
+        if item.operation != 2 || !self.morph_changed_form() {
+            return false;
+        }
+        let assets = self.assets.clone();
+        let current = self.items.get(&item.id);
+        let tid = item.template_id.or(current.and_then(|i| i.template_id));
+        let flags = self.auction.item_flags.get(&item.id).copied().unwrap_or(0);
+        let factors = char_factors(&self.hud);
+        let current = current.and_then(|i| i.status);
+        let row = self.morph.data(&assets).item(tid);
+        let ignored = ignores_update(&row, true, factors, flags, current, item.status);
+        if ignored {
+            log::info!("objet {} : déplacement {:?} → {:?} ignoré sous la forme courante (FUN_1401b4d00)", item.id, current, item.status);
+        }
+        ignored
+    }
+
     /// Objet de la barre de raccourcis refusé (mêmes règles que l'inventaire, potions 346 à 348 comprises) : rend
     /// `true` après avoir affiché le message.
     pub(super) fn morph_refuses_item(&mut self, tid: i32) -> bool {
@@ -667,6 +936,12 @@ mod tests {
             assert!(d.evolution_skills.contains(&tid), "compétence d'évolution {tid}");
         }
         assert_eq!(d.evolution_skills.len(), 3);
+        // Mutation (339) : compétence sur un ennemi ; restrictions d'équipement (Bastard Sword : races 1 et 2,
+        // chevalier, niveau 23) ; monture (White Horse) hors contrôle.
+        assert!(d.enemy_skills.contains(&339), "Mutation");
+        let sword = d.item(Some(2));
+        assert_eq!((sword.kind, sword.level, sword.race_mask, sword.class_mask), (2, 23, 0b11, 0b1));
+        assert_eq!(d.item(Some(3002)).kind, KIND_MOUNT);
         assert!(d.sysstr.get(&665).is_some_and(|t| !t.is_empty()), "sysstr 665 (« Cancel Metamorphosis »)");
         assert_eq!(crate::scene::template_race_class(&assets, 1722), Some((4, 1)));
         assert_eq!(crate::scene::template_race_class(&assets, 1724), Some((4, 3)));
@@ -686,7 +961,7 @@ mod tests {
 
     #[test]
     fn objets_refuses() {
-        let row = |use_type, sub_type| ItemRow { item_type: 1, use_type, sub_type, duration_ms: 0 };
+        let row = |use_type, sub_type| ItemRow { item_type: 1, use_type, sub_type, ..Default::default() };
         // Passeport métamorphosé, sauf l'ArchLord.
         assert_eq!(refused_item(row(4, 0), true, false, None, false), Some(Err("Item_TryUseTelScrollOnTransform")));
         assert_eq!(refused_item(row(4, 0), true, true, None, false), None);
@@ -700,5 +975,79 @@ mod tests {
         assert_eq!(refused_item(row(7, 0), true, true, None, false), None, "inventaire : voir app_ride.rs");
         assert_eq!(refused_item(row(12, 2), true, false, None, true), Some(Ok(348)));
         assert_eq!(refused_item(row(12, 1), true, true, None, true), None);
+    }
+
+    /// Arme de Scion (race 4, classes 1 à 4, niveau 40) et armure d'humain chevalier.
+    fn scion_weapon() -> ItemRow {
+        ItemRow { kind: 2, level: 40, race_mask: restriction_bit(4), class_mask: [1, 2, 3, 4].into_iter().fold(0, |m, c| m | restriction_bit(c)), ..Default::default() }
+    }
+
+    #[test]
+    fn controle_de_l_equipement_sous_la_forme() {
+        let knight_armor = ItemRow { kind: 1, level: 10, race_mask: restriction_bit(1) | restriction_bit(2), class_mask: restriction_bit(1), ..Default::default() };
+        let human_knight = CharFactors { race: 1, gender: 1, class: 1, level: 20 };
+        // Hors métamorphose et évolution : pas de contrôle ajouté (le serveur garde le sien).
+        assert_eq!(morph_equip_check(&knight_armor, false, CharFactors { race: 3, ..human_knight }, 0, true), None);
+        // Métamorphosé : facteurs d'origine (humain chevalier) → permis, niveau compris.
+        assert_eq!(morph_equip_check(&knight_armor, true, human_knight, 0, true), Some(true));
+        assert_eq!(morph_equip_check(&knight_armor, true, CharFactors { level: 5, ..human_knight }, 0, true), Some(false), "niveau à l'équipement");
+        assert_eq!(morph_equip_check(&knight_armor, true, CharFactors { level: 5, ..human_knight }, 0, false), Some(true), "pas au retrait");
+        // Race, classe, sexe.
+        assert_eq!(morph_equip_check(&knight_armor, true, CharFactors { race: 3, ..human_knight }, 0, false), Some(false));
+        assert_eq!(morph_equip_check(&knight_armor, true, CharFactors { class: 2, ..human_knight }, 0, false), Some(false));
+        let female = ItemRow { gender: 2, ..knight_armor };
+        assert_eq!(morph_equip_check(&female, true, human_knight, 0, false), Some(false));
+        // Facteurs inconnus (−1 → bit 30) : refusé si l'objet a une restriction.
+        assert_eq!(morph_equip_check(&knight_armor, true, CharFactors { race: -1, gender: -1, class: -1, level: -1 }, 0, false), Some(false));
+        assert_eq!(morph_equip_check(&ItemRow::default(), true, CharFactors { race: -1, gender: -1, class: -1, level: -1 }, 0, false), Some(true));
+        // DISARMAMENT.
+        assert_eq!(morph_equip_check(&ItemRow::default(), true, human_knight, 0x1000, false), Some(false));
+        // Monture (genre 0x20) : jamais refusée par ce contrôle.
+        let horse = ItemRow { kind: KIND_MOUNT, race_mask: restriction_bit(3), ..Default::default() };
+        assert_eq!(morph_equip_check(&horse, true, human_knight, 0x1000, true), None);
+        // Évolution (facteurs de la forme : Slayer race 4 classe 1) : l'arme de Scion reste permise, l'armure
+        // d'humain ne peut être ni portée ni retirée.
+        let slayer = CharFactors { race: 4, gender: 1, class: 1, level: 50 };
+        assert_eq!(morph_equip_check(&scion_weapon(), true, slayer, 0, true), Some(true));
+        assert_eq!(morph_equip_check(&knight_armor, true, slayer, 0, false), Some(false));
+    }
+
+    #[test]
+    fn deplacements_du_serveur_ignores() {
+        let slayer = CharFactors { race: 4, gender: 1, class: 1, level: 30 };
+        let w = scion_weapon();
+        // Porté → sac, sous-inventaire, inventaire cash : contrôle sans niveau (niveau 30 < 40 sans effet).
+        for to in [STATUS_INVENTORY, STATUS_SUB_INVENTORY, STATUS_CASH_INVENTORY] {
+            assert!(!ignores_update(&w, true, slayer, 0, Some(STATUS_EQUIP), Some(to)));
+            assert!(ignores_update(&w, true, CharFactors { race: 1, ..slayer }, 0, Some(STATUS_EQUIP), Some(to)));
+        }
+        // Sac → porté : contrôle complet, niveau compris.
+        assert!(ignores_update(&w, true, slayer, 0, Some(STATUS_INVENTORY), Some(STATUS_EQUIP)));
+        assert!(!ignores_update(&w, true, CharFactors { level: 40, ..slayer }, 0, Some(STATUS_INVENTORY), Some(STATUS_EQUIP)));
+        // Autres déplacements (sac → sac, porté → banque) et hors forme : appliqués.
+        assert!(!ignores_update(&w, true, CharFactors { race: 1, ..slayer }, 0, Some(STATUS_INVENTORY), Some(STATUS_INVENTORY)));
+        assert!(!ignores_update(&w, true, CharFactors { race: 1, ..slayer }, 0, Some(STATUS_EQUIP), Some(100)));
+        assert!(!ignores_update(&w, false, CharFactors { race: 1, ..slayer }, 0, Some(STATUS_EQUIP), Some(STATUS_INVENTORY)));
+    }
+
+    #[test]
+    fn formes_animales_et_echange_prive() {
+        let (monster, animal, big_rage) = (Some(0x30004), Some(0x8), Some(0x30004));
+        // Attaque : ni soi ni la cible en animal (Type & 8) ; une forme de monstre ne change rien.
+        assert!(attack_permitted(None, None));
+        assert!(attack_permitted(monster, None) && attack_permitted(None, big_rage));
+        assert!(!attack_permitted(animal, None), "soi en animal : n'attaque personne");
+        assert!(!attack_permitted(None, animal), "cible en animal : inattaquable");
+        // Compétence sur un ennemi : forme attaquable et ciblable exigée ; sur soi ou un allié, rien.
+        assert!(skill_target_permitted(true, None) && skill_target_permitted(true, monster));
+        assert!(!skill_target_permitted(true, animal));
+        assert!(!skill_target_permitted(true, Some(0x10004)), "sans 0x20000");
+        assert!(skill_target_permitted(false, animal));
+        // Échange privé : métamorphosé seulement si ArchLord, pour soi comme pour la cible.
+        assert!(private_trade_active((false, false), (false, false)));
+        assert!(!private_trade_active((true, false), (false, false)));
+        assert!(!private_trade_active((false, false), (true, false)));
+        assert!(private_trade_active((true, true), (false, false)));
+        assert!(private_trade_active((false, false), (true, true)));
     }
 }

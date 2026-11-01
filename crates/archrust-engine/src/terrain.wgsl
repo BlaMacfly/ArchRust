@@ -13,6 +13,10 @@ struct Globals {
     light_color: vec4<f32>,
     fog_color: vec4<f32>,
     fog_range: vec4<f32>,
+    // Lumières des effets (AgcdEffLight), voir `shader.wgsl`.
+    point_pos: array<vec4<f32>, 8>,
+    point_color: array<vec4<f32>, 8>,
+    point_count: vec4<f32>,
 };
 @group(0) @binding(0) var<uniform> globals: Globals;
 
@@ -46,6 +50,22 @@ struct VertexOut {
     @location(7) uv4: vec2<f32>,
 };
 
+// Lumières ponctuelles des effets (type 5 d'AgcmEff2) : apport diffus rgb × max(0, N·L) × att(d),
+// même calcul que `shader.wgsl` (atténuation `1 − d/R`, choix d'ArchRust).
+fn point_lighting(p: vec3<f32>, n: vec3<f32>) -> vec3<f32> {
+    var sum = vec3<f32>(0.0);
+    let count = min(u32(globals.point_count.x), 8u);
+    for (var i = 0u; i < count; i = i + 1u) {
+        let pr = globals.point_pos[i];
+        let d = pr.xyz - p;
+        let dist = length(d);
+        if (dist < pr.w && dist > 1e-3) {
+            sum = sum + globals.point_color[i].rgb * max(dot(n, d / dist), 0.0) * (1.0 - dist / pr.w);
+        }
+    }
+    return sum;
+}
+
 @vertex
 fn vs_main(v: VertexIn) -> VertexOut {
     var out: VertexOut;
@@ -72,7 +92,7 @@ fn fs_main(in: VertexOut) -> @location(0) vec4<f32> {
     let l = normalize(globals.light_dir.xyz);
     let diffuse = max(dot(n, l), 0.0);
     let directional = select(1.0 - globals.ambient.rgb, globals.light_color.rgb, globals.light_color.w > 0.0);
-    let light = globals.ambient.rgb + vec3<f32>(diffuse) * directional;
+    let light = globals.ambient.rgb + vec3<f32>(diffuse) * directional + point_lighting(in.world_pos, n);
     let dist = distance(in.world_pos, globals.camera_pos.xyz);
     let fog = clamp((dist - globals.fog_range.x) / max(globals.fog_range.y - globals.fog_range.x, 1.0), 0.0, globals.fog_range.z);
     let color = c * in.color.rgb * light;

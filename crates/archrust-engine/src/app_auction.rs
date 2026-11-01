@@ -250,6 +250,12 @@ impl AuctionGlue {
     }
 
     /// Ferme les fenêtres ouvertes (Échap) ; vrai s'il y en avait.
+    /// `UI_Auction` ouverte : l'échange entre joueurs refuse alors demande et acceptation
+    /// (`CannotAuctionInPrivateTrade`, voir `app_trade.rs`).
+    pub fn board_open(&self) -> bool {
+        self.board.is_some()
+    }
+
     pub fn close_windows(&mut self) -> bool {
         let open = self.board.is_some() || self.show_sales || self.create.is_some();
         self.board = None;

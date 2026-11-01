@@ -14,7 +14,8 @@
 //!
 //! L'équipement porté s'affiche aussi sur le modèle du joueur, sauf les armes et boucliers (mains,
 //! `Part` 9 et 10) : leurs modèles ne sont pas encore rattachés aux os de la main et tomberaient aux
-//! pieds du personnage.
+//! pieds du personnage. Métamorphosé, le modèle n'est pas redessiné ; sous métamorphose ou évolution, les
+//! demandes passent d'abord le contrôle `FUN_1401bca10` d'`app_morph.rs` (`item_requests`, `/porter`, `/ranger`).
 
 use super::App;
 use crate::assets::Assets;
@@ -282,7 +283,9 @@ impl App {
             .collect();
         glue.weapon_equip = crate::animation::weapon_anim_equip(crate::scene::equipped_weapon_type(assets, &hands));
         let Some(player) = self.player.as_ref() else { return };
-        if player.cid == 0 || player.equipment == worn {
+        // Métamorphosé : rien n'est redessiné ; l'op 12 rend le modèle d'origine, puis ce rechargement pose
+        // l'équipement changé pendant la forme (voir `app_morph.rs`).
+        if player.cid == 0 || player.equipment == worn || self.morph_frozen_model(player.cid) {
             return;
         }
         let Some(gpu) = self.gpu.as_mut() else { return };
@@ -338,6 +341,16 @@ impl App {
                     return true;
                 };
                 let label = item_label(&self.assets, &item);
+                // Sous métamorphose ou évolution : contrôle `FUN_1401bca10` (voir `app_morph.rs`), sans message.
+                let equip = match cmd {
+                    "/ranger" | "/unequip" => Some(false),
+                    "/porter" | "/equip" => Some(true),
+                    _ => None,
+                };
+                if equip.is_some_and(|e| self.morph_refuses_equip(&item, e)) {
+                    log::info!("objet {} : {cmd} refusé sous la forme courante", item.id);
+                    return true;
+                }
                 let cmd = match cmd {
                     "/ranger" | "/unequip" => Ok(ItemCommand::Unequip { iid: item.id, grid: None }),
                     "/porter" | "/equip" => Ok(ItemCommand::Equip(item.id)),

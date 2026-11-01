@@ -21,8 +21,10 @@
 //!
 //! Le hasard d'Archonia (table de flottants) est remplacé par un générateur propre à chaque émetteur.
 //!
-//! Traînées (type 3, `AgcdEffCtrl_Tail`) : [`Trail`], sur le repère de l'émetteur (mode à un repère
-//! de FUN_14083d8b0 ; le mode à deux repères, bords pris sur deux nœuds d'une arme, n'est pas câblé).
+//! Traînées (type 3, `AgcdEffCtrl_Tail`) : [`Trail`]. Mode à un repère de FUN_14083d8b0
+//! ([`Trail::edges`] : repère de la base parente ou du jeu, voir `app_effects.rs`) ; mode à deux
+//! nœuds (drapeau de jeu 0x400) : bords lus directement sur les nœuds HAnim 702 et 701 du porteur
+//! par `app_effects.rs`, puis mêmes points et même ruban.
 
 use super::{anim_time, base_state, lerp_keys, BOARD_HALF};
 use archrust_data::effset::{anim_kind, psys_dir, psys_flag, sbh_flag, tail_flag, AnimKeys, EffBase, Particles, PsysParams, SbhParams, TailParams};

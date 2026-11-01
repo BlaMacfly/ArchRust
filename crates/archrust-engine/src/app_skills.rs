@@ -394,6 +394,12 @@ impl App {
             SkillEvent::Cast { .. } => {}
             // Expérience de production : relevée par `product_observe` (voir `app_product.rs`).
             SkillEvent::Exp { .. } => {}
+            // Part des compétences des caractéristiques secondaires (fenêtre du personnage, `hud_status.rs`).
+            SkillEvent::Attach { cid, data } => {
+                if cid == me || me == 0 {
+                    self.hud.stats.skill_attach = data;
+                }
+            }
             SkillEvent::MasterOpened { npc } => {
                 let teach = self.npc_teach(npc);
                 match teach {
@@ -466,6 +472,10 @@ impl App {
         let target = if self.morph_is_evolution_skill(tid) { me } else { self.addons.target_cid().unwrap_or(me) };
         // Métamorphosé : aucune compétence, sauf pour l'ArchLord (voir `app_morph.rs`).
         if !self.morph_allows_skill(tid) {
+            return;
+        }
+        // Compétence sur un ennemi : pas sur une cible métamorphosée ni attaquable ni ciblable (forme animale).
+        if !self.morph_allows_skill_target(tid, target) {
             return;
         }
         // Compétence d'ArchLord (`skill_type` 9) : réservée à l'ArchLord (`FUN_1402fa5c0`, voir `app_archlord.rs`).

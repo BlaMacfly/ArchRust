@@ -11,7 +11,7 @@
 //! * `UI_AddBuddyList` / `UI_AddBanList` : invite, saisie du nom (`ADDBUDDYLIST_EDITBOX`,
 //!   `ADDBANLIST_EDIT`), bouton Add ;
 //! * `UI_TargetUserMenu` : bouton « Menu » à côté de la cible quand c'est un joueur, qui ouvre
-//!   `UI_TargetCharacterMenu` (entrées gérées : Invite, Whisper, Add Friend, Ignore User).
+//!   `UI_TargetCharacterMenu` (entrées gérées : Invite, Trade, Whisper, Add Friend, Ignore User).
 //!
 //! Les demandes reviennent au moteur en [`BuddyUi`] (voir `app_buddy.rs`).
 
@@ -75,6 +75,8 @@ pub enum BuddyUi {
 pub enum TargetMenuUi {
     /// `CONTROL_828` « Invite » (`PartyInviteMember`).
     Invite,
+    /// `CONTROL_32674` « Trade » (`PT_RequestTrade`, montré si `IsActivePrivateTradeMemu`, voir `app_trade.rs`).
+    Trade,
     /// `CONTROL_23115` « Whisper » (`Chat_SendWhisper`).
     Whisper,
     /// `CONTROL_BUDDY` « Add Friend » (`BuddyAddFriend_Click`).
@@ -326,6 +328,7 @@ pub fn draw_target_menu(ctx: &egui::Context, hud: &mut HudState, assets: &Assets
             for e in entries {
                 let control = match e {
                     TargetMenuUi::Invite => "CONTROL_828",
+                    TargetMenuUi::Trade => "CONTROL_32674",
                     TargetMenuUi::Whisper => "CONTROL_23115",
                     TargetMenuUi::AddFriend => "CONTROL_BUDDY",
                     TargetMenuUi::Ignore => "CONTROL_BAN",

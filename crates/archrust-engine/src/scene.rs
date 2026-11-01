@@ -632,6 +632,19 @@ pub fn entity_meshes_with_equipment(
     equipment: &[EquipmentView],
     fallback: &Arc<Mesh>,
 ) -> Result<Vec<(Arc<Mesh>, Mat4)>> {
+    entity_meshes_with_head(renderer, assets, tid, Some(head), equipment, fallback)
+}
+
+/// Comme `entity_meshes_with_equipment` ; `head` à `None` : ni visage ni coiffure (personnage métamorphosé,
+/// `FUN_1404b48d0` d'Archonia ne les pose pas, voir `app_morph.rs`).
+pub fn entity_meshes_with_head(
+    renderer: &mut Renderer,
+    assets: &Assets,
+    tid: i32,
+    head: Option<Head>,
+    equipment: &[EquipmentView],
+    fallback: &Arc<Mesh>,
+) -> Result<Vec<(Arc<Mesh>, Mat4)>> {
     let mut meshes = entity_pieces(renderer, assets, tid, head, fallback)?;
     // DragonScion : les objets portés prennent l'apparence de la forme courante (AgcmItem, rappels 0x79 / 0x7B
     // d'AgpmCharacter à l'évolution et à son retour ; classe du modèle courant).
@@ -834,15 +847,15 @@ pub fn entity_meshes(
     head: Head,
     fallback: &Arc<Mesh>,
 ) -> Result<Vec<(Arc<Mesh>, Mat4)>> {
-    Ok(entity_pieces(renderer, assets, tid, head, fallback)?.into_iter().map(|(m, t, _)| (m, t)).collect())
+    Ok(entity_pieces(renderer, assets, tid, Some(head), fallback)?.into_iter().map(|(m, t, _)| (m, t)).collect())
 }
 
-/// Comme `entity_meshes`, avec la partie du corps de chaque pièce (vêtements par défaut).
+/// Comme `entity_meshes`, avec la partie du corps de chaque pièce (vêtements par défaut) ; sans tête pour `None`.
 fn entity_pieces(
     renderer: &mut Renderer,
     assets: &Assets,
     tid: i32,
-    head: Head,
+    head: Option<Head>,
     fallback: &Arc<Mesh>,
 ) -> Result<Vec<(Arc<Mesh>, Mat4, Option<i64>)>> {
     let files = models_for_tid(assets, tid);
@@ -862,7 +875,7 @@ fn entity_pieces(
             Err(e) => log::warn!("TID {tid} : {file} : {e:#}"),
         }
     }
-    if !meshes.is_empty() {
+    if let (false, Some(head)) = (meshes.is_empty(), head) {
         for (dir, file) in default_head_files(assets, tid, head) {
             match model_meshes(renderer, assets, dir, &file) {
                 Ok(part) => meshes.extend(part.into_iter().map(|(m, t)| (m, t, None))),
