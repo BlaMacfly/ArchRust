@@ -1,5 +1,11 @@
-//! Écran de sélection des personnages d'Archonia (`UI_LG_CHARSELECT`, 1024 × 768) et
-//! confirmation de suppression (`UI_ConfirmDeleteChar`), à la place des fenêtres egui.
+//! Écrans de connexion d'Archonia, à la place des fenêtres egui, dans l'ordre du client :
+//! saisie du compte (`UI_LG_IDPASSWORD`), choix du monde (`UI_SelectServer`), sélection des
+//! personnages (`UI_LG_CHARSELECT`, 1024 × 768) avec confirmation de suppression
+//! (`UI_ConfirmDeleteChar`), création (`UI_LG_CHARCREATE`).
+//!
+//! `UI_LG_IDPASSWORD` et `UI_SelectServer` existent en trois variantes (1024 × 768, 1280 × 1024,
+//! 1600 × 1200) : la plus grande qui tient dans la fenêtre est agrandie sans déformation et centrée,
+//! sur son fond `LG_2D_Back_*.png` recadré à toute la fenêtre.
 //!
 //! `UI_LG_CHARSELECT` est dessiné sur la scène 3D de sélection. L'écran 1024 × 768 est agrandi
 //! sans déformation et centré, et le voile `LG_Base_1024.png` couvre toute la fenêtre. On y trouve :
@@ -44,8 +50,12 @@ struct Screen1024 {
 
 impl Screen1024 {
     fn new(screen: Rect) -> Screen1024 {
-        let scale = (screen.width() / 1024.0).min(screen.height() / 768.0);
-        let origin = screen.center() - Vec2::new(1024.0, 768.0) * scale / 2.0;
+        Self::fit(screen, [1024.0, 768.0])
+    }
+    /// Écran de taille `size` (variantes 1280 × 1024, 1600 × 1200) agrandi sans déformation, centré.
+    fn fit(screen: Rect, size: [f32; 2]) -> Screen1024 {
+        let scale = (screen.width() / size[0]).min(screen.height() / size[1]);
+        let origin = screen.center() - Vec2::new(size[0], size[1]) * scale / 2.0;
         Screen1024 { origin, scale }
     }
     fn rect(&self, pos: [f32; 2], size: [f32; 2]) -> Rect {
@@ -404,4 +414,392 @@ pub fn draw_char_create(ctx: &egui::Context, hud: &mut HudState, assets: &Assets
                 shadow_text(&painter, at, Align2::CENTER_CENTER, status, font * 1.1, Color32::from_rgb(255, 210, 120));
             }
         });
+}
+
+/// Fenêtres de connexion d'Archonia et leurs variantes de résolution (mêmes contrôles, suffixés pour
+/// certains : `CT_LG_EDIT_ID_1280`…).
+pub(super) const LOGIN_WINDOWS: [&str; 6] =
+    ["UI_LG_IDPASSWORD", "UI_LG_IDPASSWORD_1280", "UI_LG_IDPASSWORD_1600", "UI_SelectServer", "UI_SelectServer_1280", "UI_SelectServer_1600"];
+
+/// Demande des écrans de connexion.
+#[derive(Debug, Clone, PartialEq)]
+pub enum LoginUi {
+    /// « Confirm » ou Entrée (`LG_IdPasswordOK`) : identifiant et mot de passe non vides.
+    Confirm,
+    /// « Finish » / « Exit » (`Quit_Event_Call`).
+    Quit,
+    /// Monde choisi dans la liste (`LG_ClickServerList`, premier clic).
+    Select(String),
+    /// « Connect » (`LG_SelectServer`), ou second clic sur le monde choisi.
+    Connect(String),
+    /// Branche d'un groupe ouverte ou fermée (`LG_ServerTreeButton`, clic sur l'en-tête).
+    ToggleGroup(String),
+}
+
+/// Nom d'un contrôle sans le suffixe de sa variante (`CT_LG_EDIT_ID_1280` → `CT_LG_EDIT_ID`).
+fn base_control(name: &str) -> &str {
+    name.strip_suffix("_1280").or_else(|| name.strip_suffix("_1600")).unwrap_or(name)
+}
+
+/// Variante de la fenêtre `base` : la plus grande (1600 × 1200, 1280 × 1024) qui tient dans la fenêtre
+/// du jeu, sinon 1024 × 768 (agrandie ensuite sans déformation).
+fn login_variant(hud: &mut HudState, assets: &Assets, base: &str, screen: Rect) -> Option<UiWindow> {
+    for suffix in ["_1600", "_1280"] {
+        if let Some(w) = window(hud, assets, &format!("{base}{suffix}")).filter(|w| w.size[0] <= screen.width() && w.size[1] <= screen.height()) {
+            return Some(w);
+        }
+    }
+    window(hud, assets, base)
+}
+
+/// Fond plein écran de la fenêtre (`LG_2D_Back_*.png`) : l'image couvre la fenêtre du jeu sans
+/// déformation, recadrée sur les bords.
+fn login_back(ctx: &egui::Context, hud: &mut HudState, assets: &Assets, painter: &egui::Painter, screen: Rect, w: &UiWindow) {
+    let Some((_, tex)) = w.textures.first() else { return };
+    let Some((id, orig)) = hud.image(ctx, assets, tex) else { return };
+    // Partie utile de l'image : la taille de la fenêtre (les fonds sont en puissances de deux).
+    let used = [(w.size[0] / orig[0]).min(1.0), (w.size[1] / orig[1]).min(1.0)];
+    let scale = (screen.width() / w.size[0]).max(screen.height() / w.size[1]);
+    let vis = [screen.width() / scale / w.size[0], screen.height() / scale / w.size[1]];
+    let u0 = (1.0 - vis[0]) / 2.0 * used[0];
+    let v0 = (1.0 - vis[1]) / 2.0 * used[1];
+    let uv = Rect::from_min_max(Pos2::new(u0, v0), Pos2::new(u0 + vis[0] * used[0], v0 + vis[1] * used[1]));
+    painter.image(id, screen, uv, Color32::WHITE);
+}
+
+/// Couleur ARGB d'Archonia (`Status2`, `CtrlFont`).
+fn argb(c: u32) -> Color32 {
+    Color32::from_rgba_unmultiplied((c >> 16) as u8, (c >> 8) as u8, c as u8, (c >> 24) as u8)
+}
+
+/// Écran de saisie du compte d'Archonia (`UI_LG_IDPASSWORD`) :
+/// - **Cadre** `CT_LG_MAIN` (`LG_IDPass_Main.png`) au centre, titre « Login », consigne, libellés
+///   « User ID » / « Password » ;
+/// - **Saisies** `CT_LG_EDIT_ID` et `CT_LG_EDIT_PASSWORD` (masquée) ; Entrée valide, Tab passe d'un
+///   champ à l'autre (`LG_IdPasswordEditTab`) ;
+/// - **« Confirm »** (`LG_IdPasswordOK` : rien n'est encore envoyé du compte, la liste des mondes
+///   s'ouvre) et **« Finish »** (`Quit_Event_Call`) ;
+/// - **Images** `LG_Title.png`, `LG_CopyRight.png` ; le classement d'âge coréen
+///   (`LG_RestrictAge_loading.png`, `CtrlShow=1:IsAreaKorea`) n'est pas affiché.
+///
+/// `waiting` : message pendant la connexion au serveur de connexion (sysstr 457).
+pub fn draw_id_password(ctx: &egui::Context, hud: &mut HudState, assets: &Assets, user: &mut String, password: &mut String, waiting: Option<&str>, out: &mut Vec<LoginUi>) {
+    let screen = ctx.screen_rect();
+    let Some(w) = login_variant(hud, assets, "UI_LG_IDPASSWORD", screen) else { return };
+    let lay = Screen1024::fit(screen, w.size);
+    let s = lay.scale;
+    let font = (11.0 * s).max(9.0);
+    let busy = waiting.is_some();
+    let id_edit = egui::Id::new("archonia-login-id");
+    let pw_edit = egui::Id::new("archonia-login-password");
+    egui::Area::new(egui::Id::new("archonia-login"))
+        .fixed_pos(screen.min)
+        .order(egui::Order::Background)
+        .show(ctx, |ui| {
+            ui.set_min_size(screen.size());
+            let painter = ui.painter().clone();
+            login_back(ctx, hud, assets, &painter, screen, &w);
+            let mut enter = false;
+            for c in &w.controls {
+                let r = lay.rect(c.pos, c.size);
+                let name = base_control(&c.name);
+                match name {
+                    // Classement d'âge coréen : sans objet.
+                    "CONTROL_32728" => {}
+                    "CT_LG_EDIT_ID" | "CT_LG_EDIT_PASSWORD" => {
+                        let pw = name == "CT_LG_EDIT_PASSWORD";
+                        let (text, id) = if pw { (&mut *password, pw_edit) } else { (&mut *user, id_edit) };
+                        let edit = egui::TextEdit::singleline(text)
+                            .id(id)
+                            .frame(false)
+                            .password(pw)
+                            .char_limit(250)
+                            .interactive(!busy)
+                            .font(FontId::proportional(font))
+                            .text_color(Color32::WHITE)
+                            .margin(egui::Margin::symmetric(2, 0));
+                        let resp = ui.put(r, edit);
+                        if resp.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter)) {
+                            enter = true;
+                        }
+                    }
+                    "CT_LG_BUTTON_OK" | "CONTROL_1723" => {
+                        let ok = name == "CT_LG_BUTTON_OK";
+                        if button(ctx, ui, hud, assets, &painter, r, c, c.fixed_label(), font, !busy || !ok, ("login", name)).clicked() {
+                            if ok {
+                                enter = true;
+                            } else {
+                                out.push(LoginUi::Quit);
+                            }
+                        }
+                    }
+                    _ => {
+                        if let Some((_, tex)) = c.textures.first() {
+                            control_image(ctx, hud, assets, &painter, r, c.size, &tex.clone(), 1.0);
+                        }
+                        let text = c.fixed_label();
+                        if !text.is_empty() {
+                            // `CtrlFont=…:17` centré (titre), sinon à gauche.
+                            let centered = c.font.is_some_and(|(_, a)| a == 17);
+                            let (at, align) = if centered { (r.center(), Align2::CENTER_CENTER) } else { (r.left_center(), Align2::LEFT_CENTER) };
+                            let size = if name == "CONTROL_23657" { font * 1.15 } else { font };
+                            shadow_text(&painter, at, align, text, size, Color32::WHITE);
+                        }
+                    }
+                }
+            }
+            // `LG_IdPasswordOK` : identifiant et mot de passe non vides.
+            if enter && !busy && !user.trim().is_empty() && !password.is_empty() {
+                out.push(LoginUi::Confirm);
+            }
+            if let Some(text) = waiting {
+                if let Some(c) = w.controls.iter().find(|c| base_control(&c.name) == "CT_LG_MAIN") {
+                    let r = lay.rect(c.pos, c.size);
+                    shadow_text(&painter, Pos2::new(r.center().x, r.bottom() + 16.0 * s), Align2::CENTER_CENTER, text, font * 1.1, Color32::from_rgb(255, 210, 120));
+                }
+            }
+        });
+    // Focus de départ : l'identifiant, ou le mot de passe si l'identifiant est déjà là.
+    if !busy && ctx.memory(|m| m.focused().is_none()) {
+        ctx.memory_mut(|m| m.request_focus(if user.trim().is_empty() { id_edit } else { pw_edit }));
+    }
+}
+
+/// Ligne de la liste `Login_Servers` : en-tête de groupe ou monde.
+#[derive(Debug, Clone, PartialEq)]
+enum ServerRow<'a> {
+    Group { name: &'a str, open: bool },
+    World(&'a archrust_netclient::login::WorldInfo),
+}
+
+/// Lignes de la liste : chaque groupe (ordre d'arrivée) puis ses mondes s'il est ouvert ; 50 lignes au
+/// plus (FUN_1407c3660).
+fn server_rows<'a>(worlds: &'a [archrust_netclient::login::WorldInfo], folded: &[String]) -> Vec<ServerRow<'a>> {
+    let mut groups: Vec<&str> = Vec::new();
+    for w in worlds {
+        if !groups.contains(&w.group.as_str()) {
+            groups.push(&w.group);
+        }
+    }
+    let mut rows = Vec::new();
+    for g in groups {
+        let open = !folded.iter().any(|f| f == g);
+        rows.push(ServerRow::Group { name: g, open });
+        if open {
+            rows.extend(worlds.iter().filter(|w| w.group == g).map(ServerRow::World));
+        }
+    }
+    rows.truncate(50);
+    rows
+}
+
+/// État d'un monde → (message de `uimessage.txt`, rang du `Status2` de `Server_Status`), d'après
+/// FUN_1407c2c80 : 1 Good, 2 AboveNormal, 3 Normal, 4 BelowNormal, 5 Bad, autre Unknown.
+fn server_status(status: i32) -> (&'static str, usize) {
+    match status {
+        1 => ("ServerStatusGood", 0),
+        2 => ("ServerStatusAboveNormal", 1),
+        3 => ("ServerStatusNormal", 2),
+        4 => ("ServerStatusBelowNormal", 3),
+        5 => ("ServerStatusBad", 4),
+        _ => ("ServerStatusUnknown", 4),
+    }
+}
+
+/// État 5 : serveur saturé, connexion refusée par le client (FUN_1407c3d00).
+pub const SERVER_STATUS_FULL: i32 = 5;
+
+/// Choix du monde d'Archonia (`UI_SelectServer`) :
+/// - **Cadre** `SelectServer_Base.png`, titre « Select World », `LG_Title.png`, `LG_CopyRight.png` ;
+/// - **Liste** `Login_Servers` (`CONTROL_24986`, lignes `CONTROL_25949` de 22 px) : en-tête de groupe
+///   (couleur « Server » de `Server_Name`, `Common_Button_12_Plus/Minus_A.png`), puis ses mondes (nom,
+///   état `ServerStatus*` coloré d'après `Server_Status`, barre `LG_ServerListBar.png` au survol et sur
+///   le monde choisi) ; défilement à la molette et par `Common_Button_PGUP/PGDN`, curseur
+///   `Skill_ScrollButtonA.png` ;
+/// - **« Connect »** (`LG_SelectServer`) et **« Exit »** (`Quit_Event_Call`).
+///
+/// Écarts : marques `CTL_NEWSVR`, `CTL_RATE`, `CTL_RC15` (classements coréens) et « personnages ici »
+/// (`LG_IsCharMark.png`, inconnu avant l'authentification) non affichées.
+#[allow(clippy::too_many_arguments)]
+pub fn draw_select_server(
+    ctx: &egui::Context,
+    hud: &mut HudState,
+    assets: &Assets,
+    worlds: &[archrust_netclient::login::WorldInfo],
+    folded: &[String],
+    selected: Option<&str>,
+    waiting: Option<&str>,
+    out: &mut Vec<LoginUi>,
+) {
+    let screen = ctx.screen_rect();
+    let Some(w) = login_variant(hud, assets, "UI_SelectServer", screen) else { return };
+    let lay = Screen1024::fit(screen, w.size);
+    let s = lay.scale;
+    let font = (11.0 * s).max(9.0);
+    let busy = waiting.is_some();
+    let rows = server_rows(worlds, folded);
+    let ctl = |n: &str| w.controls.iter().find(|c| base_control(&c.name) == n);
+    let (Some(list), Some(row)) = (ctl("CONTROL_24986"), ctl("CONTROL_25949")) else { return };
+    let visible = ((list.size[1] / row.size[1].max(1.0)).floor() as usize).max(1);
+    let max_first = rows.len().saturating_sub(visible);
+    let first_id = egui::Id::new("archonia-select-server-first");
+    let mut first = ctx.data(|d| d.get_temp::<usize>(first_id)).unwrap_or(0).min(max_first);
+    // Contrôles d'une ligne (positions absolues de la première ligne, décalées de 22 px par ligne).
+    const ROW_CONTROLS: [&str; 7] = ["CONTROL_2433", "CONTROL_4910", "CONTROL_11453", "CONTROL_977", "Server_Select_Plus", "Server_Select_Minus", "CONTROL_18508"];
+    // Marques non affichées (voir l'en-tête de la fonction).
+    const HIDDEN: [&str; 9] = ["CONTROL_32728", "CONTROL_24986", "CONTROL_24266", "CONTROL_25949", "CONTROL_13069", "CTL_NEWSVR", "CTL_RATE", "CTL_RC15", "CONTROL_18508"];
+    let row_children: Vec<UiControl> = w.controls.iter().filter(|c| ROW_CONTROLS.contains(&base_control(&c.name))).cloned().collect();
+    let status_texts: Vec<String> = rows
+        .iter()
+        .map(|r| match r {
+            ServerRow::World(wi) => ui_message(hud, assets, server_status(wi.status).0),
+            ServerRow::Group { .. } => String::new(),
+        })
+        .collect();
+    let connectable = |n: &str| worlds.iter().any(|wi| wi.name == n && wi.status != SERVER_STATUS_FULL);
+    egui::Area::new(egui::Id::new("archonia-select-server"))
+        .fixed_pos(screen.min)
+        .order(egui::Order::Background)
+        .show(ctx, |ui| {
+            ui.set_min_size(screen.size());
+            let painter = ui.painter().clone();
+            login_back(ctx, hud, assets, &painter, screen, &w);
+            for c in &w.controls {
+                let name = base_control(&c.name);
+                if ROW_CONTROLS.contains(&name) || HIDDEN.contains(&name) {
+                    continue;
+                }
+                let r = lay.rect(c.pos, c.size);
+                match name {
+                    "CONTROL_24146" | "CONTROL_3962" => {
+                        let connect = name == "CONTROL_24146";
+                        let target = selected.filter(|n| connectable(n));
+                        let enabled = !connect || (!busy && target.is_some());
+                        if button(ctx, ui, hud, assets, &painter, r, c, c.fixed_label(), font, enabled, ("select-server", name)).clicked() {
+                            match (connect, target) {
+                                (true, Some(n)) => out.push(LoginUi::Connect(n.to_string())),
+                                (false, _) => out.push(LoginUi::Quit),
+                                _ => {}
+                            }
+                        }
+                    }
+                    "CONTROL_26455" | "CONTROL_1617" => {
+                        let up = name == "CONTROL_26455";
+                        let enabled = if up { first > 0 } else { first < max_first };
+                        if button(ctx, ui, hud, assets, &painter, r, c, "", font, enabled, ("select-server", name)).clicked() {
+                            first = if up { first.saturating_sub(1) } else { (first + 1).min(max_first) };
+                        }
+                    }
+                    // Curseur de défilement, sur la piste `CONTROL_24266` entre les deux boutons.
+                    "CONTROL_18022" => {
+                        let track = ctl("CONTROL_24266").map(|t| lay.rect(t.pos, t.size)).unwrap_or(r);
+                        let span = (track.height() - 32.0 * s - r.height()).max(0.0);
+                        let y = track.top() + 16.0 * s + if max_first == 0 { 0.0 } else { span * first as f32 / max_first as f32 };
+                        let thumb = Rect::from_min_size(Pos2::new(r.left(), y), r.size());
+                        if let Some((_, tex)) = c.textures.first() {
+                            control_image(ctx, hud, assets, &painter, thumb, c.size, &tex.clone(), 1.0);
+                        }
+                    }
+                    _ => {
+                        if let Some((_, tex)) = c.textures.first() {
+                            control_image(ctx, hud, assets, &painter, r, c.size, &tex.clone(), 1.0);
+                        }
+                        let text = c.fixed_label();
+                        if !text.is_empty() {
+                            shadow_text(&painter, r.center(), Align2::CENTER_CENTER, text, font * 1.15, Color32::WHITE);
+                        }
+                    }
+                }
+            }
+            // Molette sur la liste.
+            if ui.rect_contains_pointer(lay.rect(list.pos, list.size)) {
+                let wheel = ui.input(|i| i.raw_scroll_delta.y);
+                if wheel > 0.5 {
+                    first = first.saturating_sub(1);
+                } else if wheel < -0.5 {
+                    first = (first + 1).min(max_first);
+                }
+            }
+            for (k, entry) in rows.iter().enumerate().skip(first).take(visible) {
+                let dy = (k - first) as f32 * row.size[1];
+                let at = |c: &UiControl| lay.rect([c.pos[0], c.pos[1] + dy], c.size);
+                let resp = ui.interact(at(row), egui::Id::new(("select-server-row", k)), if busy { egui::Sense::hover() } else { egui::Sense::click() });
+                let chosen = matches!(entry, ServerRow::World(wi) if Some(wi.name.as_str()) == selected);
+                for c in &row_children {
+                    let r = at(c);
+                    let image = |hud: &mut HudState| {
+                        if let Some((_, tex)) = c.textures.first() {
+                            control_image(ctx, hud, assets, &painter, r, c.size, tex, 1.0);
+                        }
+                    };
+                    match (base_control(&c.name), entry) {
+                        // Barre : monde choisi (`CONTROL_11453` « On »), survol (`CONTROL_977`, `Button=0:1`).
+                        ("CONTROL_11453", ServerRow::World(_)) if chosen => image(hud),
+                        ("CONTROL_977", ServerRow::World(_)) if resp.hovered() && !chosen && !busy => image(hud),
+                        ("CONTROL_2433", ServerRow::World(wi)) => {
+                            let color = c.status_colors.first().map_or(Color32::WHITE, |x| argb(*x));
+                            shadow_text(&painter, r.left_center(), Align2::LEFT_CENTER, &wi.name, font, color);
+                        }
+                        ("CONTROL_2433", ServerRow::Group { name, .. }) => {
+                            let color = c.status_colors.get(1).map_or(Color32::WHITE, |x| argb(*x));
+                            shadow_text(&painter, r.left_center(), Align2::LEFT_CENTER, name, font, color);
+                        }
+                        ("CONTROL_4910", ServerRow::World(wi)) => {
+                            let color = c.status_colors.get(server_status(wi.status).1).map_or(Color32::WHITE, |x| argb(*x));
+                            shadow_text(&painter, r.left_center(), Align2::LEFT_CENTER, &status_texts[k], font, color);
+                        }
+                        ("Server_Select_Plus", ServerRow::Group { open: false, .. }) | ("Server_Select_Minus", ServerRow::Group { open: true, .. }) => image(hud),
+                        _ => {}
+                    }
+                }
+                if resp.clicked() {
+                    match entry {
+                        ServerRow::Group { name, .. } => out.push(LoginUi::ToggleGroup(name.to_string())),
+                        // FUN_1407c2960 : premier clic = choix, second clic sur le monde choisi = connexion.
+                        ServerRow::World(wi) if chosen && connectable(&wi.name) => out.push(LoginUi::Connect(wi.name.clone())),
+                        ServerRow::World(wi) => out.push(LoginUi::Select(wi.name.clone())),
+                    }
+                }
+            }
+            if let Some(text) = waiting {
+                if let Some(c) = ctl("CONTROL_13696") {
+                    let r = lay.rect(c.pos, c.size);
+                    shadow_text(&painter, Pos2::new(r.center().x, r.bottom() + 16.0 * s), Align2::CENTER_CENTER, text, font * 1.1, Color32::from_rgb(255, 210, 120));
+                }
+            }
+        });
+    ctx.data_mut(|d| d.insert_temp(first_id, first));
+    // Entrée : « Connect » sur le monde choisi.
+    if !busy && ctx.input(|i| i.key_pressed(egui::Key::Enter)) {
+        if let Some(n) = selected.filter(|n| connectable(n)) {
+            out.push(LoginUi::Connect(n.to_string()));
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use archrust_netclient::login::parse_world_list;
+
+    #[test]
+    fn liste_des_mondes_par_groupe() {
+        let worlds = parse_world_list("ArchCore=ArchCore=0=4=4;Autre=G=0=1=2;Test=ArchCore=0=5=0;");
+        let label = |rows: &[ServerRow]| -> Vec<String> {
+            rows.iter()
+                .map(|r| match r {
+                    ServerRow::Group { name, .. } => format!("+{name}"),
+                    ServerRow::World(w) => w.name.clone(),
+                })
+                .collect()
+        };
+        assert_eq!(label(&server_rows(&worlds, &[])), ["+ArchCore", "ArchCore", "Test", "+G", "Autre"]);
+        // Groupe replié : son en-tête seul.
+        assert_eq!(label(&server_rows(&worlds, &["ArchCore".to_string()])), ["+ArchCore", "+G", "Autre"]);
+        assert_eq!(server_status(1), ("ServerStatusGood", 0));
+        assert_eq!(server_status(4), ("ServerStatusBelowNormal", 3));
+        assert_eq!(server_status(0), ("ServerStatusUnknown", 4));
+        assert_eq!(base_control("CT_LG_EDIT_ID_1280"), "CT_LG_EDIT_ID");
+        assert_eq!(argb(-15479316i64 as u32), Color32::from_rgba_unmultiplied(0x13, 0xCD, 0xEC, 0xFF));
+    }
 }

@@ -164,6 +164,8 @@ pub fn draw_loading(ctx: &egui::Context, hud: &mut HudState, assets: &Assets) {
         let painter = ui.painter().clone();
         painter.rect_filled(rect, 0.0, Color32::BLACK);
         control_image(ctx, hud, assets, &painter, rect, w.size, &tex, 1.0);
+        // Image d'aide de `Ini\Tips.txt` (voir `hud_help.rs`).
+        super::help_ui::draw_loading_tips(ctx, hud, assets, &painter, rect, &w);
     });
 }
 

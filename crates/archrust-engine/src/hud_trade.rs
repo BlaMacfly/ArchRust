@@ -128,7 +128,7 @@ fn trade_grid(ctx: &egui::Context, ui: &mut egui::Ui, hud: &mut HudState, assets
                     resp.dnd_set_drag_payload(ItemDrag { iid: item.iid, tid: item.tid, worn: false, bank: false });
                 }
                 if dragging.is_none() {
-                    let label = if item.count > 1 { format!("{} ×{}", item.name, item.count) } else { item.name.clone() };
+                    let label = item.name.clone();
                     resp.clone().on_hover_text(label);
                 }
             }

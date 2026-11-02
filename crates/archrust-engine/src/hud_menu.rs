@@ -5,8 +5,8 @@
 //! « Inventaire » et « Groupe ».
 //!
 //! Écart : seules les entrées dont la fenêtre existe dans ArchRust sont affichées (quêtes,
-//! inventaire, personnage, compétences de combat et de production, amis, ignorés, courrier, guilde, groupe, options, menu) ; un bouton
-//! sans entrée gérée (monde, Chantra) reste inactif.
+//! inventaire, personnage, compétences de combat et de production, amis, ignorés, courrier, guilde, groupe, options, aide, menu `UI_EXIT`, inventaire
+//! Cash du menu Chantra) ; un bouton sans entrée gérée (monde) reste inactif.
 
 use super::npc_ui::{button, window};
 use super::*;
@@ -31,8 +31,15 @@ pub enum MenuUi {
     CreateChannel,
     JoinChannel,
     Party,
+    /// Actions sociales (`UI_SocialAction`, `CONTROL_10281` « Emotes », `CBSocialActionToggleUI`).
+    Emotes,
     Options,
+    /// Aide (`UI_Help`, `MenuBtnHelp`).
+    Help,
+    /// Fenêtre de sortie (`UI_EXIT`, `MenuBtnExit` « Menu (Esc) »).
     Exit,
+    /// Inventaire Cash (`UI_CashInven`, `MenuBtnRoniInventory` « Chantra Bag », `CInven_UIOpen`).
+    CashInventory,
 }
 
 /// Bouton principal → (liste, entrées gérées).
@@ -45,11 +52,12 @@ const MENUS: [(&str, &str, &[(&str, MenuUi)]); 5] = [
     (
         "MainBtnCommunity",
         "UI_MainMenuCommunity",
-        &[("MenuBtnBuddyList", MenuUi::Friends), ("MenuBtnBanList", MenuUi::IgnoreList), ("MenuBtnCreateChannel", MenuUi::CreateChannel), ("MenuBtnJoinChannel", MenuUi::JoinChannel), ("MenuBtn", MenuUi::Mailbox), ("MenuBtnGuild", MenuUi::Guild), ("CONTROL_15350", MenuUi::Party)],
+        &[("MenuBtnBuddyList", MenuUi::Friends), ("MenuBtnBanList", MenuUi::IgnoreList), ("MenuBtnCreateChannel", MenuUi::CreateChannel), ("MenuBtnJoinChannel", MenuUi::JoinChannel), ("MenuBtn", MenuUi::Mailbox), ("MenuBtnGuild", MenuUi::Guild), ("CONTROL_15350", MenuUi::Party), ("CONTROL_10281", MenuUi::Emotes)],
     ),
     ("MainBtnWorld", "UI_MainMenuWorld", &[]),
-    ("MainBtnChantra", "UI_MainMenuChantra", &[]),
-    ("MainBtnOption", "UI_MainMenuOptions", &[("MenuBtnEnvironment", MenuUi::Options), ("MenuBtnExit", MenuUi::Exit)]),
+    // Boutique Chantra (`CashMallOpenUI`) écartée : seule l'entrée de l'inventaire Cash.
+    ("MainBtnChantra", "UI_MainMenuChantra", &[("MenuBtnRoniInventory", MenuUi::CashInventory)]),
+    ("MainBtnOption", "UI_MainMenuOptions", &[("MenuBtnEnvironment", MenuUi::Options), ("MenuBtnHelp", MenuUi::Help), ("MenuBtnExit", MenuUi::Exit)]),
 ];
 
 /// Noms des fenêtres de liste à charger avec le reste de l'interface.

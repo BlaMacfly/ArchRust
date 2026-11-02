@@ -52,6 +52,9 @@ pub struct ShopEntry {
     pub count: i32,
     pub grid: [i16; 3],
     pub name: String,
+    /// Infobulle : nom puis « Prix d'achat : » et les prix non nuls (or, Shrine Coins, charisme), comme
+    /// Archonia (FUN_1405479c0) ; vide : le nom seul.
+    pub tip: Vec<(String, Color32)>,
 }
 
 pub struct ShopView<'a> {
@@ -99,6 +102,9 @@ pub struct QuestView<'a> {
     pub entries: &'a [QuestEntry],
     pub selected: Option<i32>,
     pub text: String,
+    /// Libellé du bouton de fin (`CONTROL_8149`, « QusetAcceptLeftButton_Display2 », FUN_1406559a0) :
+    /// sysstr 432 pour une quête proposée, 431 sinon.
+    pub left_label: String,
 }
 
 pub(super) fn window(hud: &mut HudState, assets: &Assets, name: &str) -> Option<UiWindow> {
@@ -141,6 +147,22 @@ fn text_box(ui: &mut egui::Ui, r: Rect, id: &str, text: &str, font: f32, color: 
         egui::ScrollArea::vertical().id_salt(id).max_height(r.height()).show(ui, |ui| {
             ui.set_width(r.width() - 12.0);
             ui.label(egui::RichText::new(text).size(font).color(color).strong());
+        });
+    });
+}
+
+/// Zone de texte défilante à codes de couleur `<H…>` ; le blanc prend la couleur `base`.
+fn colored_text_box(ui: &mut egui::Ui, r: Rect, id: &str, text: &str, font: f32, base: Color32) {
+    let mut job = egui::text::LayoutJob::default();
+    job.wrap.max_width = r.width() - 12.0;
+    for (part, color) in super::convert_ui::colored_segments(text, base) {
+        let color = if color == Color32::WHITE { base } else { color };
+        job.append(&part, 0.0, egui::TextFormat { font_id: FontId::proportional(font), color, ..Default::default() });
+    }
+    ui.scope_builder(egui::UiBuilder::new().max_rect(r), |ui| {
+        egui::ScrollArea::vertical().id_salt(id).max_height(r.height()).show(ui, |ui| {
+            ui.set_width(r.width() - 12.0);
+            ui.label(job);
         });
     });
 }
@@ -221,7 +243,6 @@ fn grid_cells(c: &UiControl, layout: &Layout, origin: Pos2, page: i16, first_row
 /// Boutique d'un PNJ : objets et prix (clic droit : acheter ; objet du sac lâché ici : vendre).
 pub fn draw_shop(ctx: &egui::Context, hud: &mut HudState, assets: &Assets, view: ShopView, out: &mut Vec<NpcUi>) {
     let Some(w) = window(hud, assets, "UI_NPCTrade") else { return };
-    let money = hud.stats.money;
     frame(ctx, hud, assets, &w, "archonia-npc-shop", |ui, hud, layout, origin, painter| {
         let s = layout.scale;
         let font = (11.0 * s).max(9.0);
@@ -230,14 +251,14 @@ pub fn draw_shop(ctx: &egui::Context, hud: &mut HudState, assets: &Assets, view:
         for c in &w.controls {
             let r = layout.rect(origin, c.pos, c.size);
             match c.name.as_str() {
-                "CONTROL_23250" => shadow_text(painter, r.left_center(), Align2::LEFT_CENTER, &format!("Boutique — {}", view.npc_name), font, Color32::from_rgb(255, 230, 160)),
+                "CONTROL_23250" => shadow_text(painter, r.left_center(), Align2::LEFT_CENTER, c.fixed_label(), font, Color32::from_rgb(255, 230, 160)),
                 "CONTROL_8009" => {
                     if button(ctx, ui, hud, assets, painter, r, c, "", font, true, "npc-shop-x").clicked() {
                         out.push(NpcUi::CloseShop);
                     }
                 }
                 "CONTROL_30471" => {
-                    if button(ctx, ui, hud, assets, painter, r, c, "Fermer", font, true, "npc-shop-close").clicked() {
+                    if button(ctx, ui, hud, assets, painter, r, c, c.fixed_label(), font, true, "npc-shop-close").clicked() {
                         out.push(NpcUi::CloseShop);
                     }
                 }
@@ -258,8 +279,12 @@ pub fn draw_shop(ctx: &egui::Context, hud: &mut HudState, assets: &Assets, view:
                             if resp.secondary_clicked() {
                                 out.push(NpcUi::Buy { iid: e.iid, ask_count: shift });
                             }
-                            if dragging.is_none() {
-                                resp.clone().on_hover_text(format!("{}\nPrix : {} pièce(s)\nClic droit : acheter · Maj + clic droit : quantité", e.name, format_money(e.price)));
+                            if dragging.is_none() && resp.hovered() {
+                                if e.tip.is_empty() {
+                                    resp.clone().on_hover_text(e.name.clone());
+                                } else {
+                                    super::item_tooltip(ctx, &e.tip, "");
+                                }
                             }
                         }
                         if let Some(drag) = resp.dnd_release_payload::<ItemDrag>() {
@@ -273,16 +298,10 @@ pub fn draw_shop(ctx: &egui::Context, hud: &mut HudState, assets: &Assets, view:
                             painter.rect_stroke(cell, 2.0, egui::Stroke::new(1.0_f32, color), egui::StrokeKind::Inside);
                         }
                     }
-                    if view.loading {
-                        shadow_text(painter, r.center(), Align2::CENTER_CENTER, "Chargement…", font, Color32::WHITE);
-                    }
                 }
                 _ => {}
             }
         }
-        // Or du joueur, sous la grille.
-        let at = layout.rect(origin, [14.0, 415.0], [200.0, 16.0]);
-        shadow_text(painter, at.left_center(), Align2::LEFT_CENTER, &format!("Or : {}", format_money(money.unwrap_or(0))), font, Color32::from_rgb(255, 220, 120));
     });
 }
 
@@ -312,20 +331,19 @@ pub fn draw_bank(ctx: &egui::Context, hud: &mut HudState, assets: &Assets, view:
                 continue;
             }
             match c.name.as_str() {
-                "CONTROL_32725" => shadow_text(painter, r.left_center(), Align2::LEFT_CENTER, "Banque", font, Color32::from_rgb(255, 230, 160)),
+                "CONTROL_32725" => shadow_text(painter, r.left_center(), Align2::LEFT_CENTER, c.fixed_label(), font, Color32::from_rgb(255, 230, 160)),
                 "CONTROL_20738" => {
                     if button(ctx, ui, hud, assets, painter, r, c, "", font, true, "bank-x").clicked() {
                         out.push(NpcUi::CloseBank);
                     }
                 }
                 "CONTROL_28474" => {
-                    let text = view.money.map_or("—".to_string(), format_money);
+                    let text = view.money.map_or(String::new(), format_money);
                     shadow_text(painter, r.right_center(), Align2::RIGHT_CENTER, &text, font, Color32::from_rgb(255, 220, 120));
                 }
                 "CONTROL_481" | "CONTROL_20471" => {
                     let deposit = c.name == "CONTROL_481";
-                    let label = if deposit { "Déposer" } else { "Retirer" };
-                    if button(ctx, ui, hud, assets, painter, r, c, label, font * 0.95, true, ("bank-money", deposit)).clicked() {
+                    if button(ctx, ui, hud, assets, painter, r, c, c.fixed_label(), font * 0.95, true, ("bank-money", deposit)).clicked() {
                         out.push(NpcUi::BankMoney { deposit });
                     }
                 }
@@ -353,8 +371,8 @@ pub fn draw_bank(ctx: &egui::Context, hud: &mut HudState, assets: &Assets, view:
                                 out.push(NpcUi::BankTake(item.id));
                             }
                             if dragging.is_none() {
-                                let label = if count > 1 { format!("{name} ×{count}") } else { name.clone() };
-                                resp.clone().on_hover_text(format!("{label}\nClic droit ou glisser vers l'inventaire : retirer"));
+                                let label = name.clone();
+                                resp.clone().on_hover_text(label);
                             }
                         }
                         if let Some(drag) = resp.dnd_release_payload::<ItemDrag>() {
@@ -388,62 +406,63 @@ pub fn draw_quests(ctx: &egui::Context, hud: &mut HudState, assets: &Assets, vie
         for c in &w.controls {
             let r = layout.rect(origin, c.pos, c.size);
             match c.name.as_str() {
-                "CONTROL_16487" | "CTL_ST_TITLE" => shadow_text(painter, r.center(), Align2::CENTER_CENTER, &view.title, font * 1.1, Color32::from_rgb(255, 230, 160)),
+                "CONTROL_16487" | "CTL_ST_TITLE" => shadow_text(painter, r.center(), Align2::CENTER_CENTER, c.fixed_label(), font * 1.1, Color32::from_rgb(255, 230, 160)),
                 "CONTROL_QUEST_EXIT" => {
                     if button(ctx, ui, hud, assets, painter, r, c, "", font, true, (id, "x")).clicked() {
                         out.push(NpcUi::CloseQuests);
                     }
                 }
                 "CONTROL_QUEST_CLOSE" => {
-                    if button(ctx, ui, hud, assets, painter, r, c, "Fermer", font, true, (id, "close")).clicked() {
+                    if button(ctx, ui, hud, assets, painter, r, c, c.fixed_label(), font, true, (id, "close")).clicked() {
                         out.push(NpcUi::CloseQuests);
                     }
                 }
-                // Fenêtre d'un PNJ : « Accepter » (quête proposée) ou « Terminer » (quête à rendre).
-                "CONTROL_QUEST_ACCEPT_NEW" if !view.journal => {
-                    let (label, enabled) = match state {
-                        Some(QuestState::Ready | QuestState::InProgress) => ("Terminer", true),
-                        Some(QuestState::Available) => ("Accepter", true),
-                        _ => ("Accepter", false),
-                    };
-                    if button(ctx, ui, hud, assets, painter, r, c, label, font, enabled, (id, "accept")).clicked() {
-                        if let Some(e) = selected {
-                            out.push(if e.state == QuestState::Available { NpcUi::QuestAccept(e.tid) } else { NpcUi::QuestComplete(e.tid) });
-                        }
-                    }
-                }
-                // Journal : « Abandonner » et « Terminer » (quêtes personnelles).
-                "CONTROL_QUEST_DEL" if view.journal => {
-                    let enabled = matches!(state, Some(QuestState::InProgress | QuestState::Ready));
-                    if button(ctx, ui, hud, assets, painter, r, c, "Abandonner", font, enabled, (id, "del")).clicked() {
-                        if let Some(e) = selected {
-                            out.push(NpcUi::QuestAbandon(e.tid));
-                        }
-                    }
-                }
-                "CONTROL_QUEST_SHARE" if view.journal => {
-                    let enabled = matches!(state, Some(QuestState::Ready));
-                    if button(ctx, ui, hud, assets, painter, r, c, "Terminer", font, enabled, (id, "done")).clicked() {
+                // Fenêtre d'un PNJ : `Quest_CompleteFromTree` (FUN_140655330), quête à rendre seulement.
+                "CONTROL_8149" if !view.journal => {
+                    let enabled = state == Some(QuestState::Ready);
+                    if button(ctx, ui, hud, assets, painter, r, c, &view.left_label, font, enabled, (id, "complete")).clicked() {
                         if let Some(e) = selected {
                             out.push(NpcUi::QuestComplete(e.tid));
                         }
                     }
                 }
+                // `Quest_AcceptFromTree` (FUN_140655180), quête proposée ; à la même place que « Supprimer la
+                // quete » (`CONTROL_QUEST_DEL`) : l'un ou l'autre selon la quête choisie.
+                "CONTROL_QUEST_ACCEPT_NEW" if !view.journal && !matches!(state, Some(QuestState::InProgress | QuestState::Ready)) => {
+                    let enabled = state == Some(QuestState::Available);
+                    if button(ctx, ui, hud, assets, painter, r, c, c.fixed_label(), font, enabled, (id, "accept")).clicked() {
+                        if let Some(e) = selected {
+                            out.push(NpcUi::QuestAccept(e.tid));
+                        }
+                    }
+                }
+                // `QuestCancel_Button2` (FUN_140654f30) : confirmation `QuestCancelDlg_Open`, puis abandon.
+                "CONTROL_QUEST_DEL" if view.journal || matches!(state, Some(QuestState::InProgress | QuestState::Ready)) => {
+                    let enabled = matches!(state, Some(QuestState::InProgress | QuestState::Ready));
+                    if button(ctx, ui, hud, assets, painter, r, c, c.fixed_label(), font, enabled, (id, "del")).clicked() {
+                        if let Some(e) = selected {
+                            out.push(NpcUi::QuestAbandon(e.tid));
+                        }
+                    }
+                }
+                // « Ajouter au journal » (`QuestDiary_AddQuest`, FUN_1406547d0 : suivi `AgcmUIQuestJournal`) et
+                // « Terminer immediatement » (`Quest_CompleteInstantly`, contre des CC) : non repris, inactifs.
+                "CONTROL_QUEST_SHARE" | "CONTROL_QUEST_SKIP_NEW" => {
+                    button(ctx, ui, hud, assets, painter, r, c, c.fixed_label(), font, false, (id, c.name.as_str()));
+                }
                 "CONTROL_QUEST_TREE" => {
                     ui.scope_builder(egui::UiBuilder::new().max_rect(r), |ui| {
                         egui::ScrollArea::vertical().id_salt((id, "tree")).max_height(r.height()).show(ui, |ui| {
                             ui.set_width(r.width() - 24.0 * s);
-                            if view.entries.is_empty() {
-                                ui.label(egui::RichText::new("Aucune quête.").size(font).color(Color32::GRAY));
-                            }
+
                             for e in view.entries {
-                                let (mark, color) = match e.state {
-                                    QuestState::Available => ("◆", Color32::from_rgb(255, 220, 120)),
-                                    QuestState::InProgress => ("…", Color32::from_rgb(200, 200, 200)),
-                                    QuestState::Ready => ("✔", Color32::from_rgb(140, 230, 120)),
-                                    QuestState::Done => ("✓", Color32::GRAY),
+                                let color = match e.state {
+                                    QuestState::Available => Color32::from_rgb(255, 220, 120),
+                                    QuestState::InProgress => Color32::from_rgb(200, 200, 200),
+                                    QuestState::Ready => Color32::from_rgb(140, 230, 120),
+                                    QuestState::Done => Color32::GRAY,
                                 };
-                                let text = egui::RichText::new(format!("{mark} {}", e.name)).size(font * 1.05).color(color);
+                                let text = egui::RichText::new(e.name.as_str()).size(font * 1.05).color(color);
                                 if ui.selectable_label(Some(e.tid) == view.selected, text).clicked() {
                                     out.push(NpcUi::SelectQuest(e.tid));
                                 }
@@ -451,8 +470,8 @@ pub fn draw_quests(ctx: &egui::Context, hud: &mut HudState, assets: &Assets, vie
                         });
                     });
                 }
-                // Texte sur parchemin : brun foncé.
-                "CONTROL_QUEST_TEXT" => text_box(ui, r.shrink(8.0 * s), &format!("{id}-text"), &view.text, font * 1.05, Color32::from_rgb(35, 22, 8)),
+                // Texte sur parchemin : codes de couleur d'Archonia, le blanc (`<HFFFFFFFF>`) en brun foncé.
+                "CONTROL_QUEST_TEXT" => colored_text_box(ui, r.shrink(8.0 * s), &format!("{id}-text"), &view.text, font * 1.05, Color32::from_rgb(35, 22, 8)),
                 _ => {}
             }
         }

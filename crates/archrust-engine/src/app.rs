@@ -51,6 +51,9 @@ mod npc_glue;
 #[path = "app_skills.rs"]
 mod skills_glue;
 
+#[path = "app_mastery.rs"]
+mod mastery_glue;
+
 #[path = "app_portal.rs"]
 mod portal_glue;
 #[path = "app_reconnect.rs"]
@@ -143,6 +146,27 @@ mod worldmap_glue;
 #[path = "app_effects.rs"]
 mod effects_glue;
 
+#[path = "app_consumables.rs"]
+mod consumables_glue;
+
+#[path = "app_social.rs"]
+mod social_glue;
+
+#[path = "app_hotkey.rs"]
+mod hotkey_glue;
+
+#[path = "app_petbag.rs"]
+mod petbag_glue;
+
+#[path = "app_help.rs"]
+mod help_glue;
+
+#[path = "app_titles.rs"]
+mod titles_glue;
+
+#[path = "app_return_login.rs"]
+mod return_login_glue;
+
 /// Configuration du client.
 #[derive(Debug, Clone)]
 pub struct Config {
@@ -170,8 +194,12 @@ pub struct Config {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Phase {
+    /// Saisie du compte (`UI_LG_IDPASSWORD`).
     Login,
     Connecting,
+    /// Serveur de connexion joint : choix du monde (`UI_SelectServer`, la liaison attend
+    /// `LoginCommand::SelectWorld`).
+    SelectServer,
     /// Authentifié : choix du personnage du compte (la liaison attend `NetLink::choose`).
     CharacterSelect,
     /// Écran de création (modèles de base reçus du serveur).
@@ -332,12 +360,26 @@ pub struct App {
     tax: tax_glue::TaxGlue,
     /// Métamorphose et évolution du Dragon Scion : modèles, icônes d'annulation, refus, voir `app_morph.rs`.
     morph: morph_glue::MorphGlue,
+    /// Orbe de résurrection, Gem of origin, oubli chez le maître, messages des objets, voir `app_consumables.rs`.
+    consumables: consumables_glue::ConsumablesGlue,
+    /// Actions sociales (`UI_SocialAction`, AGPMCHARACTER op 16, `SOCIAL_PC.txt`), voir `app_social.rs`.
+    social: social_glue::SocialGlue,
+    /// Touches d'Archonia (`[EventMap]`, `Ini/UI_Hotkey.ini`, `UI_Hotkey`) et fenêtre `UI_EXIT`, voir `app_hotkey.rs`.
+    hotkey: hotkey_glue::HotkeyGlue,
+    /// Inventaire Cash (`UI_CashInven`) et sac du familier (`UI_SubInventory`), voir `app_petbag.rs`.
+    petbag: petbag_glue::PetBagGlue,
+    /// Aide (`UI_Help`) et astuces (`UI_TIPS`), voir `app_help.rs`.
+    help: help_glue::HelpGlue,
+    /// Titres (0x60) : `UI_TitleAll`, `UI_TitleCurrent`, `UI_TitleMini`, titres au-dessus des têtes, voir `app_titles.rs`.
+    titles: titles_glue::TitlesGlue,
     /// Surveillance des dossiers de packs (`assets/`, `patches/`), voir `app_assets.rs`.
     assets_watch: assets_glue::AssetsWatch,
     /// Curseurs de la souris d'Archonia, voir `app_cursor.rs`.
     cursor: cursor_glue::CursorGlue,
     /// Carte du monde (`UI_WORLD_MAP`, touche M), voir `app_worldmap.rs`.
     worldmap: worldmap_glue::WorldMapGlue,
+    /// Retour à la sélection des personnages (« Select Character » d'`UI_EXIT`), voir `app_return_login.rs`.
+    return_login: return_login_glue::ReturnLoginGlue,
 }
 
 impl App {
@@ -466,9 +508,16 @@ impl App {
             archlord: Default::default(),
             tax: Default::default(),
             morph: Default::default(),
+            consumables: Default::default(),
+            social: Default::default(),
+            hotkey: Default::default(),
+            petbag: Default::default(),
+            help: Default::default(),
+            titles: Default::default(),
             assets_watch: Default::default(),
             cursor: Default::default(),
             worldmap: Default::default(),
+            return_login: Default::default(),
         })
     }
 
@@ -696,7 +745,7 @@ impl App {
                 if let Some(name) = &character {
                     self.ui.character = name.clone();
                 }
-                self.start_connection(character);
+                self.start_connection(character, false);
             } else {
                 log::warn!(
                     "--connect : forme attendue utilisateur:motdepasse@hôte:port/personnage"
@@ -1153,12 +1202,17 @@ impl App {
         }
     }
 
-    fn start_connection(&mut self, character: Option<String>) {
+    /// Connexion au serveur de connexion ; `choose_world` : liste des mondes à l'écran
+    /// `UI_SelectServer` avant l'authentification (sinon premier monde, `--connect`).
+    fn start_connection(&mut self, character: Option<String>, choose_world: bool) {
         let port = self.ui.port.trim().parse().unwrap_or(11002);
         self.choosing_character = character.is_none();
         self.ui.characters.clear();
         self.ui.selected_character = None;
+        self.ui.worlds.clear();
+        self.ui.choose_world = choose_world;
         let creds = Credentials {
+            choose_world,
             host: self.ui.host.trim().to_string(),
             port,
             user: self.ui.user.trim().to_string(),
@@ -1186,6 +1240,18 @@ impl App {
                     self.ui.push_chat(format!("[système] {s}"));
                 }
                 NetEvent::Error(e) => {
+                    // Écrans de connexion : messages d'Archonia (`LG_CONNECT_FAILED_LOGIN_SERVER` avant la
+                    // liste des mondes, `LOGIN_WAITING_FAILE` après « Connect »).
+                    if matches!(self.phase, Phase::Connecting | Phase::SelectServer) && self.ui.characters.is_empty() {
+                        let assets = self.assets.clone();
+                        let text = if self.ui.worlds.is_empty() {
+                            portal_glue::ui_event_text(&assets, "LG_CONNECT_FAILED_LOGIN_SERVER")
+                        } else {
+                            crate::hud::ui_message(&mut self.hud, &assets, "LOGIN_WAITING_FAILE")
+                        };
+                        self.ui.alert = Some(text).filter(|t| !t.is_empty());
+                    }
+                    self.ui.worlds.clear();
                     self.ui.status = format!("erreur : {e}");
                     self.ui.push_chat(format!("[erreur] {e}"));
                     self.ui.characters.clear();
@@ -1195,9 +1261,31 @@ impl App {
                     self.net = None;
                     return;
                 }
-                NetEvent::Worlds(w) => self
-                    .ui
-                    .push_chat(format!("[système] mondes : {}", w.join(", "))),
+                NetEvent::Worlds(w) => {
+                    self.ui.push_chat(format!("[système] mondes : {}", w.iter().map(|w| w.name.as_str()).collect::<Vec<_>>().join(", ")));
+                    // Monde présélectionné : le dernier choisi s'il est encore là, sinon le premier.
+                    if !self.ui.selected_world.as_ref().is_some_and(|n| w.iter().any(|x| &x.name == n)) {
+                        self.ui.selected_world = w.first().map(|x| x.name.clone());
+                    }
+                    self.ui.worlds = w;
+                    if self.phase == Phase::Connecting && self.ui.choose_world {
+                        self.phase = Phase::SelectServer;
+                        self.ui.status.clear();
+                    }
+                }
+                // Compte refusé : `LG_IDPASSWORD_FAILD`, puis `LG_IdPasswordInit` vide les champs.
+                NetEvent::AuthRefused(why) => {
+                    log::info!("compte refusé : {why}");
+                    let assets = self.assets.clone();
+                    self.ui.alert = Some(portal_glue::ui_event_text(&assets, "LG_IDPASSWORD_FAILD")).filter(|t| !t.is_empty()).or(Some(why));
+                    self.ui.user.clear();
+                    self.ui.password.clear();
+                    self.ui.worlds.clear();
+                    self.ui.status.clear();
+                    self.phase = Phase::Login;
+                    self.net = None;
+                    return;
+                }
                 NetEvent::Characters(c) => {
                     for ch in &c {
                         self.ui.push_chat(format!(
@@ -1313,6 +1401,8 @@ impl App {
         self.summons_observe(&ev);
         // Shrines : métamorphose du joueur, remises à zéro (voir `app_shrine.rs`).
         self.shrine_observe(&ev);
+        // Titres : remises à zéro (voir `app_titles.rs`).
+        self.titles_observe(&ev);
         // Siège : remises à zéro (voir `app_siege.rs`).
         self.siege_observe(&ev);
         // ArchLord et taxes : remises à zéro (voir `app_archlord.rs`, `app_tax.rs`).
@@ -1320,6 +1410,10 @@ impl App {
         self.tax_observe(&ev);
         // Métamorphose : remises à zéro, effet d'évolution, compte à rebours des potions (voir `app_morph.rs`).
         self.morph_observe(&ev);
+        // Consommables : remises à zéro, messages et recharge de l'op 4, `ReverseOrbError` (voir `app_consumables.rs`).
+        self.consumables_observe(&ev);
+        // Derniers coups du joueur, pour le délai du retour à la sélection (voir `app_return_login.rs`).
+        self.return_login_observe(&ev);
         match ev {
             WorldEvent::Connected => {
                 // Nouvelle connexion au monde : les instantanés d'objets qui suivent repartent de zéro.
@@ -1492,11 +1586,16 @@ impl App {
                 if self.morph_ignores_item(&item) {
                     return;
                 }
+                // Sac du familier indisponible : objet du statut 13 ignoré (voir `app_petbag.rs`).
+                if self.petbag_ignores(&item) {
+                    return;
+                }
                 if item.operation == 1
                     || item
                         .status
-                        // 53 : entrepôt de guilde (voir `app_guild.rs`).
-                        .is_some_and(|status| !matches!(status, 2 | 3 | 53 | 100))
+                        // 53 : entrepôt de guilde (voir `app_guild.rs`) ; 13 sac du familier, 51 inventaire
+                        // Cash (voir `app_petbag.rs`).
+                        .is_some_and(|status| !matches!(status, 2 | 3 | 13 | 51 | 53 | 100))
                 {
                     self.items.remove(&item.id);
                 } else {
@@ -1526,7 +1625,7 @@ impl App {
                 self.items.extend(
                     items
                         .into_iter()
-                        .filter(|item| matches!(item.status, Some(2 | 3 | 100)))
+                        .filter(|item| matches!(item.status, Some(2 | 3 | 51 | 100)))
                         .map(|item| (item.id, item)),
                 );
             }
@@ -1651,6 +1750,10 @@ impl App {
             WorldEvent::Transformed { .. } => {}
             // Métamorphose et évolution (AGPMCHARACTER ops 11, 12, 26, 27 ; AGPMITEM ops 19, 20, 27), voir `app_morph.rs`.
             WorldEvent::Morph(ev) => self.on_morph_event(ev),
+            // Orbe, échecs d'objet, « skill init », oubli chez le maître (voir `app_consumables.rs`).
+            WorldEvent::Consumable(ev) => self.on_consumable_event(ev),
+            // Actions sociales : animation et son de `SOCIAL_PC.txt` (voir `app_social.rs`).
+            WorldEvent::Social(ev) => self.on_social_event(ev),
             // Reconnexion automatique (0x63), voir `app_reconnect.rs`.
             WorldEvent::Reconnecting => self.reconnect_event(true),
             WorldEvent::Reconnected => self.reconnect_event(false),
@@ -1691,6 +1794,10 @@ impl App {
             // Titre d'ArchLord (0x55) et taxes des régions (0x53) : voir `app_archlord.rs`, `app_tax.rs`.
             WorldEvent::Archlord(ev) => self.on_archlord_event(ev),
             WorldEvent::Tax(ev) => self.on_tax_event(ev),
+            // Mini Cash et ramassage automatique (AGPMITEM ops 26, 30) : voir `app_petbag.rs`.
+            WorldEvent::PetBag(ev) => petbag_glue::on_event(&mut self.petbag, ev),
+            // Titres (0x60) : voir `app_titles.rs`.
+            WorldEvent::Title(p) => self.on_title_event(p),
             // Messages système réduits à un code (invocations : `app_summons.rs` ; banque agrandie… :
             // `app_npc.rs`).
             WorldEvent::SystemCode(code) => {
@@ -1768,6 +1875,8 @@ impl App {
             | WorldEvent::Texts { .. }) => self.addon_world_event(ev),
             // Groupes (0x08 / 0x09), voir `app_party.rs`.
             ev @ (WorldEvent::Party(_) | WorldEvent::PartyManagement(_)) => self.on_party_event(ev),
+            // Retour à la sélection des personnages : refus ou départ du monde (voir `app_return_login.rs`).
+            WorldEvent::ReturnToLogin(e) => self.return_login_event(e),
             WorldEvent::Disconnected(why) => {
                 // Reconnexion échouée : message d'Archonia (`DisconnectedByServer`).
                 let why = self.reconnect_failed().unwrap_or(why);
@@ -1806,7 +1915,15 @@ impl App {
             } else {
                 crate::account::forget(&self.config.saved_dir);
             }
-            self.start_connection(None);
+            self.start_connection(None, true);
+        }
+        // « Connect » d'`UI_SelectServer` : authentification et choix du monde (`LG_SelectServer`).
+        if let (Some(world), Phase::SelectServer) = (actions.select_world.clone(), self.phase) {
+            self.ui.selected_world = Some(world.clone());
+            if let Some(net) = &self.net {
+                net.choose(LoginCommand::SelectWorld(world));
+            }
+            self.phase = Phase::Connecting;
         }
         if self.phase == Phase::CharacterCreate {
             if let Some((tid, name, face, hair)) = actions.create_submit {
@@ -2025,6 +2142,10 @@ impl App {
             "/quit" => self.exit = true,
             // Combat : /attaquer, /ramasser, /ressusciter (voir `app_combat.rs`).
             _ if self.combat_slash(cmd, arg) => {}
+            // Oubli des compétences chez le maître : /oublier (voir `app_consumables.rs`).
+            _ if self.consumables_slash(cmd) => {}
+            // Actions sociales : /greet, /clap… /sit down (titres de `SocialAction.txt`, voir `app_social.rs`).
+            _ if self.social_slash(cmd, arg) => {}
             // Objets : /perso, /utiliser, /porter, /ranger, /detruire, /retour (voir `app_items.rs`).
             _ if self.items_slash(cmd, arg) => {}
             // PNJ : /parler, /quetes, /prendrequete, /abandonner (voir `app_npc.rs`).
@@ -2200,22 +2321,23 @@ impl App {
 
     /// Animation des personnages : attente, marche ou course selon le déplacement, sommets réécrits à
     /// 30 Hz au plus, seulement près de la caméra. Les animateurs sont reconstruits quand les
-    /// maillages d'une entité changent (équipement, modèle).
+    /// maillages d'une entité changent (équipement, modèle) ou que l'ensemble d'animations change
+    /// (arme, monture : `worn::anim_equip`) ; un ensemble −1 laisse l'animation courante.
     fn animate(&mut self, dt: f32) {
-        // Cavaliers : animations « à cheval » et course (voir `app_ride.rs`).
-        let riders: Vec<(i32, i32)> = self.entities.iter().chain(self.player.as_ref()).filter(|e| self.ride.riding(e.cid)).map(|e| (e.cid, e.tid)).collect();
-        let ride_equip: HashMap<i32, u32> = riders.into_iter().filter_map(|(cid, tid)| Some((cid, self.ride_anim_equip(cid, tid)?))).collect();
         let Some(gpu) = &self.gpu else { return };
         let focus = self.camera.target;
         let seed = |cid: i32| (cid as u32).wrapping_mul(0x9e37_79b9) | 1;
+        let stale = |slot: Option<&(usize, Option<Animator>)>, sig: usize, equip: i32| {
+            slot.is_none_or(|(s, a)| *s != sig || (equip >= 0 && a.as_ref().is_some_and(|a| a.equip != equip)))
+        };
         if let Some(p) = &self.player {
             let sig = animation::signature(&p.meshes);
-            let equip = ride_equip.get(&p.cid).copied().unwrap_or(self.item_ui.weapon_equip);
-            let current = self.player_animator.as_ref().map(|(s, a)| (*s, a.as_ref().map(|a| a.equip)));
-            if current.is_none_or(|(s, e)| s != sig || e.is_some_and(|e| e != equip)) {
-                let a = Animator::new(&self.assets, p.tid, &p.meshes, seed(p.cid), equip);
+            let current = self.player_animator.as_ref().and_then(|(_, a)| a.as_ref()).map_or(0, |a| a.equip);
+            let equip = crate::worn::anim_equip_for(&self.assets, p.tid, true, self.ride.riding(p.cid), &p.equipment, current);
+            if stale(self.player_animator.as_ref(), sig, equip) {
+                let a = Animator::new(&self.assets, p.tid, &p.meshes, seed(p.cid), equip, true);
                 if let Some(a) = &a {
-                    log::info!("joueur TID {} animé ({:?})", p.tid, a.clip_name());
+                    log::info!("joueur TID {} animé, ensemble {equip} ({:?})", p.tid, a.clip_name());
                 }
                 self.player_animator = Some((sig, a));
             }
@@ -2227,16 +2349,22 @@ impl App {
             .retain(|cid, _| self.entities.iter().any(|e| e.cid == *cid));
         for e in &self.entities {
             let sig = animation::signature(&e.meshes);
-            let equip = ride_equip.get(&e.cid).copied().unwrap_or_else(|| animation::weapon_anim_equip(crate::scene::equipped_weapon_type(&self.assets, &e.equipment)));
-            let slot = self.animators.entry(e.cid).or_insert((usize::MAX, None));
-            if slot.0 != sig || slot.1.as_ref().is_some_and(|a| a.equip != equip) {
-                *slot = (sig, Animator::new(&self.assets, e.tid, &e.meshes, seed(e.cid), equip));
+            let current = self.animators.get(&e.cid).and_then(|(_, a)| a.as_ref()).map_or(0, |a| a.equip);
+            let equip = crate::worn::anim_equip_for(&self.assets, e.tid, e.is_player, self.ride.riding(e.cid), &e.equipment, current);
+            if stale(self.animators.get(&e.cid), sig, equip) {
+                self.animators.insert(e.cid, (sig, Animator::new(&self.assets, e.tid, &e.meshes, seed(e.cid), equip, e.is_player)));
             }
             let near = (e.position - focus).length() < Self::ANIMATION_RANGE;
-            if let (Some(a), true) = (&mut slot.1, near) {
+            if let (Some((_, Some(a))), true) = (self.animators.get_mut(&e.cid), near) {
                 a.update(&self.assets, &gpu.renderer, dt, Self::is_moving(e), e.speeds.fast || e.speeds.riding, 30.0);
             }
         }
+    }
+
+    /// Ensemble d'animations courant du personnage `cid` (0 sans animateur).
+    pub(super) fn anim_equip_of(&self, cid: i32) -> i32 {
+        let slot = if self.player.as_ref().is_some_and(|p| p.cid == cid) { self.player_animator.as_ref() } else { self.animators.get(&cid) };
+        slot.and_then(|(_, a)| a.as_ref()).map_or(0, |a| a.equip)
     }
 
     /// Clic gauche au sol : rayon caméra → terrain, destination du joueur et paquet 0x40.
@@ -2248,6 +2376,10 @@ impl App {
     fn escape_key(&mut self) {
         if self.ui.console_open {
             self.ui.console_open = false;
+            return;
+        }
+        // Boîtes et fenêtres d'`UI_Hotkey` / `UI_EXIT`, puis `UI_Help` (voir `app_hotkey.rs`, `app_help.rs`).
+        if self.hotkey_escape() || self.help.close_windows() {
             return;
         }
         if self.ui.show_options || crate::hud::main_menu_open(&self.hud) {
@@ -2283,12 +2415,16 @@ impl App {
                 crate::hud::MenuUi::ProductSkills => self.product.show_skills = !self.product.show_skills,
                 crate::hud::MenuUi::Guild => self.guild_toggle(),
                 crate::hud::MenuUi::Party => self.party.frames_ui.options = !self.party.frames_ui.options,
+                crate::hud::MenuUi::Emotes => self.social.toggle(),
                 crate::hud::MenuUi::Friends => self.buddy.toggle_friends(),
                 crate::hud::MenuUi::IgnoreList => self.buddy.toggle_bans(),
                 crate::hud::MenuUi::Mailbox => self.mail.toggle(),
                 crate::hud::MenuUi::CreateChannel => self.chat.open_create(),
                 crate::hud::MenuUi::JoinChannel => self.chat.open_enter(),
-                crate::hud::MenuUi::Options | crate::hud::MenuUi::Exit => self.ui.show_options = !self.ui.show_options,
+                crate::hud::MenuUi::Options => self.ui.show_options = !self.ui.show_options,
+                crate::hud::MenuUi::Help => self.help.toggle(),
+                crate::hud::MenuUi::Exit => self.hotkey_toggle_exit(),
+                crate::hud::MenuUi::CashInventory => self.petbag.toggle_cash(),
             }
         }
     }
@@ -2445,6 +2581,9 @@ impl App {
         };
         self.poll_net();
         self.main_menu_frame();
+        // Fenêtres `UI_EXIT` et `UI_Hotkey`, minuterie des astuces (voir `app_hotkey.rs`, `app_help.rs`).
+        self.hotkey_frame();
+        self.help_frame();
         // Combat : PV des vues, morts, marche vers un objet à ramasser.
         self.combat_frame();
         // Équipement porté affiché sur le modèle du joueur (voir `app_items.rs`).
@@ -2473,7 +2612,12 @@ impl App {
         // s'éloignant (voir `app_archlord.rs`, `app_tax.rs`).
         self.archlord_frame();
         self.morph_frame();
+        self.consumables_frame();
+        // Rappel accepté à l'image précédente : boutique, banque et portail fermés (voir `app_party.rs`).
+        self.party_recall_close();
         self.tax_frame();
+        // Titres : joueur pour les contrôles, `UI_TitleAll` fermée en s'éloignant (voir `app_titles.rs`).
+        self.titles_frame();
         // Curseur d'Archonia selon ce qui est sous la souris (voir `app_cursor.rs`).
         self.cursor_update();
         // Carte du monde : zone, carte parente, téléportation des MJ (voir `app_worldmap.rs`).
@@ -2635,7 +2779,37 @@ impl App {
                         }
                     }
                 } else {
-                    ui::login_panel(ctx, &mut self.ui, busy, &mut actions);
+                    // Écrans d'Archonia (`hud_login.rs`) : saisie du compte, puis choix du monde ; pendant
+                    // l'attente, sysstr 457 (« Connecting to the Server... ») ou `LOGIN_WAITING`.
+                    let world_step = phase == Phase::SelectServer || (busy && !self.ui.worlds.is_empty());
+                    let waiting = busy.then(|| {
+                        if world_step {
+                            crate::hud::ui_message(&mut self.hud, &self.assets, "LOGIN_WAITING")
+                        } else {
+                            npc_glue::sysstr(&self.assets, 457).unwrap_or_default()
+                        }
+                    });
+                    let mut requests = Vec::new();
+                    if world_step {
+                        crate::hud::draw_select_server(ctx, &mut self.hud, &self.assets, &self.ui.worlds, &self.ui.folded_groups, self.ui.selected_world.as_deref(), waiting.as_deref(), &mut requests);
+                    } else {
+                        crate::hud::draw_id_password(ctx, &mut self.hud, &self.assets, &mut self.ui.user, &mut self.ui.password, waiting.as_deref(), &mut requests);
+                    }
+                    for r in requests {
+                        match r {
+                            crate::hud::LoginUi::Confirm => actions.connect = true,
+                            crate::hud::LoginUi::Quit => self.exit = true,
+                            crate::hud::LoginUi::Select(name) => self.ui.selected_world = Some(name),
+                            crate::hud::LoginUi::Connect(name) => actions.select_world = Some(name),
+                            crate::hud::LoginUi::ToggleGroup(g) => {
+                                if let Some(i) = self.ui.folded_groups.iter().position(|x| *x == g) {
+                                    self.ui.folded_groups.remove(i);
+                                } else {
+                                    self.ui.folded_groups.push(g);
+                                }
+                            }
+                        }
+                    }
                 }
             } else {
                 // HUD d'Archonia (barre du bas, minicarte, améliorations), sous les panneaux.
@@ -2692,6 +2866,11 @@ impl App {
                 }
                 // Entrepôt de guilde avant la banque : un objet de l'entrepôt lâché dans le sac y est repris.
                 // Objet de la grille d'échange lâché dans le sac : repris (voir `app_trade.rs`).
+                // Inventaire Cash et sac du familier avant eux : bouton « Chantra Bag », clic droit (`app_petbag.rs`).
+                if phase == Phase::InWorld {
+                    let me = petbag_glue::Me { world: self.hotkey.world.as_deref(), name: &player_name };
+                    petbag_glue::panel(ctx, &mut self.petbag, &mut item_requests, &self.items, &me, &mut self.hud, &self.assets, self.net.as_ref());
+                }
                 trade_glue::item_requests(&self.trade, &mut item_requests, self.net.as_ref());
                 guild_glue::item_requests(&self.guild, &mut item_requests, self.net.as_ref());
                 npc_glue::panel(ctx, &mut self.npc, &npc_views, &mut item_requests, &self.items, &mut self.hud, &self.assets, self.net.as_ref(), &mut self.ui);
@@ -2707,6 +2886,8 @@ impl App {
                 // Potions refusées à cheval ou métamorphosé.
                 ride_glue::item_requests(&mut self.ride, &self.items, &mut item_requests, &mut self.hud, &self.assets, &mut self.ui);
                 // Passeports métamorphosé, objet d'oubli des compétences évolué (voir `app_morph.rs`).
+                // Orbe et Gem of origin (refus du mort d'abord, confirmation), voir `app_consumables.rs`.
+                consumables_glue::item_requests(&mut self.consumables, &self.items, &mut item_requests, &mut self.hud, &self.assets, &mut self.ui);
                 morph_glue::item_requests(&mut self.morph, &self.items, &self.auction.item_flags, &mut item_requests, &mut self.hud, &self.assets, &mut self.ui);
                 // Fabrication, PNJ et compétences de production, barre de la récolte.
                 product_glue::panel(ctx, &mut self.product, &self.items, &mut self.hud, &self.assets, self.net.as_ref(), &mut self.ui);
@@ -2728,7 +2909,11 @@ impl App {
                 if let Some(cid) = self.party.pending_select.take() {
                     self.addons.set_target(Some(cid));
                 }
+                // Actions sociales (`UI_SocialAction`, voir `app_social.rs`).
+                social_glue::panel(ctx, &mut self.social, &mut self.hud, &self.assets, self.net.as_ref());
                 combat_glue::panel(ctx, &mut self.combat, &combat_view, &mut self.hud, &self.assets, self.net.as_ref(), &mut self.ui);
+                // Bouton de l'orbe dans `UI_Resurrection`, confirmations de l'oubli des compétences.
+                consumables_glue::panel(ctx, &mut self.consumables, &self.items, &mut self.hud, &self.assets, self.net.as_ref());
                 // Liste des destinations d'un portail, écran de chargement du trajet.
                 portal_glue::panel(ctx, &mut self.portal, &mut self.hud, &self.assets, self.net.as_ref(), &mut self.ui);
                 reconnect_glue::panel(ctx, &mut self.reconnect, &mut self.hud, &self.assets);
@@ -2744,12 +2929,17 @@ impl App {
                 summons_glue::panel(ctx, &mut self.summons, self.addons.target_cid(), me, &mut self.hud, &self.assets, self.net.as_ref());
                 // Shrines (`UI_Shrine_info`, jauge, messages du centre) et fenêtre des boss.
                 shrine_glue::panel(ctx, &mut self.shrine, &mut self.hud, &self.assets, self.net.as_ref());
+                // Titres (`UI_TitleAll`, `UI_TitleCurrent`, `UI_TitleMini`, boîtes).
+                titles_glue::panel(ctx, &mut self.titles, &mut self.hud, &self.assets, self.net.as_ref());
                 boss_glue::panel(ctx, &mut self.boss, &self.game_clock, &self.config.saved_dir, &mut self.hud, &self.assets, self.net.as_ref());
                 // Guerres de siège : fenêtres d'AgcmUISiegeWar, résurrection de siège, `UI_WarInfo`.
                 siege_glue::panel(ctx, &mut self.siege, &siege_me, &self.items, &mut self.hud, &self.assets, self.net.as_ref(), &mut self.ui);
                 // Annonces de l'ArchLord ; fenêtres de l'intendant (`UI_TaxSteward`, `UI_TaxModify`, `UI_TaxView`).
                 archlord_glue::panel(ctx, &mut self.archlord, &mut self.hud, &self.assets);
                 tax_glue::panel(ctx, &mut self.tax, &mut self.hud, &self.assets, self.net.as_ref());
+                // Aide et astuces (`UI_Help`, `UI_TIPS`) ; sortie et touches (`UI_EXIT`, `UI_Hotkey`) au-dessus.
+                help_glue::panel(ctx, &mut self.help, &mut self.hud, &self.assets);
+                hotkey_glue::panel(ctx, &mut self.hotkey, &mut self.hud, &self.assets);
                 // Comme dans WoW, l'interface des AddOns n'apparaît qu'en jeu.
                 self.addon_glue
                     .ui
@@ -2806,7 +2996,8 @@ impl App {
             // Échap sans fenêtre à fermer (voir `escape_key`).
             if std::mem::take(&mut self.ui.escape_open) {
                 if phase == Phase::InWorld {
-                    crate::hud::toggle_options_menu(&mut self.hud);
+                    // `EXIT_Open_Window` : `UI_EXIT` (voir `app_hotkey.rs`).
+                    self.hotkey.exit = !self.hotkey.exit;
                 } else {
                     self.ui.show_options = true;
                 }
@@ -2897,10 +3088,13 @@ impl App {
         if let Some(p) = &self.player {
             // À cheval, le cavalier est posé sur sa monture (voir `app_ride.rs`).
             let base = self.ride.rider_matrix(p.cid, p.model_matrix());
+            // Objets en main : nœud 101/102 de la pose courante (voir `worn`).
+            let (riding, animator) = (self.ride.riding(p.cid), self.player_animator.as_ref().and_then(|(_, a)| a.as_ref()));
             for (mesh, local) in &p.meshes {
+                let Some(model) = crate::worn::piece_model(mesh, base, *local, riding, animator) else { continue };
                 items.push(DrawItem {
                     mesh: mesh.clone(),
-                    model: base * *local,
+                    model,
                     tint: self.addons.unit_tint(p.cid).unwrap_or([1.0; 4]),
                     character: true,
                 });
@@ -2914,10 +3108,12 @@ impl App {
                 continue;
             }
             let base = self.ride.rider_matrix(e.cid, e.model_matrix());
+            let (riding, animator) = (self.ride.riding(e.cid), self.animators.get(&e.cid).and_then(|(_, a)| a.as_ref()));
             for (mesh, local) in &e.meshes {
+                let Some(model) = crate::worn::piece_model(mesh, base, *local, riding, animator) else { continue };
                 items.push(DrawItem {
                     mesh: mesh.clone(),
-                    model: base * *local,
+                    model,
                     tint: self.addons.unit_tint(e.cid).unwrap_or([1.0; 4]),
                     character: true,
                 });
@@ -3097,84 +3293,28 @@ impl ApplicationHandler for App {
                         return;
                     }
                 }
+                // Table des touches d'Archonia (`[EventMap]` d'`UI_1024X768.ini`, `Ini/UI_Hotkey.ini`, voir
+                // `app_hotkey.rs`) : saisie d'`UI_Hotkey`, déplacements et fonctions branchées.
+                if let PhysicalKey::Code(code) = event.physical_key {
+                    if self.hotkey_key(code, down, event.repeat) {
+                        return;
+                    }
+                }
+                // Touches fixes (`HotkeyFlag=0`) et commandes propres à ArchRust, hors de la table.
                 match event.physical_key {
-                    PhysicalKey::Code(KeyCode::KeyW) => self.keys[0] = down,
-                    PhysicalKey::Code(KeyCode::KeyS) => self.keys[1] = down,
-                    PhysicalKey::Code(KeyCode::KeyA) => self.keys[2] = down,
-                    PhysicalKey::Code(KeyCode::KeyD) => self.keys[3] = down,
-                    // I : inventaire (touche par défaut d'ArchLord, non relevée dans UI_Hotkey.ini).
-                    PhysicalKey::Code(KeyCode::KeyI) if down && !event.repeat && self.phase == Phase::InWorld => {
-                        self.ui.show_inventory = !self.ui.show_inventory
-                    }
-                    // C : fenêtre du personnage et de l'équipement (voir `app_items.rs`).
-                    PhysicalKey::Code(KeyCode::KeyC) if down && !event.repeat && self.phase == Phase::InWorld => {
-                        self.item_ui.show_character = !self.item_ui.show_character
-                    }
-                    // K : livre des compétences ; 1 à = : barre de raccourcis (voir `app_skills.rs`).
-                    // G : guilde (`Hotkey=0:34` « Guild » d'Archonia, voir `app_guild.rs`).
-                    PhysicalKey::Code(KeyCode::KeyG) if down && !event.repeat && self.phase == Phase::InWorld => self.guild_toggle(),
-                    // J : compétences de production (`Hotkey=0:36` « Craft skill » d'Archonia, voir `app_product.rs`).
-                    PhysicalKey::Code(KeyCode::KeyJ) if down && !event.repeat && self.phase == Phase::InWorld => {
-                        self.product.show_skills = !self.product.show_skills
-                    }
-                    // U : boîte aux lettres (`Hotkey=0:22` « Mailbox », voir `app_mail.rs`) ; N : liste d'ignorés
-                    // (`Hotkey=0:49` « Ignore list », voir `app_buddy.rs`).
-                    PhysicalKey::Code(KeyCode::KeyU) if down && !event.repeat && self.phase == Phase::InWorld => self.mail.toggle(),
-                    // Ctrl+M : `UI_SkillMacro` (`Hotkey=2:50`), ici le commutateur d'équipement (voir `app_itemset.rs`).
+                    // Y : actions sociales (`Hotkey=0:21` « Emotes », `CBSocialActionToggleUI`, voir `app_social.rs`).
+                    PhysicalKey::Code(KeyCode::KeyY) if down && !event.repeat && self.phase == Phase::InWorld => self.social.toggle(),
+                    // Ctrl+M : `UI_SkillMacro` (`Hotkey=2:50`, ajout d'Archonia), ici le commutateur d'équipement (voir `app_itemset.rs`).
                     PhysicalKey::Code(KeyCode::KeyM) if down && !event.repeat && self.phase == Phase::InWorld && self.addon_glue.modifiers.control_key() => self.itemset.toggle(),
-                    // M : carte du monde (`Hotkey=0:50` « World Map », `WorldMap_Toggle`, voir `app_worldmap.rs`).
-                    PhysicalKey::Code(KeyCode::KeyM) if down && !event.repeat && self.phase == Phase::InWorld && !self.addon_glue.modifiers.shift_key() && !self.addon_glue.modifiers.alt_key() => self.worldmap_toggle(),
-                    // O : options (`Hotkey=0:24` « Game Options », `Action=1:3:1:1:Option_Video` : onglet GFX).
-                    PhysicalKey::Code(KeyCode::KeyO) if down && !event.repeat && self.phase == Phase::InWorld => {
-                        self.ui.show_options = !self.ui.show_options;
-                        if self.ui.show_options {
-                            self.hud.options_tab = 0;
-                        }
-                    }
-                    PhysicalKey::Code(KeyCode::KeyN) if down && !event.repeat && self.phase == Phase::InWorld => self.buddy.toggle_bans(),
-                    PhysicalKey::Code(KeyCode::KeyK) if down && !event.repeat && self.phase == Phase::InWorld => {
-                        self.skills.show_book = !self.skills.show_book
-                    }
-                    PhysicalKey::Code(
-                        code @ (KeyCode::Digit1
-                        | KeyCode::Digit2
-                        | KeyCode::Digit3
-                        | KeyCode::Digit4
-                        | KeyCode::Digit5
-                        | KeyCode::Digit6
-                        | KeyCode::Digit7
-                        | KeyCode::Digit8
-                        | KeyCode::Digit9
-                        | KeyCode::Digit0
-                        | KeyCode::Minus
-                        | KeyCode::Equal),
-                    ) if down && !event.repeat && self.phase == Phase::InWorld => {
-                        self.skills_key(code);
-                    }
-                    // L : journal des quêtes (voir `app_npc.rs`).
-                    PhysicalKey::Code(KeyCode::KeyL) if down && !event.repeat && self.phase == Phase::InWorld => {
-                        self.npc_slash("/quetes", "");
-                    }
-                    // Tab / Maj+Tab : « Target Nearest » d'Archonia (`Hotkey=0:15` / `1:15`).
-                    PhysicalKey::Code(KeyCode::Tab) if down && self.phase == Phase::InWorld => {
-                        self.tab_target(self.addon_glue.modifiers.shift_key())
-                    }
-                    // Entrée : saisie de discussion (Archonia). Quand elle a déjà le focus, egui
-                    // consomme la touche et l'événement n'arrive pas ici.
-                    PhysicalKey::Code(KeyCode::Enter | KeyCode::NumpadEnter)
-                        if down && !event.repeat && self.phase == Phase::InWorld =>
-                    {
-                        self.ui.chat_focus = true
-                    }
-                    PhysicalKey::Code(KeyCode::Backquote) if down && event.repeat == false => {
+                    // Maj+` : console d'ArchRust (` est « Switch quick slot up », `Hotkey=0:41` ; `1:41` est libre).
+                    PhysicalKey::Code(KeyCode::Backquote) if down && !event.repeat && self.addon_glue.modifiers.shift_key() => {
                         self.ui.console_open = !self.ui.console_open
                     }
-                    // F : attaquer la cible ; Espace : ramasser (« Collect item », DIK 57) — `app_combat.rs`.
-                    PhysicalKey::Code(code @ (KeyCode::KeyF | KeyCode::Space))
-                        if down && !event.repeat && self.phase == Phase::InWorld =>
-                    {
+                    // Espace : ramasser (commande d'ArchRust ; « Collect item » d'Archonia est écarté) — `app_combat.rs`.
+                    PhysicalKey::Code(code @ KeyCode::Space) if down && !event.repeat && self.phase == Phase::InWorld => {
                         self.combat_key(code);
                     }
+                    // Échap (`Hotkey=0:1`) : `Close_UI_Window` puis `EXIT_Open_Window` (voir `escape_key`).
                     PhysicalKey::Code(KeyCode::Escape) if down && !event.repeat => self.escape_key(),
                     _ => {}
                 }

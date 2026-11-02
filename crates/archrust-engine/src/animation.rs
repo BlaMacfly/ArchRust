@@ -40,12 +40,18 @@ pub enum AnimType {
     Death = 5,
 }
 
+/// Type interne d'un clip d'action sociale (hors des types d'Archonia : une monture ne le suit pas).
+pub const SOCIAL_KIND: u32 = 100;
+
 /// Géométrie skinnée d'un clump du client, liée à son maillage GPU.
 pub struct SkinBinding {
     pub clump: Arc<Clump>,
     pub geometry: usize,
     /// Sommets de la pose de bind (espace de la frame de l'atomic).
     pub base: Vec<Vertex>,
+    /// Squelette du porteur auquel la peau est liée par ID de nœud (arme skinnée : Xenon, voir
+    /// `Clump::skin_matrices_on`) ; `None` : la hiérarchie du clump lui-même (corps, armures, têtes).
+    pub wearer: Option<Arc<Clump>>,
 }
 
 /// Clip `.ean` prêt à échantillonner : pistes triées par temps, une par nœud HAnim.
@@ -136,48 +142,42 @@ pub struct Variant {
     pub rate: u32,
 }
 
-/// Ensemble d'animations (`équipement` de `ANIMATION_NAME`) d'une arme, d'après son `WeaponType`
-/// (ordre d'Archonia : 0 OneHand_Sword, 1 OneHand_Axe, 2 OneHand_Mace, 3 OneHand_Hammer, 4 à 7 les
-/// mêmes à deux mains, 8 TwoHand_Polearm, 9 TwoHand_Scythe, 10 Bow, 11 Crossbow, 14 Staff, 16 Wand,
-/// 17 Lance, 18 Katariya, 19 Chakram, 20 Standard, 21 Rapier, 22 Dagger, 23 RapierDagger, 24-25
-/// Chanon, 26-27 Zenon).
-///
-/// **Déduit des données**, la fonction d'Archonia qui fait cette conversion en jeu n'étant pas
-/// relevée : ensembles présents par classe (chevalier 1-5 et 8, archer et mage 1, 2 et 5, elfes 1,
-/// 5 et 6, swashbuckler 1, 4 et 8, scion 8 et 10) et armes de départ de chaque classe. Sans arme ou
-/// sans l'ensemble choisi : 0.
-pub fn weapon_anim_equip(weapon_type: Option<i64>) -> u32 {
-    match weapon_type {
-        Some(0 | 1) => 1,
-        Some(2 | 3) => 2,
-        Some(4 | 5) => 3,
-        Some(6 | 7) => 4,
-        Some(8 | 9) => 8,
-        Some(10 | 14 | 17 | 18 | 19 | 21) => 1,
-        Some(11 | 16) => 2,
-        Some(20) => 5,
-        Some(22) => 4,
-        Some(23 | 24 | 25) => 8,
-        Some(26 | 27) => 10,
-        _ => 0,
-    }
-}
-
-/// Animations d'un TID pour un ensemble d'arme, par type (celles de l'ensemble 0 pour un type que
-/// l'ensemble n'a pas).
+/// Animations d'un TID pour un ensemble d'arme (`AgcdCharacter+0xfc`, voir `worn::anim_equip`),
+/// par type, avec le repli d'Archonia déjà appliqué (voir [`AnimationSet::for_tid`]).
 #[derive(Debug, Clone, Default)]
 pub struct AnimationSet {
     pub by_type: HashMap<u32, Vec<Variant>>,
 }
 
 impl AnimationSet {
-    /// Lit la section `[tid]` de `charactertemplateanimation.ini` pour l'ensemble `equip`, complété
-    /// par l'ensemble 0.
-    pub fn for_tid(assets: &Assets, tid: i32, equip: u32) -> AnimationSet {
-        let mut set = Self::for_equip(assets, tid, equip);
-        if equip != 0 {
-            for (t, v) in Self::for_equip(assets, tid, 0).by_type {
-                set.by_type.entry(t).or_insert(v);
+    /// Lit la section `[tid]` de `charactertemplateanimation.ini` pour l'ensemble `equip`, avec le
+    /// repli de `FUN_1404be330` : clip `[type][ensemble]` ; absent, un joueur (`player`) qui marche
+    /// (type 1) prend `[2][ensemble]` puis `[2][0]`, sinon `[type][0]` ; absent, rien (l'animation
+    /// courante continue). Un ensemble négatif (−1) ne lance aucune animation : table vide.
+    pub fn for_tid(assets: &Assets, tid: i32, equip: i32, player: bool) -> AnimationSet {
+        if equip < 0 {
+            return AnimationSet::default();
+        }
+        let own = Self::for_equip(assets, tid, equip as u32);
+        let base = if equip == 0 { own.clone() } else { Self::for_equip(assets, tid, 0) };
+        Self::resolve(&own, &base, player)
+    }
+
+    /// Repli de `FUN_1404be330` entre l'ensemble choisi (`own`) et l'ensemble 0 (`base`).
+    pub fn resolve(own: &AnimationSet, base: &AnimationSet, player: bool) -> AnimationSet {
+        let mut types: Vec<u32> = own.by_type.keys().chain(base.by_type.keys()).copied().collect();
+        if player {
+            types.push(AnimType::Walk as u32);
+        }
+        types.sort();
+        types.dedup();
+        let mut set = AnimationSet::default();
+        for t in types {
+            let walk = player && t == AnimType::Walk as u32;
+            let run = AnimType::Run as u32;
+            let found = own.by_type.get(&t).or_else(|| if walk { own.by_type.get(&run).or_else(|| base.by_type.get(&run)) } else { base.by_type.get(&t) });
+            if let Some(list) = found {
+                set.by_type.insert(t, list.clone());
             }
         }
         set
@@ -288,6 +288,11 @@ pub struct Animator {
     parts: Vec<(Arc<Mesh>, Arc<SkinBinding>)>,
     set: AnimationSet,
     kind: u32,
+    /// Type demandé en dernier (attente, marche, course), même sans clip pour lui : c'est le type que
+    /// suit la monture (`FUN_1404be4f0`, voir [`Animator::follow`]).
+    requested: u32,
+    /// Dernier type reçu par [`Animator::follow`].
+    followed: u32,
     clip: Option<Arc<Clip>>,
     time: f32,
     since_update: f32,
@@ -297,21 +302,26 @@ pub struct Animator {
     action: bool,
     /// Mort : le clip de mort est joué une fois puis sa dernière pose est gardée.
     dead: bool,
+    /// Mondes des cadres du squelette (sans cadre 0) dans la dernière pose écrite : mains des objets
+    /// portés, selle des montures, nœuds des effets, à la même cadence que la peau.
+    world: Option<Vec<glam::Mat4>>,
     /// Identité des maillages animés, pour reconstruire l'animateur s'ils changent.
     pub signature: usize,
-    /// Ensemble d'animations de l'arme (voir [`weapon_anim_equip`]).
-    pub equip: u32,
+    /// Ensemble d'animations (`AgcdCharacter+0xfc`, voir `worn::anim_equip`) ; −1 : aucune.
+    pub equip: i32,
 }
 
 impl Animator {
     /// Animateur d'une entité, ou `None` si aucun de ses maillages n'est skinné ; `equip` est
-    /// l'ensemble de l'arme portée (`weapon_anim_equip`).
+    /// l'ensemble d'animations (`worn::anim_equip`), `player` choisit le repli des joueurs
+    /// ([`AnimationSet::for_tid`]). Sans clip d'attente, le modèle reste en pose de liaison.
     pub fn new(
         assets: &Assets,
         tid: i32,
         meshes: &[(Arc<Mesh>, glam::Mat4)],
         seed: u32,
-        equip: u32,
+        equip: i32,
+        player: bool,
     ) -> Option<Animator> {
         let parts: Vec<_> = meshes
             .iter()
@@ -320,21 +330,21 @@ impl Animator {
         if parts.is_empty() {
             return None;
         }
-        let set = AnimationSet::for_tid(assets, tid, equip);
-        if set.by_type.is_empty() {
-            return None;
-        }
+        let set = AnimationSet::for_tid(assets, tid, equip, player);
         let signature = signature(meshes);
         let mut a = Animator {
             parts,
             set,
             kind: u32::MAX,
+            requested: AnimType::Wait as u32,
+            followed: u32::MAX,
             clip: None,
             time: 0.0,
             since_update: f32::MAX,
             seed: seed.max(1),
             action: false,
             dead: false,
+            world: None,
             signature,
             equip,
         };
@@ -352,18 +362,11 @@ impl Animator {
         (x >> 8) as f32 / (1u32 << 24) as f32
     }
 
+    /// Lance le type `kind` (repli déjà fait par [`AnimationSet::for_tid`]) ; sans clip pour lui,
+    /// l'animation courante continue (`FUN_1404be330`).
     fn switch(&mut self, assets: &Assets, kind: u32) {
-        // Sans course, la marche ; sans marche, l'attente (le TID 96 n'a pas de type 1).
-        let kind = [
-            kind,
-            AnimType::Walk as u32,
-            AnimType::Run as u32,
-            AnimType::Wait as u32,
-        ]
-        .into_iter()
-        .find(|k| self.set.by_type.contains_key(k))
-        .unwrap_or(kind);
-        if kind == self.kind {
+        self.requested = kind;
+        if kind == self.kind || !self.set.by_type.contains_key(&kind) {
             return;
         }
         self.kind = kind;
@@ -404,6 +407,49 @@ impl Animator {
         if !self.action && !self.dead {
             self.switch(assets, wanted);
         }
+        self.advance(assets, renderer, dt, max_hz);
+    }
+
+    /// Monture : à chaque animation lancée sur le cavalier (type `kind`, voir
+    /// [`Animator::current_type`]), la même est lancée sur la monture (`FUN_1404be4f0`), sauf si elle
+    /// joue déjà ce type pour l'attente, la marche ou la course ; la monture n'étant pas un joueur, un
+    /// type sans clip `[type][0]` la laisse sur son clip. Puis l'animation avance comme dans `update`.
+    pub fn follow(&mut self, assets: &Assets, renderer: &Renderer, dt: f32, kind: u32, max_hz: f32) {
+        if kind != self.followed {
+            self.followed = kind;
+            let looping = kind <= AnimType::Run as u32;
+            let playing = looping && self.kind == kind && !self.action && !self.dead;
+            if !playing && self.set.by_type.contains_key(&kind) {
+                if kind == AnimType::Death as u32 {
+                    self.set_dead(assets, true, false);
+                } else if looping {
+                    self.dead = false;
+                    self.action = false;
+                    self.kind = u32::MAX;
+                    self.switch(assets, kind);
+                } else {
+                    self.dead = false;
+                    let once = if kind == AnimType::Attack as u32 { AnimType::Attack } else { AnimType::Hit };
+                    let _ = self.play_once(assets, once);
+                }
+            }
+        }
+        self.advance(assets, renderer, dt, max_hz);
+    }
+
+    /// Type d'animation en cours ou demandé : mort (5), clip ponctuel (3, 4), sinon le dernier type
+    /// demandé (0 attente, 1 marche, 2 course), qu'il ait un clip ou non.
+    pub fn current_type(&self) -> u32 {
+        if self.dead {
+            AnimType::Death as u32
+        } else if self.action {
+            self.kind
+        } else {
+            self.requested
+        }
+    }
+
+    fn advance(&mut self, assets: &Assets, renderer: &Renderer, dt: f32, max_hz: f32) {
         let Some(clip) = self.clip.clone() else {
             return;
         };
@@ -438,6 +484,7 @@ impl Animator {
                 renderer.write_vertices(mesh, &vertices);
             }
         }
+        self.world = self.parts.first().map(|(_, b)| b.clump.world_matrices_with_pose_rooted(&pose));
     }
 
     /// Joue une fois un clip du type `kind` (3 attaque, 4 coup reçu), s'il existe pour ce modèle.
@@ -463,6 +510,24 @@ impl Animator {
             _ => clip,
         };
         self.kind = kind;
+        self.clip = Some(clip);
+        self.time = 0.0;
+        self.since_update = f32::MAX;
+        self.action = true;
+        true
+    }
+
+    /// Joue une fois le clip `file` du pack `character/animation` (action sociale : colonne ANIMATION de
+    /// `INI\SOCIAL_PC.txt`, fichier `.rws` au même format que les `.ean`), comme un clip ponctuel : retour à
+    /// l'attente à sa fin ou dès que le personnage se déplace. Rien sur un mort ni sans le clip.
+    pub fn play_file_once(&mut self, assets: &Assets, file: &str) -> bool {
+        if self.dead {
+            return false;
+        }
+        let Some(clip) = load_clip(assets, &file.trim().to_ascii_lowercase()) else {
+            return false;
+        };
+        self.kind = SOCIAL_KIND;
         self.clip = Some(clip);
         self.time = 0.0;
         self.since_update = f32::MAX;
@@ -501,20 +566,21 @@ impl Animator {
         self.clip.as_ref().map(|c| c.name.as_str())
     }
 
-    /// Translation locale de la piste `track` dans la pose courante (bassin d'une monture, où se
-    /// pose le cavalier : voir `app_ride.rs`).
-    pub fn track_translation(&self, track: usize) -> Option<Vec3> {
-        let clip = self.clip.as_ref()?;
-        clip.sample(self.time).get(track).map(|s| Vec3::from_array(s.translation))
+    /// Squelette de l'entité (clump de la première pièce skinnée : le corps).
+    pub fn skeleton(&self) -> Option<&Arc<Clump>> {
+        self.parts.first().map(|(_, b)| &b.clump)
     }
 
-    /// Matrice du nœud HAnim `node_id` (espace du modèle) dans la pose courante : point d'attache
-    /// des effets (`NODE_ID` des données d'effet, voir `app_effects.rs`).
+    /// Matrice du nœud HAnim `node_id` (repère du clump, cadre 0 à l'identité) dans la dernière pose
+    /// écrite, la pose de liaison avant la première : point d'attache des effets (`NODE_ID` des
+    /// données d'effet, voir `app_effects.rs`), des objets portés (101, 102) et du cavalier (20).
     pub fn node_matrix(&self, node_id: u32) -> Option<glam::Mat4> {
-        let clip = self.clip.as_ref()?;
-        let clump = &self.parts.first()?.1.clump;
+        let clump = self.skeleton()?;
         let frame = clump.frames.iter().position(|f| f.hanim.as_ref().is_some_and(|h| h.node_id == node_id))?;
-        clump.world_matrices_with_pose(&clip.sample(self.time)).get(frame).copied()
+        match &self.world {
+            Some(world) => world.get(frame).copied(),
+            None => clump.world_matrices_rooted().get(frame).copied(),
+        }
     }
 }
 
@@ -529,7 +595,10 @@ pub fn signature(meshes: &[(Arc<Mesh>, glam::Mat4)]) -> usize {
 pub fn deform(binding: &SkinBinding, pose: &[HAnimSample]) -> Option<Vec<Vertex>> {
     let geometry = binding.clump.geometries.get(binding.geometry)?;
     let skin = geometry.skin.as_ref()?;
-    let matrices = binding.clump.skin_matrices(binding.geometry, pose).ok()?;
+    let matrices = match &binding.wearer {
+        Some(wearer) => binding.clump.skin_matrices_on(binding.geometry, wearer, pose).ok()?,
+        None => binding.clump.skin_matrices(binding.geometry, pose).ok()?,
+    };
     if skin.indices.len() != binding.base.len() {
         return None;
     }
@@ -572,17 +641,45 @@ mod tests {
     use super::*;
 
     /// Avec les données du client (`ARCHRUST_GAME_DIR`) : le chevalier (TID 96) à l'épée courte
-    /// (WeaponType 0) frappe avec l'ensemble 1, à mains nues avec l'ensemble 0 ; l'attente manquante
-    /// d'un ensemble vient de l'ensemble 0.
+    /// (ensemble 1) frappe avec `a0060310`, à mains nues (ensemble 0) avec `a0060300` ; la mort
+    /// manquante de l'ensemble 1 vient de l'ensemble 0 ; le chevalier n'a pas de marche : un joueur
+    /// prend la course, un personnage non joueur rien ; ensemble −1 : aucune animation.
     #[test]
     fn animations_selon_l_arme() {
         let Some(dir) = std::env::var_os("ARCHRUST_GAME_DIR") else { return };
         let assets = Assets::new(Some(dir.into()), &[]);
-        assert_eq!(weapon_anim_equip(Some(0)), 1);
-        let attack = |e| AnimationSet::for_tid(&assets, 96, e).pick(AnimType::Attack as u32, 0.0).map(|v| v.file.clone());
+        let attack = |e| AnimationSet::for_tid(&assets, 96, e, true).pick(AnimType::Attack as u32, 0.0).map(|v| v.file.clone());
         assert_eq!(attack(0).as_deref(), Some("a0060300.ean"));
         assert_eq!(attack(1).as_deref(), Some("a0060310.ean"));
-        assert!(AnimationSet::for_tid(&assets, 96, 1).by_type.contains_key(&(AnimType::Death as u32)));
+        assert!(AnimationSet::for_tid(&assets, 96, 1, true).by_type.contains_key(&(AnimType::Death as u32)));
+        let walk = |player| AnimationSet::for_tid(&assets, 96, 7, player).by_type.get(&(AnimType::Walk as u32)).and_then(|v| v.first()).map(|v| v.file.clone());
+        let run = AnimationSet::for_tid(&assets, 96, 7, true).by_type.get(&(AnimType::Run as u32)).and_then(|v| v.first()).map(|v| v.file.clone());
+        assert!(run.is_some(), "course à cheval (ensemble 7)");
+        assert_eq!(walk(true), run, "joueur à cheval qui marche : la course");
+        assert_eq!(walk(false), None);
+        assert!(AnimationSet::for_tid(&assets, 96, -1, true).by_type.is_empty());
+    }
+
+    /// `FUN_1404be330` : `[type][ensemble]`, puis pour un joueur qui marche `[2][ensemble]` et `[2][0]`,
+    /// sinon `[type][0]`.
+    #[test]
+    fn repli_des_clips_comme_archonia() {
+        let v = |f: &str| vec![Variant { file: f.into(), rate: 0 }];
+        let mut own = AnimationSet::default();
+        own.by_type.insert(3, v("e3"));
+        let mut base = AnimationSet::default();
+        for (t, f) in [(0, "b0"), (1, "b1"), (2, "b2"), (3, "b3")] {
+            base.by_type.insert(t, v(f));
+        }
+        let first = |s: &AnimationSet, t: u32| s.by_type.get(&t).map(|l| l[0].file.clone());
+        let npc = AnimationSet::resolve(&own, &base, false);
+        assert_eq!((first(&npc, 0).as_deref(), first(&npc, 1).as_deref(), first(&npc, 3).as_deref()), (Some("b0"), Some("b1"), Some("e3")));
+        let pc = AnimationSet::resolve(&own, &base, true);
+        assert_eq!(first(&pc, 1).as_deref(), Some("b2"), "joueur : la marche manquante de l'ensemble prend la course de l'ensemble 0");
+        own.by_type.insert(2, v("e2"));
+        assert_eq!(first(&AnimationSet::resolve(&own, &base, true), 1).as_deref(), Some("e2"));
+        base.by_type.remove(&1);
+        assert_eq!(first(&AnimationSet::resolve(&own, &base, false), 1), None, "non joueur : rien");
     }
 
     #[test]

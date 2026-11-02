@@ -30,6 +30,8 @@ pub enum ItemUi {
     Split(i32),
     /// Bouton « Sell » de l'inventaire : boîte de ventes (voir `app_auction.rs`).
     SalesBox,
+    /// Bouton « Chantra Bag » de l'inventaire : inventaire Cash (voir `app_petbag.rs`).
+    CashInventory,
 }
 
 /// Objet porté et sa partie du corps (`Part` de `ItemTemplateAll.ini`).
@@ -125,17 +127,12 @@ pub(super) fn bag_grid(
                     out.push(ItemUi::Split(item.id));
                 }
                 if dragging.is_none() {
-                    let label = if count > 1 { format!("{name} ×{count}") } else { name.clone() };
-                    let hint = if count > 1 {
-                        "Clic droit : utiliser ou porter · glisser : déplacer · Maj + clic : séparer"
-                    } else {
-                        "Clic droit : utiliser ou porter · glisser : déplacer, hors fenêtre : détruire"
-                    };
+                    let label = name.clone();
                     match hud.item_tips.get(&item.id) {
-                        Some(tip) if resp.hovered() => super::item_tooltip(ctx, tip, hint),
+                        Some(tip) if resp.hovered() => super::item_tooltip(ctx, tip, ""),
                         Some(_) => {}
                         None => {
-                            resp.clone().on_hover_text(format!("{label}\n{hint}"));
+                            resp.clone().on_hover_text(label);
                         }
                     }
                 }
@@ -216,7 +213,7 @@ pub fn draw_character(
                 let value = |key: &str| display.contains(key);
                 match c.kind {
                     1 if c.name == "CONTROL_29628" => {
-                        shadow_text(&painter, r.left_center(), Align2::LEFT_CENTER, "Personnage", font * 1.1, Color32::from_rgb(235, 225, 200));
+                        shadow_text(&painter, r.left_center(), Align2::LEFT_CENTER, c.fixed_label(), font * 1.1, Color32::from_rgb(235, 225, 200));
                     }
                     // Libellés fixes (PV, PM, STA, WIS, AGI, STR, INT, CHA) : textes du dossier de langue.
                     1 if c.textures.is_empty() && c.name != "CONTROL_29628" && display.starts_with("1:") && display.len() > 2 => {
@@ -224,7 +221,7 @@ pub fn draw_character(
                     }
                     1 if value("현재_레벨") => {
                         // Le fond dessine déjà « Lv ».
-                        let text = stats.level.map_or("—".to_string(), |l| l.to_string());
+                        let text = stats.level.map_or(String::new(), |l| l.to_string());
                         shadow_text(&painter, r.center(), Align2::CENTER_CENTER, &text, font, Color32::from_rgb(255, 230, 160));
                     }
                     1 if value("캐릭터_이름") => {
@@ -235,7 +232,7 @@ pub fn draw_character(
                         let text = match (cur, max) {
                             (Some(c), Some(m)) => format!("{c} / {m}"),
                             (Some(c), None) => c.to_string(),
-                            _ => "—".to_string(),
+                            _ => String::new(),
                         };
                         shadow_text(&painter, r.left_center(), Align2::LEFT_CENTER, &text, font, Color32::WHITE);
                     }
@@ -278,12 +275,11 @@ pub fn draw_character(
                                 out.push(ItemUi::Activate { iid: e.item.id, worn: true });
                             }
                             if dragging.is_none() {
-                                let hint = "Clic droit ou glisser vers l'inventaire : ranger";
                                 match hud.item_tips.get(&e.item.id) {
-                                    Some(tip) if resp.hovered() => super::item_tooltip(ctx, tip, hint),
+                                    Some(tip) if resp.hovered() => super::item_tooltip(ctx, tip, ""),
                                     Some(_) => {}
                                     None => {
-                                        resp.clone().on_hover_text(format!("{}\n{hint}", e.name));
+                                        resp.clone().on_hover_text(e.name.clone());
                                     }
                                 }
                             }

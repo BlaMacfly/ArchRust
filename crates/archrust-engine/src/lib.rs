@@ -5,6 +5,7 @@
 //! * [`camera`] : caméra orbitale (clic droit + molette) façon MMO.
 //! * [`animation`] : animation squelettique des personnages (clips `.ean`, skin CPU).
 //! * [`scene`] : conversion des clumps RenderWare en maillages GPU, entités du monde.
+//! * [`worn`] : armes, boucliers et lances en main, ensemble d'animations selon l'arme.
 //! * [`gltf_model`] : modèles glTF/GLB des patchs (`[[models]]`) en maillages GPU.
 //! * [`net`] : liaison avec `archrust-netclient` sur un fil tokio, événements/commandes.
 //! * [`audio`] : musique, ambiance et effets (rodio), résolution des sons (packs `.pk`, patchs).
@@ -39,6 +40,7 @@ pub mod targeting;
 pub mod ui;
 pub mod weather;
 pub mod world;
+pub mod worn;
 pub mod zones;
 
 pub use app::{run, Config};

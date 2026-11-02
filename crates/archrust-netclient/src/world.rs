@@ -101,6 +101,9 @@ pub struct CharacterStats {
     pub bank_pages: Option<i8>,
     /// Points de compétence (facteurs, sous-paquet « dirt » indice 5).
     pub skill_points: Option<i32>,
+    /// Points héroïques restants (« dirt » indice 7 : 1 au niveau 90, puis 2 par niveau jusqu'au 110 et 3 jusqu'au
+    /// 120, moins ceux dépensés ; texte `HeroicSkillpoint` des fenêtres héroïques).
+    pub heroic_points: Option<i32>,
     /// Vitesses de marche et de course (facteurs de statut 8 et 9), en dixièmes d'unité par seconde.
     pub walk_speed: Option<i32>,
     pub run_speed: Option<i32>,
@@ -362,7 +365,7 @@ pub enum WorldEvent {
     Teleport(crate::teleport::TeleportEvent),
     /// Guildes : guilde, membres, invitation, liens, messages (voir `guild`).
     Guild(crate::guild::GuildEvent),
-    /// Potions de la barre et seuils de leur prise automatique, reçus à l'entrée en jeu.
+    /// Barre de raccourcis (50 cases), potions et seuils de leur prise automatique : op 0 à l'entrée en jeu, op 1 changement.
     UiStatus(crate::ui_status::UiStatus),
     /// Niveau MJ d'un personnage (AgpmAdmin op 0, voir `admin`).
     Admin(crate::admin::AdminLevel),
@@ -391,6 +394,10 @@ pub enum WorldEvent {
     Transformed { cid: i32, transformed: bool },
     /// Métamorphose et évolution : changements de modèle, recharge des potions, refus (voir `morph`).
     Morph(crate::morph::MorphEvent),
+    /// Orbe de résurrection, échecs d'objet, chaîne « skill init », oubli des compétences (voir `consumables`).
+    Consumable(crate::consumables::ConsumableEvent),
+    /// Action sociale d'un personnage (AGPMCHARACTER op 16, voir `social`).
+    Social(crate::social::SocialEvent),
     /// Connexion au monde perdue : reconnexion en cours (`ReconnectingServerShow`, voir `reconnect`).
     Reconnecting,
     /// Reconnexion acceptée : la partie reprend (`ReconnectingServerHide`).
@@ -416,6 +423,13 @@ pub enum WorldEvent {
     Archlord(crate::archlord::ArchlordEvent),
     /// Taxes des régions (AgpmTax 0x53, voir `tax`).
     Tax(crate::tax::TaxEvent),
+    /// Inventaire Cash (mini Cash, op 26) et ramassage automatique du sac du familier (op 30), voir `pet_bag`.
+    PetBag(crate::pet_bag::PetBagEvent),
+    /// Titres (AgpmTitle 0x60, structure brute, voir `titles`).
+    Title(crate::titles::TitlePacket),
+    /// Retour à la sélection des personnages (AgpmReturnToLogin 0x2F) : refus (op 2) ou départ du monde (op 5),
+    /// voir `return_login`.
+    ReturnToLogin(crate::return_login::ReturnLoginEvent),
     Disconnected(String),
 }
 
@@ -465,7 +479,7 @@ pub enum Command {
     Teleport(crate::teleport::TeleportCommand),
     /// Demande de guilde (voir `guild`).
     Guild(crate::guild::GuildCommand),
-    /// Potions de la barre ou seuils de leur prise automatique changés.
+    /// Case de la barre, potions ou seuils de leur prise automatique changés (op 1).
     UiStatus(crate::ui_status::UiStatusUpdate),
     /// Rémission auprès d'un pardonneur (voir `remission`).
     Remission(crate::remission::RemissionCommand),
@@ -481,6 +495,8 @@ pub enum Command {
     Auction(crate::auction::AuctionCommand),
     /// Commutateur d'équipement (voir `itemset`).
     ItemSet(crate::itemset::ItemSetCommand),
+    /// Sac du familier et son ramassage automatique (voir `pet_bag`).
+    PetBag(crate::pet_bag::PetBagCommand),
     /// Réparation chez les forgerons (voir `repair`).
     Repair(crate::repair::RepairCommand),
     /// Casque visible ou non (AgpmUIStatus op 3, champ 8).
@@ -512,8 +528,16 @@ pub enum Command {
     Archlord(crate::archlord::ArchlordCommand),
     /// Intendant, changement et consultation des taxes (voir `tax`).
     Tax(crate::tax::TaxCommand),
+    /// Titres : équiper, objectifs, suppression (voir `titles`).
+    Title(crate::titles::TitleCommand),
     /// Annulation de la métamorphose (voir `morph`).
     Morph(crate::morph::MorphCommand),
+    /// Oubli des compétences chez le maître (voir `consumables`).
+    Consumable(crate::consumables::ConsumableCommand),
+    /// Retour à la sélection du personnage (AgpmReturnToLogin 0x2F op 1, voir `return_login`).
+    ReturnToLogin,
+    /// Action sociale (voir `social`).
+    Social(crate::social::SocialCommand),
     Quit,
 }
 
@@ -584,6 +608,7 @@ pub fn decode_character_stats(bytes: &[u8]) -> Option<CharacterStats> {
         max_mp: int(&max, 1).map(|v| v as i32),
         exp,
         skill_points: crate::skills::factors_dirt(bytes, crate::skills::DIRT_SKILL_POINT),
+        heroic_points: crate::skills::factors_dirt(bytes, crate::skills::DIRT_HEROIC_POINT),
         walk_speed: int(&status, 8).map(|v| v as i32),
         run_speed: int(&status, 9).map(|v| v as i32),
         murderer: int(&status, 11).map(|v| v as i32),
@@ -738,6 +763,10 @@ pub fn extra_events(p: &Incoming) -> Vec<WorldEvent> {
     out.extend(p.packet.as_ref().and_then(|packet| crate::customize::appearance_of(p.packet_type, &packet.values)).map(WorldEvent::Customize));
     // État spécial (AGPMCHARACTER champ 17) : exigé par l'op 0 des invocations, voir `summons`.
     out.extend(p.packet.as_ref().and_then(|packet| crate::summons::special_status_of(p.packet_type, &packet.values)).map(WorldEvent::Summons));
+    // Chaîne « skill init » (AGPMCHARACTER op 0, champ 19), voir `consumables`.
+    if p.op() == Some(crate::consumables::character_op::ADD) {
+        out.extend(p.packet.as_ref().and_then(|packet| crate::consumables::skill_init_of(p.packet_type, &packet.values)).map(WorldEvent::Consumable));
+    }
     // Options d'un objet (AGPMITEM op 0, champ 20), à part de l'objet lui-même.
     if p.packet_type == packet_type::ITEM {
         out.extend(p.packet.as_ref().and_then(|packet| crate::convert::options_of(&packet.values)).map(WorldEvent::Convert));
@@ -746,6 +775,8 @@ pub fn extra_events(p: &Incoming) -> Vec<WorldEvent> {
         // Drapeaux d'état (champ 19) et identifiant 64 bits (champ 26) : maison des ventes, commutateur.
         out.extend(p.packet.as_ref().and_then(|packet| crate::auction::item_flags_of(&packet.values)).map(WorldEvent::Auction));
         out.extend(p.packet.as_ref().and_then(|packet| crate::itemset::item_key_of(&packet.values)).map(WorldEvent::ItemSet));
+        // Mini Cash (champ 23) des ops 0 et 2, voir `pet_bag`.
+        out.extend(p.packet.as_ref().and_then(|packet| crate::pet_bag::cash_of(&packet.values)).map(WorldEvent::PetBag));
     }
     if p.packet_type == packet_type::OPT_VIEW && p.op() == Some(view_op::ADD_CHARACTER_ITEMS as i64) {
         if let Some(b) = p.get(6).and_then(Value::as_bytes) {
@@ -754,6 +785,7 @@ pub fn extra_events(p: &Incoming) -> Vec<WorldEvent> {
             for values in crate::itemset::item_packets_in_block(b) {
                 out.extend(crate::auction::item_flags_of(&values).map(WorldEvent::Auction));
                 out.extend(crate::itemset::item_key_of(&values).map(WorldEvent::ItemSet));
+                out.extend(crate::pet_bag::cash_of(&values).map(WorldEvent::PetBag));
             }
         }
         if let Some(b) = p.get(8).and_then(Value::as_bytes) {
@@ -772,6 +804,18 @@ pub fn translate(p: &Incoming) -> WorldEvent {
     // Métamorphose et évolution (AGPMCHARACTER ops 11, 12, 26, 27 ; AGPMITEM ops 8, 19, 20, 27), voir `morph`.
     if let Some(ev) = p.packet.as_ref().and_then(|packet| crate::morph::translate(p.packet_type, &packet.values)) {
         return WorldEvent::Morph(ev);
+    }
+    // Orbe, échecs d'objet (AGPMITEM ops 5, 18), « skill init » (AGPMCHARACTER op 23), maître (0x3B op 9).
+    if let Some(ev) = p.packet.as_ref().and_then(|packet| crate::consumables::translate(p.packet_type, &packet.values)) {
+        return WorldEvent::Consumable(ev);
+    }
+    // Inventaire Cash et sac du familier (AGPMITEM ops 26, 30), voir `pet_bag`.
+    if let Some(ev) = p.packet.as_ref().and_then(|packet| crate::pet_bag::translate(p.packet_type, &packet.values)) {
+        return WorldEvent::PetBag(ev);
+    }
+    // Actions sociales (AGPMCHARACTER op 16, voir `social`).
+    if let Some(ev) = p.packet.as_ref().and_then(|packet| crate::social::translate(p.packet_type, &packet.values)) {
+        return WorldEvent::Social(ev);
     }
     // Dialogue, boutique, banque, quêtes (voir `npc`).
     if let Some(ev) = p.packet.as_ref().and_then(|packet| crate::npc::translate(p.packet_type, &packet.values)) {
@@ -810,6 +854,12 @@ pub fn translate(p: &Incoming) -> WorldEvent {
     }
     if let Some(ev) = p.packet.as_ref().and_then(|packet| crate::wanted::translate(p.packet_type, &packet.values)) {
         return WorldEvent::Wanted(ev);
+    }
+    // Titres (0x60) : structure brute.
+    if p.packet_type == crate::titles::PACKET_TYPE {
+        if let Some(t) = crate::titles::TitlePacket::decode(&p.raw) {
+            return WorldEvent::Title(t);
+        }
     }
     // Shrines (0x62) et Battleground (0x58) : structures brutes ; fenêtre des boss (0x64).
     if p.packet_type == crate::shrine::PACKET_TYPE {
@@ -1208,6 +1258,8 @@ fn item_record(values: &[Option<Value>], operation: u8) -> Option<ItemRecord> {
         Some(53) => 7,
         // Grille d'échange entre joueurs : case au champ 7, comme ArchCore l'envoie (voir `trade`).
         Some(6) => 7,
+        // Sac du familier : case au champ 7 (mini de l'inventaire, voir `pet_bag`).
+        Some(13) => 7,
         _ => usize::MAX,
     };
     let grid = field(grid_field)
@@ -1229,6 +1281,17 @@ fn item_record(values: &[Option<Value>], operation: u8) -> Option<ItemRecord> {
         status,
         grid,
     })
+}
+
+/// Fin de la boucle de jeu réseau ([`WorldClient::run_until`]).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SessionEnd {
+    /// `Command::Quit`, canal des commandes fermé ou moteur parti.
+    Quit,
+    /// Connexion perdue sans reconnexion possible (`WorldEvent::Disconnected` envoyé).
+    Disconnected,
+    /// Clé du retour à la sélection des personnages reçue (0x2F op 5) : connexion au monde fermée.
+    ReturnToLogin(crate::return_login::ReturnTicket),
 }
 
 pub struct WorldClient {
@@ -1537,18 +1600,24 @@ impl WorldClient {
 
     /// Boucle de jeu réseau : relaie les paquets en événements et exécute les commandes,
     /// avec le keepalive toutes les 15 s. Se termine sur `Command::Quit` ou déconnexion.
-    pub async fn run(
+    pub async fn run(self, events: mpsc::Sender<WorldEvent>, commands: mpsc::Receiver<Command>) {
+        let _ = self.run_until(events, commands).await;
+    }
+
+    /// Comme [`run`](Self::run), en rendant la raison de la fin et le canal des commandes (repris par la
+    /// prochaine entrée en jeu après un retour à la sélection des personnages, voir `return_login`).
+    pub async fn run_until(
         mut self,
         events: mpsc::Sender<WorldEvent>,
         mut commands: mpsc::Receiver<Command>,
-    ) {
+    ) -> (SessionEnd, mpsc::Receiver<Command>) {
         let mut tick = tokio::time::interval(KEEPALIVE);
         tick.tick().await; // le premier keepalive a déjà été envoyé
         loop {
             tokio::select! {
                 _ = tick.tick() => {
                     if let Err(e) = self.keepalive().await {
-                        if !self.recover(&events, e.to_string()).await { return; }
+                        if !self.recover(&events, e.to_string()).await { return (SessionEnd::Disconnected, commands); }
                     }
                 }
                 cmd = commands.recv() => {
@@ -1571,12 +1640,25 @@ impl WorldClient {
                             self.conn.send(schema, &values).await
                         }
                         Some(Command::Shrine(c)) => self.conn.send_raw(&crate::shrine::command_packet(&c, self.cid)).await,
+                        Some(Command::Title(c)) => self.conn.send_raw(&crate::titles::command_packet(&c, &self.ticket.character)).await,
                         Some(Command::Siege(c)) => {
                             let (schema, values) = crate::siege::command_packet(&c, self.cid);
                             self.conn.send(schema, &values).await
                         }
                         Some(Command::Archlord(c)) => {
                             let (schema, values) = crate::archlord::command_packet(&c);
+                            self.conn.send(schema, &values).await
+                        }
+                        Some(Command::Consumable(c)) => {
+                            let (schema, values) = crate::consumables::command_packet(&c, self.cid);
+                            self.conn.send(schema, &values).await
+                        }
+                        Some(Command::ReturnToLogin) => {
+                            let (schema, values) = crate::return_login::request_packet(self.cid);
+                            self.conn.send(schema, &values).await
+                        }
+                        Some(Command::Social(c)) => {
+                            let (schema, values) = crate::social::command_packet(&c, self.cid);
                             self.conn.send(schema, &values).await
                         }
                         Some(Command::Morph(c)) => {
@@ -1663,6 +1745,10 @@ impl WorldClient {
                             let (schema, values) = crate::items::command_packet(&c, self.cid);
                             self.conn.send(schema, &values).await
                         }
+                        Some(Command::PetBag(c)) => {
+                            let (schema, values) = crate::pet_bag::command_packet(&c, self.cid);
+                            self.conn.send(schema, &values).await
+                        }
                         Some(Command::Npc(c)) => {
                             let (schema, values) = crate::npc::command_packet(&c, self.cid);
                             self.conn.send(schema, &values).await
@@ -1684,17 +1770,31 @@ impl WorldClient {
                             self.conn.send(schema, &values).await
                         }
                         Some(Command::CutConnection) => { self.conn.cut().await; Ok(()) }
-                        Some(Command::Quit) | None => { self.conn.close().await; return; }
+                        Some(Command::Quit) | None => { self.conn.close().await; return (SessionEnd::Quit, commands); }
                     };
                     if let Err(e) = r {
-                        if !self.recover(&events, e.to_string()).await { return; }
+                        if !self.recover(&events, e.to_string()).await { return (SessionEnd::Disconnected, commands); }
                     }
                 }
                 p = self.conn.next() => {
                     match p {
                         Ok(p) => {
                             if let Some(e) = self.conn.take_new_extensions() {
-                                if events.send(WorldEvent::ExtensionsReady(e)).await.is_err() { return; }
+                                if events.send(WorldEvent::ExtensionsReady(e)).await.is_err() { return (SessionEnd::Quit, commands); }
+                            }
+                            // Retour à la sélection des personnages (0x2F) : refus (op 2), ou clé (op 5) — Archonia ferme
+                            // alors la connexion au monde (FUN_140686900) et rejoint le serveur de connexion.
+                            if crate::return_login::is_refused(&p) {
+                                log::info!("[world] retour à la sélection refusé par le serveur (0x2F op 2)");
+                                let ev = WorldEvent::ReturnToLogin(crate::return_login::ReturnLoginEvent::Refused);
+                                if events.send(ev).await.is_err() { return (SessionEnd::Quit, commands); }
+                                continue;
+                            }
+                            if let Some(ticket) = crate::return_login::ticket_of(&p) {
+                                log::info!("[world] retour à la sélection : clé reçue (0x2F op 5), adresse {:?}", ticket.address);
+                                let _ = events.send(WorldEvent::ReturnToLogin(crate::return_login::ReturnLoginEvent::Leaving)).await;
+                                self.conn.close().await;
+                                return (SessionEnd::ReturnToLogin(ticket), commands);
                             }
                             // Clé de reconnexion (0x63 op 2), gardée par le client.
                             if let Some((key, _)) = crate::reconnect::result_of(&p) {
@@ -1703,13 +1803,13 @@ impl WorldClient {
                             }
                             let ev = translate(&p);
                             Self::track_view_event(&mut self.seen, &ev);
-                            if events.send(ev).await.is_err() { return; }
+                            if events.send(ev).await.is_err() { return (SessionEnd::Quit, commands); }
                             for extra in extra_events(&p) {
-                                if events.send(extra).await.is_err() { return; }
+                                if events.send(extra).await.is_err() { return (SessionEnd::Quit, commands); }
                             }
                         }
                         Err(e) => {
-                            if !self.recover(&events, e.to_string()).await { return; }
+                            if !self.recover(&events, e.to_string()).await { return (SessionEnd::Disconnected, commands); }
                         }
                     }
                 }

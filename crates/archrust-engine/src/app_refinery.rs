@@ -176,7 +176,7 @@ impl RefineryGlue {
     }
 
     /// Bouton « Répéter ».
-    fn repeat_button(&mut self, assets: &Assets, hud: &mut HudState, ui: &mut UiState) {
+    fn repeat_button(&mut self, assets: &Assets, hud: &mut HudState, _ui: &mut UiState) {
         match self.last_grid {
             Some((grid, price)) => {
                 let text = self.data(assets).price_box("REFINE_EVENT_REPEAT_MONEYMSGBOX", price);
@@ -185,7 +185,6 @@ impl RefineryGlue {
             None => {
                 let text = self.data(assets).sys(883);
                 hud.push_system(&text);
-                ui.push_chat(format!("[raffinage] {text}"));
             }
         }
     }
@@ -471,7 +470,6 @@ impl App {
                         glue.result = tid;
                         let name = tid.and_then(|t| item_name_for_tid(&assets, t)).unwrap_or_default();
                         log::info!("raffinage : réussi, {name} ({tid:?})");
-                        self.ui.push_chat(format!("[raffinage] {name}"));
                         return;
                     }
                     result::MISSING_ITEMS | result::MISSING_ITEMS_2 => "REFINE_INSITEM_ITEM",
@@ -484,7 +482,6 @@ impl App {
                 log::info!("raffinage : résultat {code} ({key})");
                 glue.notify = text.clone();
                 self.hud.push_system(&text);
-                self.ui.push_chat(format!("[raffinage] {text}"));
             }
         }
     }

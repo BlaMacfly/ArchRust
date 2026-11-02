@@ -150,7 +150,7 @@ impl TradeGlue {
         list.values()
             .filter_map(|i| {
                 let tid = i.template_id?;
-                let name = crate::scene::item_name_for_tid(assets, tid).unwrap_or_else(|| format!("Objet TID {tid}"));
+                let name = crate::scene::item_name_for_tid(assets, tid).unwrap_or_default();
                 Some(TradeSlot { iid: i.id, tid, count: i.count.unwrap_or(1).max(1), grid: i.grid.unwrap_or([0, 0, 0]), name })
             })
             .collect()

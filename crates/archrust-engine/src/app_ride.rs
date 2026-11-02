@@ -10,26 +10,28 @@
 //! * la monture est un personnage local (CID ≥ 1 000 000, FUN_140750530) : modèle et animations de son
 //!   TID (`charactertemplateclient.ini`, `charactertemplateanimation.ini`), animée comme un monstre
 //!   (attente / course) ;
-//! * cavalier : animations « à cheval » (FUN_140756060) selon `ANIMATION_TYPE2` du gabarit et le `Type`
-//!   de l'arme montée : guerrier (1) 7 / lance 8 / étendard 9 ; archer et mage (2, 3) 4 / 5 / 7 ;
-//!   Archlord (5) 1 / 1 / 2 ; autres classes : animations ordinaires ;
+//! * cavalier : animations « à cheval » (FUN_140754290, FUN_140756060, voir `worn::anim_equip`) selon
+//!   `ANIMATION_TYPE2` du gabarit : guerrier (1) 7 / lance 8 ; archer et mage (2, 3) 4 / 5 ; Archlord (5)
+//!   1 / 1 ; à la montée les armes des mains sont détachées et la lance attachée en main droite,
+//!   l'inverse à la descente (filtre au tracé, `worn::Worn::visible`) ;
 //! * vitesse : facteur MovementFast, sans le plafond de 60 000 à cheval (FUN_14017a850) ;
 //! * refus du client à cheval : compétences sans `auto_attack` (`sysstr` 320, FUN_14069a0c0), production
 //!   (`sysstr` 527, FUN_140657410) ; à cheval ou métamorphosé : potion de métamorphose (usage 7, `sysstr`
 //!   346), potions d'usage 12 de sous-type 1 (`sysstr` 347) et 2 (`sysstr` 348), FUN_14053d0b0 ;
 //! * refus du serveur : message système code 24 → `CannotRideWhileCombat` (uimessage).
 //!
-//! **Déduit, à vérifier en jeu** : la position du cavalier. Archonia accroche son cadre à celui de la
-//! monture (`ac+0x60`, calcul non relevé) ; ici le cavalier est posé sur la translation de la première
-//! piste animée de la monture (bassin : 137 unités pour le cheval 567), son animation « à cheval »
-//! plaçant son propre bassin 34,5 unités au-dessus de son origine (`a0001040`). `RIDER_HEIGHT`
-//! (270 pour 567) ne sert qu'à hausser le panneau du nom (voir `app_boards.rs`).
-//! Les montures récentes au modèle glTF (`IDLE`, `RUN`…, nœud `RideNode`, ex. TID 5808) ne sont pas
-//! affichées : le pack `character` n'a pas de `.ecl` pour elles et ArchRust ne lit pas encore les glTF
-//! animés du client.
+//! **Attache du cavalier** (`FUN_140750660`, observé) : nœud de selle = ID HAnim 20 de la monture ;
+//! `monde_monture = T(pos) × Ry(turnY) × Rx(turnX) × S(SCALE)` (le cadre du clump de la monture est
+//! remplacé : son cadre 0, tourné de 64° pour le cheval `a0000237.ecl`, ne compte pas) ;
+//! `monde_cavalier = monde_monture × nœud20(pose de la monture) × Ry(90°) × Rz(90°)`, avec `× S(1/s)` si
+//! l'échelle `s` de la selle sort de [0,5 ; 2] (voir [`rider_on_saddle`]). La monture rejoue chaque
+//! type d'animation lancé sur le cavalier (`FUN_1404be4f0`, `Animator::follow`). `RIDER_HEIGHT` (270
+//! pour 567) ne sert qu'à hausser le panneau du nom (voir `app_boards.rs`).
+//! Montures glTF (patchs `[[models]]`, `.glb` du client comme 5808) : affichées sans squelette, le
+//! cavalier posé à 60 % de `HEIGHT` (le nœud `RideNode` d'Archonia n'est pas relevé).
 
 use super::App;
-use crate::animation::Animator;
+use crate::animation::{AnimType, Animator};
 use crate::assets::Assets;
 use crate::hud::{HudState, ItemUi};
 use crate::render::{DrawItem, Mesh};
@@ -42,10 +44,11 @@ use glam::{Mat4, Vec3};
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
-/// Genre (`Kind`) des montures et partie des armes montées.
+/// Genre (`Kind`) des montures et partie de leur objet.
 const KIND_RIDE: i64 = 32;
 const PART_RIDE: i64 = 14;
-const PART_LANCER: i64 = 15;
+/// Nœud HAnim de la selle (`FUN_140750660`).
+const NODE_SADDLE: u32 = 20;
 const STATUS_EQUIP: i8 = 3;
 /// Message système du serveur : « en combat, impossible de monter ».
 const CODE_CANNOT_RIDE_IN_COMBAT: i32 = 24;
@@ -69,8 +72,6 @@ struct RideData {
     /// TID de compétence → (`auto_attack`, production).
     skills: HashMap<i32, (bool, bool)>,
     sysstr: HashMap<u32, String>,
-    /// TID de personnage → `ANIMATION_TYPE2`.
-    type2: HashMap<i32, i64>,
     /// TID de monture → (`HEIGHT`, `RIDER_HEIGHT`).
     heights: HashMap<i32, (f32, f32)>,
 }
@@ -142,28 +143,34 @@ fn load_data(assets: &Assets) -> RideData {
     d
 }
 
-/// Ensemble d'animations « à cheval » du cavalier (FUN_140756060), `None` pour une classe sans
-/// animation à cheval (0, 4 et les autres : animations ordinaires).
-pub(super) fn ride_anim_equip(type2: i64, weapon_type: Option<i64>) -> Option<u32> {
-    let set = match (type2, weapon_type) {
-        (1, Some(17)) => 8,
-        (1, Some(20)) => 9,
-        (1, _) => 7,
-        (2 | 3, Some(17)) => 5,
-        (2 | 3, Some(20)) => 7,
-        (2 | 3, _) => 4,
-        (5, Some(20)) => 2,
-        (5, _) => 1,
-        _ => return None,
-    };
-    Some(set)
+/// Cavalier posé sur la selle (`FUN_140750660`) : `selle` = monde du nœud 20 de la monture (matrice de
+/// la monture comprise) ; cadre de correction `Ry(90°) × Rz(90°)`, et `S(1/s)` si l'échelle `s` de la
+/// selle est hors de [0,5 ; 2] (et > 1e-4).
+pub(super) fn rider_on_saddle(saddle: Mat4) -> Mat4 {
+    let s = saddle.x_axis.truncate().length();
+    let mut revision = Mat4::from_rotation_y(90f32.to_radians()) * Mat4::from_rotation_z(90f32.to_radians());
+    if s > 1e-4 && !(0.5..=2.0).contains(&s) {
+        revision *= Mat4::from_scale(Vec3::splat(1.0 / s));
+    }
+    saddle * revision
 }
 
-/// Monture affichée : maillages, animation et bassin courant (où s'assoit le cavalier).
+/// Matrice de la monture : celle du cavalier (`T × Ry`, la monture prend sa position et ses angles) ×
+/// `S(SCALE)` du gabarit.
+pub(super) fn mount_world(base: Mat4, scale: f32) -> Mat4 {
+    base * Mat4::from_scale(Vec3::splat(scale))
+}
+
+/// Monture affichée : maillages (cadre 0 à l'identité), animation, échelle et selle.
 struct MountModel {
     meshes: Vec<(Arc<Mesh>, Mat4)>,
     animator: Option<Animator>,
-    saddle: Vec3,
+    /// `SCALE` de `charactertemplateclient.ini` (1 sans valeur).
+    scale: f32,
+    /// Nœud 20 en pose de liaison (sans animateur) ; `None` sans squelette (glTF).
+    saddle_bind: Option<Mat4>,
+    /// `HEIGHT` : repli du cavalier sans squelette.
+    height: f32,
 }
 
 /// Monture d'un personnage.
@@ -199,12 +206,14 @@ impl RideGlue {
         self.mounts.contains_key(&cid)
     }
 
-    /// Matrice du cavalier `cid` (`base` : sa position et son orientation) : posé sur le bassin de
-    /// sa monture.
+    /// Matrice du cavalier `cid` (`base` : sa position et son orientation) : posé sur la selle de sa
+    /// monture (voir [`rider_on_saddle`]).
     pub fn rider_matrix(&self, cid: i32, base: Mat4) -> Mat4 {
-        match self.mounts.get(&cid).and_then(|m| m.model.as_ref()) {
-            Some(m) => base * Mat4::from_translation(m.saddle),
-            None => base,
+        let Some(m) = self.mounts.get(&cid).and_then(|m| m.model.as_ref()) else { return base };
+        let world = mount_world(base, m.scale);
+        match m.animator.as_ref().and_then(|a| a.node_matrix(NODE_SADDLE)).or(m.saddle_bind) {
+            Some(saddle) => rider_on_saddle(world * saddle),
+            None => base * Mat4::from_translation(Vec3::new(0.0, m.height * 0.6, 0.0)),
         }
     }
 
@@ -217,8 +226,9 @@ impl RideGlue {
             if !e.is_player && char_distance.is_some_and(|d| e.position.distance(eye) > d) {
                 continue;
             }
+            let world = mount_world(e.model_matrix(), m.scale);
             for (mesh, local) in &m.meshes {
-                out.push(DrawItem { mesh: mesh.clone(), model: e.model_matrix() * *local, tint: [1.0; 4], character: true });
+                out.push(DrawItem { mesh: mesh.clone(), model: world * *local, tint: [1.0; 4], character: true });
             }
         }
         out
@@ -259,7 +269,7 @@ fn refused_item(d: &RideData, tid: Option<i32>, archlord: bool) -> Option<u32> {
 
 /// Clic droit sur une potion à cheval ou métamorphosé : refusé avec le message d'Archonia. Avant
 /// `app_items::panel`.
-pub fn item_requests(glue: &mut RideGlue, items: &HashMap<i32, ItemRecord>, requests: &mut Vec<ItemUi>, hud: &mut HudState, assets: &Assets, ui: &mut UiState) {
+pub fn item_requests(glue: &mut RideGlue, items: &HashMap<i32, ItemRecord>, requests: &mut Vec<ItemUi>, hud: &mut HudState, assets: &Assets, _ui: &mut UiState) {
     let me = glue.me;
     if !glue.riding(me) && !glue.transformed.contains(&me) {
         return;
@@ -271,7 +281,6 @@ pub fn item_requests(glue: &mut RideGlue, items: &HashMap<i32, ItemRecord>, requ
         let Some(id) = items.get(&iid).and_then(|i| refused_item(d, i.template_id, archlord)) else { return true };
         let text = d.sys(id);
         hud.push_system(&text);
-        ui.push_chat(format!("[monture] {text}"));
         false
     });
 }
@@ -296,7 +305,6 @@ impl App {
             WorldEvent::SystemCode(CODE_CANNOT_RIDE_IN_COMBAT) => {
                 let text = crate::hud::ui_message(&mut self.hud, &self.assets, "CannotRideWhileCombat");
                 self.hud.push_system(&text);
-                self.ui.push_chat(format!("[monture] {text}"));
             }
             WorldEvent::CharacterRemoved { cid, .. } if self.player.as_ref().is_none_or(|p| p.cid != *cid) => {
                 self.ride.mounts.remove(cid);
@@ -378,51 +386,42 @@ impl App {
             e.speeds.riding = self.ride.mounts.contains_key(&e.cid);
         }
         let Some(gpu) = self.gpu.as_mut() else { return };
-        let moving: HashMap<i32, bool> = self.entities.iter().chain(self.player.as_ref()).map(|e| (e.cid, Self::is_moving(e))).collect();
+        // Type d'animation de chaque cavalier (FUN_1404be4f0) ; sans animateur, course ou attente.
+        let mut kinds: HashMap<i32, u32> = self.entities.iter().chain(self.player.as_ref()).map(|e| (e.cid, if Self::is_moving(e) { AnimType::Run } else { AnimType::Wait } as u32)).collect();
+        for (cid, (_, a)) in &self.animators {
+            if let Some(a) = a {
+                kinds.insert(*cid, a.current_type());
+            }
+        }
+        if let (Some(p), Some((_, Some(a)))) = (self.player.as_ref(), self.player_animator.as_ref()) {
+            kinds.insert(p.cid, a.current_type());
+        }
         for (cid, m) in self.ride.mounts.iter_mut() {
             if m.model.is_none() && !m.failed {
                 let files = models_for_tid(&assets, m.tid);
-                let loadable = !files.is_empty() && files.iter().all(|f| assets.clump("character", f).is_ok());
+                let loadable = !files.is_empty() && files.iter().all(|f| assets.clump("character", f).is_ok() || assets.patched_model(&format!("character/{f}")).is_some());
                 if !loadable {
                     m.failed = true;
-                    log::warn!("monture TID {} : modèle introuvable dans le pack character ({files:?}) ; monture glTF non prise en charge", m.tid);
+                    log::warn!("monture TID {} : modèle introuvable dans le pack character ({files:?})", m.tid);
                     continue;
                 }
                 let fallback = gpu.marker.clone();
                 let meshes = entity_meshes(&mut gpu.renderer, &assets, m.tid, Head::default(), &fallback).unwrap_or_default();
                 let seed = ((LOCAL_CID_BASE + cid.rem_euclid(1_000_000)) as u32).wrapping_mul(0x9e37_79b9) | 1;
-                let animator = Animator::new(&assets, m.tid, &meshes, seed, 0);
+                // La monture n'est pas un joueur : ensemble 0.
+                let animator = Animator::new(&assets, m.tid, &meshes, seed, 0, false);
                 let height = column(&assets, "charactertemplateclient.ini", m.tid, "HEIGHT").unwrap_or(200.0);
-                log::info!("monture TID {} : {} maillage(s), animée : {}", m.tid, meshes.len(), animator.is_some());
-                m.model = Some(MountModel { meshes, animator, saddle: Vec3::new(0.0, height * 0.6, 0.0) });
+                let scale = column(&assets, "charactertemplateclient.ini", m.tid, "SCALE").filter(|s| *s > 0.0).unwrap_or(1.0);
+                let saddle_bind = animator.as_ref().and_then(|a| a.node_matrix(NODE_SADDLE));
+                log::info!("monture TID {} : {} maillage(s), animée : {}, selle : {}", m.tid, meshes.len(), animator.is_some(), saddle_bind.is_some());
+                m.model = Some(MountModel { meshes, animator, scale, saddle_bind, height });
             }
             let Some(model) = m.model.as_mut() else { continue };
             if let Some(a) = model.animator.as_mut() {
-                // La monture court quand son cavalier se déplace (pas d'animation de marche).
-                a.update(&assets, &gpu.renderer, dt, moving.get(cid).copied().unwrap_or(false), true, 30.0);
-                if let Some(t) = a.track_translation(1) {
-                    model.saddle = t;
-                }
+                let kind = kinds.get(cid).copied().unwrap_or(AnimType::Wait as u32);
+                a.follow(&assets, &gpu.renderer, dt, kind, 30.0);
             }
         }
-    }
-
-
-    /// Ensemble d'animations du cavalier `cid` (modèle `tid`) s'il est monté.
-    pub(super) fn ride_anim_equip(&mut self, cid: i32, tid: i32) -> Option<u32> {
-        if !self.ride.riding(cid) {
-            return None;
-        }
-        let assets = self.assets.clone();
-        let worn = self.ride_worn(cid);
-        let d = self.ride.data(&assets);
-        let lance = worn.iter().map(|t| d.item(Some(*t))).find(|r| r.part == PART_LANCER && r.kind == 2).map(|r| r.kind_type);
-        let cached = d.type2.get(&tid).copied();
-        let type2 = cached.unwrap_or_else(|| column(&assets, "charactertemplateanimation.ini", tid, "ANIMATION_TYPE2").unwrap_or(0.0) as i64);
-        if let Some(d) = self.ride.data.as_mut() {
-            d.type2.insert(tid, type2);
-        }
-        ride_anim_equip(type2, lance)
     }
 
     /// `RIDER_HEIGHT` de la monture du personnage, ajouté à la hauteur de son panneau.
@@ -453,7 +452,6 @@ impl App {
         };
         let text = d.sys(id);
         self.hud.push_system(&text);
-        self.ui.push_chat(format!("[monture] {text}"));
         false
     }
 
@@ -482,19 +480,27 @@ impl App {
 mod tests {
     use super::*;
 
+    /// Cheval blanc 567 en pose de liaison : sans cadre 0, la selle (nœud 20) est au-dessus du dos et le
+    /// cavalier, après `Ry(90°) × Rz(90°)`, se tient droit et regarde vers l'avant du cheval (+Z).
     #[test]
-    fn animations_a_cheval_comme_archonia() {
-        // FUN_140756060 : classe d'animation × arme montée (17 lance, 20 étendard).
-        assert_eq!(ride_anim_equip(1, None), Some(7));
-        assert_eq!(ride_anim_equip(1, Some(17)), Some(8));
-        assert_eq!(ride_anim_equip(1, Some(20)), Some(9));
-        assert_eq!(ride_anim_equip(2, None), Some(4));
-        assert_eq!(ride_anim_equip(3, Some(17)), Some(5));
-        assert_eq!(ride_anim_equip(2, Some(20)), Some(7));
-        assert_eq!(ride_anim_equip(5, Some(17)), Some(1));
-        assert_eq!(ride_anim_equip(5, Some(20)), Some(2));
-        assert_eq!(ride_anim_equip(0, Some(17)), None);
-        assert_eq!(ride_anim_equip(4, None), None);
+    fn cavalier_sur_la_selle_du_cheval() {
+        let Some(dir) = std::env::var_os("ARCHRUST_GAME_DIR") else { return };
+        let assets = Assets::new(Some(dir.into()), &[]);
+        let horse = assets.clump("character", "a0000237.ecl").unwrap();
+        let world = horse.world_matrices_rooted();
+        let frame = horse.frames.iter().position(|f| f.hanim.as_ref().is_some_and(|h| h.node_id == NODE_SADDLE)).unwrap();
+        let rider = rider_on_saddle(mount_world(Mat4::IDENTITY, 1.0) * world[frame]);
+        assert!(rider.y_axis.truncate().normalize().y > 0.95, "cavalier droit : {:?}", rider.y_axis);
+        assert!(rider.z_axis.truncate().normalize().z > 0.95, "cavalier vers l'avant : {:?}", rider.z_axis);
+        let seat = rider.w_axis.truncate();
+        assert!(seat.y > 100.0 && seat.y < 180.0 && seat.x.abs() < 10.0, "selle : {seat:?}");
+        // Avec le cadre 0 (ancien calcul), la selle était décalée et tournée.
+        let old = horse.world_matrices()[frame];
+        assert!((old.w_axis.truncate() - seat).length() > 10.0);
+        // Selle tournée, échelle hors de [0,5 ; 2] : ramenée à 1.
+        let big = rider_on_saddle(Mat4::from_scale(Vec3::splat(3.0)));
+        assert!((big.x_axis.truncate().length() - 1.0).abs() < 1e-5);
+        assert!((rider_on_saddle(Mat4::from_scale(Vec3::splat(1.5))).x_axis.truncate().length() - 1.5).abs() < 1e-5);
     }
 
     #[test]
@@ -525,7 +531,7 @@ mod tests {
         assert!(assets.clump("character", "a0000237.ecl").is_ok());
         assert_eq!(column(&assets, "charactertemplateclient.ini", 567, "RIDER_HEIGHT"), Some(270.0));
         assert_eq!(column(&assets, "charactertemplateanimation.ini", 1, "ANIMATION_TYPE2"), Some(2.0));
-        let set = crate::animation::AnimationSet::for_tid(&assets, 1, 4);
+        let set = crate::animation::AnimationSet::for_tid(&assets, 1, 4, true);
         assert!(set.by_type.get(&0).is_some_and(|v| v.iter().any(|x| x.file == "a0001040.ean")));
         assert!(d.skills.values().any(|(auto, _)| *auto), "Normal Attack : auto_attack");
     }

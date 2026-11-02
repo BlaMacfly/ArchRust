@@ -178,7 +178,7 @@ pub fn draw_party(ctx: &egui::Context, hud: &mut HudState, assets: &Assets, view
                     }
                 }
                 if let Some((c, r)) = rect_of(names[7]) {
-                    let label = c.display.as_deref().and_then(|d| d.strip_prefix("1:")).unwrap_or("Menu");
+                    let label = c.display.as_deref().and_then(|d| d.strip_prefix("1:")).unwrap_or("");
                     if button(ctx, ui, hud, assets, &painter, r, c, label, font, true, ("party-menu", frame.cid)).clicked() {
                         st.menu = if st.menu == Some(frame.cid) { None } else { Some(frame.cid) };
                     }

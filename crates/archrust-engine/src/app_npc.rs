@@ -15,6 +15,16 @@
 //! * Quêtes : celles du groupe du PNJ (`questgroup.ini`), texte de `questtemplate.ini` (le client
 //!   français n'en décrit qu'une soixantaine) ; journal par `L` ou `/quetes`.
 //! * Commandes : `/parler [nom]`, `/quetes`, `/prendrequete TID`, `/abandonner TID`.
+//! * Achats (boutique des Shrines, EP8) : comme Archonia (`NPCT_BuyItemDirect`, FUN_1407b9b90), tout achat passe
+//!   par `UI_SHRINEITEM_BUY_CONFIRM` (voir `hud_social.rs`) : quantité n = celle de l'objet de boutique (1 si
+//!   nulle) ou celle choisie (Maj + clic droit), prix de l'itemdatatable.txt du client en facteur PRICE — sous-type
+//!   5 charisme (`NPC Charisma Price`, col. 29), 6 Shrine Coins (`NPC Shrine Coin`, col. 35) — et or du serveur
+//!   avec la taxe de la région ; restes = charisme du personnage (facteur de statut 4), pièces portées (objets
+//!   d'`ItemType` 2 et de `Type` 6, piles de l'inventaire additionnées), or porté. « Acheter » vérifie le charisme
+//!   et les pièces avant l'envoi (mêmes boîtes que les refus 10 et 11 du serveur : `NPCTMSG_NotEnoughCharisma`,
+//!   `NPCTMSG_NotEnoughShrineCoin`) ; Archonia n'en contrôle aucun et laisse répondre le serveur. Les monnaies
+//!   d'Archonia (Archonium Coin, Siege Token, Bloodmark : col. 30, 33, 34, codes 12-14) ne sont pas reprises.
+//!   L'infobulle d'un objet de boutique reprend « Prix d'achat : » et ses prix non nuls (FUN_1405479c0).
 
 use super::App;
 use crate::assets::Assets;
@@ -46,12 +56,17 @@ const BANK_COLS: i16 = 4;
 #[derive(Debug, Clone, Default)]
 struct QuestText {
     name: String,
-    level: (Option<i32>, Option<i32>),
+    /// `Area`, ligne sous le nom.
+    area: String,
+    /// `Dialogue_Start`, sous « Informations de quete ».
     start: String,
-    progress: String,
-    finish: String,
-    summary: Vec<String>,
+    /// Objectifs : `Complete_SummaryN` et sa sorte `CountFactorN` (0 texte, 1 niveau, 2 argent, 4 et 5
+    /// monstres A et B…).
+    summary: Vec<(String, i32)>,
     monsters: Vec<(String, i32)>,
+    /// `Complete_Level`, `Complete_Money`.
+    complete_level: i32,
+    complete_money: i64,
     money: i64,
     exp: i64,
     gifts: Vec<(String, i32)>,
@@ -79,6 +94,14 @@ struct Shop {
 #[derive(Default)]
 pub struct NpcGlue {
     data: Option<NpcData>,
+    /// Lignes de `sysstr.txt` déjà lues (textes des quêtes, redessinés à chaque image).
+    sys_cache: HashMap<u32, String>,
+    /// Boîte d'information (`Action=4:0`) : quête reçue, terminée, journal plein.
+    info: Option<String>,
+    /// Abandon en attente de `QuestCancelDlg_Open` (TID).
+    abandon: Option<i32>,
+    /// Messages des événements d'interface (`[EventMap]`).
+    events: Option<HashMap<String, String>>,
     /// Fonctions de chaque PNJ vu.
     functions: HashMap<i32, Vec<NpcFunction>>,
     /// PNJ vers lequel le joueur marche pour lui parler.
@@ -103,6 +126,78 @@ pub struct NpcGlue {
     buy_bank: bool,
     /// Marchand d'objets choisi dans le dialogue : demande de la maison des ventes (voir `app_auction.rs`).
     pub auction_request: Option<i32>,
+    /// Achat en attente de `UI_SHRINEITEM_BUY_CONFIRM` : IID de l'objet de boutique et quantité.
+    confirm_buy: Option<(i32, i32)>,
+    /// Prix en charisme et en Shrine Coins, pièces (itemdatatable.txt), lus une fois.
+    shrine: Option<ShrinePrices>,
+}
+
+/// Colonnes de la boutique des Shrines d'itemdatatable.txt.
+#[derive(Debug, Default)]
+pub(super) struct ShrinePrices {
+    /// Prix unitaires par TID : (charisme, Shrine Coins), l'un au moins non nul.
+    pub prices: HashMap<i32, (i64, i64)>,
+    /// TID des Shrine Coins : `ItemType` 2 (Other), `Type` 6 (53000 « Arena Coin »).
+    pub coins: HashSet<i32>,
+}
+
+/// `ItemType` / `Type` des Shrine Coins (Archonia FUN_1401c4900).
+const COIN_ITEM_TYPE: i64 = 2;
+const COIN_TYPE: i64 = 6;
+/// Statut AgpmItem de l'inventaire (piles comptées pour les pièces).
+const STATUS_INVENTORY: i8 = 2;
+
+/// Lit les colonnes `NPC Charisma Price`, `NPC Shrine Coin`, `ItemType` et `Type` d'itemdatatable.txt.
+pub(super) fn parse_shrine_prices(text: &str) -> ShrinePrices {
+    let mut out = ShrinePrices::default();
+    let mut lines = text.lines();
+    let Some(header) = lines.next() else { return out };
+    let cols: Vec<&str> = header.split('\t').map(str::trim).collect();
+    let col = |name: &str| cols.iter().position(|c| c.eq_ignore_ascii_case(name));
+    let (tid, item_type, kind, charisma, coin) = (col("TID"), col("ItemType"), col("Type"), col("NPC Charisma Price"), col("NPC Shrine Coin"));
+    for line in lines {
+        let cells: Vec<&str> = line.split('\t').collect();
+        let num = |c: Option<usize>| c.and_then(|i| cells.get(i)).and_then(|v| v.trim().split(';').next()?.trim().parse::<f64>().ok()).unwrap_or(0.0) as i64;
+        let t = num(tid) as i32;
+        if t <= 0 {
+            continue;
+        }
+        let (c, p) = (num(charisma).max(0), num(coin).max(0));
+        if c > 0 || p > 0 {
+            out.prices.insert(t, (c, p));
+        }
+        if num(item_type) == COIN_ITEM_TYPE && num(kind) == COIN_TYPE {
+            out.coins.insert(t);
+        }
+    }
+    out
+}
+
+/// Shrine Coins portées : quantités des piles de l'inventaire.
+pub(super) fn shrine_coins(items: &HashMap<i32, ItemRecord>, coins: &HashSet<i32>) -> i64 {
+    items
+        .values()
+        .filter(|i| i.status == Some(STATUS_INVENTORY) && i.template_id.is_some_and(|t| coins.contains(&t)))
+        .map(|i| i64::from(i.count.unwrap_or(1).max(1)))
+        .sum()
+}
+
+/// Contenu d'`UI_SHRINEITEM_BUY_CONFIRM` (FUN_14067dc80 … FUN_14067e3b0) : prix × n ; restes = porté − prix × n,
+/// l'or avec la taxe dans le prix (`taxed_gold`, prix unitaire taxé) mais pas dans le reste.
+#[allow(clippy::too_many_arguments)]
+pub(super) fn shrine_buy_view(name: String, tid: i32, n: i64, unit_gold: i64, taxed_gold: i64, unit: (i64, i64), charisma: i64, coins: i64, money: i64) -> crate::hud::ShrineBuyView {
+    let n = n.max(1);
+    crate::hud::ShrineBuyView {
+        name,
+        tid,
+        count: n,
+        charisma_price: unit.0 * n,
+        charisma_rest: charisma - unit.0 * n,
+        coin_price: unit.1 * n,
+        coin_rest: coins - unit.1 * n,
+        gold_price: taxed_gold * n,
+        gold_rest: money - unit_gold * n,
+    }
 }
 
 /// Ce que les fenêtres dessinent, préparé avant la passe egui.
@@ -242,16 +337,16 @@ fn load_data(assets: &Assets) -> NpcData {
             let num = |name: &str| get(name).and_then(|s| s.parse::<i64>().ok());
             let Some(tid) = num("Tid") else { continue };
             let mut q = QuestText {
-                name: get("QuestName").unwrap_or_else(|| format!("Quête n° {tid}")),
-                level: (num("Need_Level_Min").map(|v| v as i32), num("Need_Level_Max").map(|v| v as i32)),
+                name: get("QuestName").unwrap_or_default(),
+                area: get("Area").unwrap_or_default(),
                 start: get("Dialogue_Start").unwrap_or_default(),
-                progress: get("Dialogue_Progress").unwrap_or_default(),
-                finish: get("Dialogue_Finish").unwrap_or_default(),
+                complete_level: num("Complete_Level").unwrap_or(0) as i32,
+                complete_money: num("Complete_Money").unwrap_or(0),
                 money: num("Gift_Money").unwrap_or(0),
                 exp: num("Gift_Exp").unwrap_or(0),
                 ..Default::default()
             };
-            q.summary = (1..=5).filter_map(|i| get(&format!("Complete_Summary{i}"))).collect();
+            q.summary = (1..=5).filter_map(|i| get(&format!("Complete_Summary{i}")).map(|s| (s, num(&format!("CountFactor{i}")).unwrap_or(0) as i32))).collect();
             for m in ["A", "B"] {
                 if let (Some(name), Some(n)) = (get(&format!("Complete_Monster{m}_Name")), num(&format!("Complete_Monster{m}_Count"))) {
                     q.monsters.push((name, n as i32));
@@ -297,7 +392,12 @@ impl NpcGlue {
         self.sell = None;
         self.money = None;
         self.buy_bank = false;
+        self.confirm_buy = None;
         open
+    }
+
+    fn shrine(&mut self, assets: &Assets) -> &ShrinePrices {
+        self.shrine.get_or_insert_with(|| parse_shrine_prices(&client_text_in(assets, "ini", "itemdatatable.txt")))
     }
 
     fn data(&mut self, assets: &Assets) -> &NpcData {
@@ -305,7 +405,7 @@ impl NpcGlue {
     }
 
     fn quest_name(&mut self, assets: &Assets, tid: i32) -> String {
-        self.data(assets).quests.get(&tid).map(|q| q.name.clone()).unwrap_or_else(|| format!("Quête n° {tid}"))
+        self.data(assets).quests.get(&tid).map(|q| q.name.clone()).unwrap_or_default()
     }
 
     fn state(&self, tid: i32) -> QuestState {
@@ -317,53 +417,52 @@ impl NpcGlue {
         }
     }
 
-    /// Texte d'une quête : niveaux, dialogue selon l'état, objectifs et progression, récompenses.
-    fn quest_text(&mut self, assets: &Assets, tid: i32) -> String {
-        let state = self.state(tid);
+    /// Texte d'une quête comme `QuestMainText_Display2` (FUN_140658ae0) : nom entre guillemets et `Area`,
+    /// « Objectifs de quete » (sysstr 442) et les objectifs (FUN_140658620), « Recompense de quete » (443),
+    /// argent (« %d %s », sysstr 10), expérience (« %s %d », sysstr 5), objets, puis « Informations de
+    /// quete » (441) et `Dialogue_Start`. Codes de couleur d'Archonia (`<H…>`) gardés. Choix d'ArchRust :
+    /// les objets donnés (`<ITEM::…>` dans Archonia, icônes) sont écrits « nom (nombre) » comme la ligne
+    /// « %s (%d) » de la même fonction ; les objectifs d'objets (sortes 3 et 11) sans le compte du sac.
+    /// Ligne de `sysstr.txt`, gardée après la première lecture.
+    fn sys(&mut self, assets: &Assets, id: u32) -> String {
+        self.sys_cache.entry(id).or_insert_with(|| sysstr(assets, id).unwrap_or_default()).clone()
+    }
+
+    fn quest_text(&mut self, assets: &Assets, tid: i32, level: i32, money: i64) -> String {
         let progress = self.journal.get(&tid).copied();
-        let Some(q) = self.data(assets).quests.get(&tid).cloned() else {
-            let mut t = format!("Quête n° {tid}\n\nLe client ne décrit pas cette quête (le client français n'en connaît qu'une soixantaine).");
-            if let Some(p) = progress {
-                t.push_str(&format!("\n\nProgression : {} et {} monstre(s){}", p.monster_a, p.monster_b, if p.done { " — objectifs remplis" } else { "" }));
-            }
-            return t;
-        };
-        let mut t = q.name.clone();
-        match q.level {
-            (Some(a), Some(b)) => t.push_str(&format!("\nNiveau {a} à {b}")),
-            (Some(a), None) => t.push_str(&format!("\nNiveau {a} et plus")),
-            _ => {}
-        }
-        let talk = match state {
-            QuestState::Ready => &q.finish,
-            QuestState::InProgress => &q.progress,
-            _ => &q.start,
-        };
-        if !talk.is_empty() {
-            t.push_str(&format!("\n\n{talk}"));
-        }
-        if !q.summary.is_empty() {
-            t.push_str("\n\nObjectifs :");
-            for s in &q.summary {
-                t.push_str(&format!("\n{s}"));
+        let Some(q) = self.data(assets).quests.get(&tid).cloned() else { return String::new() };
+        let texts: HashMap<u32, String> = [442, 443, 441, 10, 5].into_iter().map(|id| (id, self.sys(assets, id))).collect();
+        let s = |id: u32| texts.get(&id).cloned().unwrap_or_default();
+        const WHITE: &str = "<HFFFFFFFF>";
+        const HEAD: &str = "<HFF8DCAE0>";
+        const DONE: &str = "<HFF5EFF00>";
+        let mut t = format!("\n<HFFB6FF38>\"{}\"{WHITE}\n{}\n\n", q.name, q.area);
+        t.push_str(&format!("{HEAD}{}{WHITE}\n", s(442)));
+        for (line, kind) in &q.summary {
+            let state = |met: bool| if met { DONE } else { WHITE };
+            match kind {
+                1 => t.push_str(&format!("{}{line}\n{WHITE}", state(level >= q.complete_level))),
+                2 => t.push_str(&format!("{}{line}\n{WHITE}", state(money >= q.complete_money))),
+                4 | 5 => {
+                    let i = (*kind - 4) as usize;
+                    let need = q.monsters.get(i).map_or(0, |m| m.1);
+                    let have = progress.map_or(0, |p| if i == 0 { p.monster_a } else { p.monster_b });
+                    t.push_str(&format!("{}{line}({have}/{need})\n{WHITE}", state(have >= need)));
+                }
+                _ => t.push_str(&format!("{line}\n")),
             }
         }
-        if let Some(p) = progress {
-            for (i, (name, n)) in q.monsters.iter().enumerate() {
-                let have = if i == 0 { p.monster_a } else { p.monster_b };
-                t.push_str(&format!("\n• {name} : {}/{n}", have.min(*n)));
-            }
+        t.push_str(&format!("\n{HEAD}{}{WHITE}\n", s(443)));
+        if q.money != 0 {
+            t.push_str(&format!("{} {}\n", q.money, s(10)));
         }
-        let mut gifts: Vec<String> = q.gifts.iter().map(|(n, c)| if *c > 1 { format!("{n} × {c}") } else { n.clone() }).collect();
-        if q.money > 0 {
-            gifts.push(format!("{} pièce(s) d'or", q.money));
+        if q.exp != 0 {
+            t.push_str(&format!("{} {}\n", s(5), q.exp));
         }
-        if q.exp > 0 {
-            gifts.push(format!("{} point(s) d'expérience", q.exp));
+        for (name, count) in &q.gifts {
+            t.push_str(&format!("{name} ({count})\n"));
         }
-        if !gifts.is_empty() {
-            t.push_str(&format!("\n\nRécompenses : {}", gifts.join(", ")));
-        }
+        t.push_str(&format!("\n{HEAD}{}{WHITE}\n{}\n", s(441), q.start));
         t
     }
 
@@ -498,16 +597,35 @@ fn next_bank_price(glue: &mut NpcGlue, hud: &HudState, assets: &Assets) -> Optio
 
 /// « Acheter » d'`UI_BuyBank` (`Item_BuyBankSlot`, FUN_1406f6c80) : l'or porté est vérifié avant
 /// l'envoi (sinon `Bank_NotEnoughBuyCost`).
-fn confirm_buy_bank(glue: &mut NpcGlue, hud: &mut HudState, assets: &Assets, net: Option<&NetLink>, ui: &mut UiState) {
+fn confirm_buy_bank(glue: &mut NpcGlue, hud: &mut HudState, assets: &Assets, net: Option<&NetLink>, _ui: &mut UiState) {
     glue.buy_bank = false;
     let Some(price) = next_bank_price(glue, hud, assets) else { return };
     if hud.stats.money.unwrap_or(0) < price {
         let text = super::portal_glue::ui_event_text(assets, "Bank_NotEnoughBuyCost");
         hud.push_system(&text);
-        ui.push_chat(format!("[banque] {text}"));
     } else {
         send(net, NpcCommand::BuyBankSlot);
     }
+}
+
+/// Infobulle d'un objet de boutique : nom (et quantité), puis « Prix d'achat : » suivi des prix non nuls de la
+/// pile, un par ligne (FUN_1405479c0 : « %s : », puis « %lld %s » avec `Money_Name`, `Shrine_Coin`,
+/// `Charisma_Point`). `labels` : `Buy_Price`, `Money_Name`, `Shrine_Coin`, `Charisma_Point`.
+pub(super) fn shop_tip(name: &str, count: i32, gold: i64, coin: i64, charisma: i64, labels: &[String; 4]) -> Vec<(String, egui::Color32)> {
+    let n = i64::from(count.max(1));
+    let title = if count > 1 { format!("{name} ({count})") } else { name.to_string() };
+    let mut lines = vec![(title, egui::Color32::WHITE)];
+    let values: Vec<String> = [(gold, &labels[1]), (coin, &labels[2]), (charisma, &labels[3])]
+        .into_iter()
+        .filter(|(v, _)| *v != 0)
+        .map(|(v, l)| format!("{} {l}", v * n))
+        .collect();
+    let head = format!("{} : ", labels[0]);
+    let indent = " ".repeat(head.chars().count() + 2);
+    for (i, v) in values.into_iter().enumerate() {
+        lines.push((if i == 0 { format!("{head}{v}") } else { format!("{indent}{v}") }, egui::Color32::WHITE));
+    }
+    lines
 }
 
 fn send(net: Option<&NetLink>, cmd: NpcCommand) {
@@ -536,7 +654,17 @@ pub fn panel(
     }
     if let Some(shop) = glue.shop.as_mut() {
         // Prix d'achat affiché avec la taxe de la région du joueur (« Buy_Price », `FUN_1405479c0`, voir `app_tax.rs`).
-        let items: Vec<ShopEntry> = shop.items.iter().map(|e| ShopEntry { iid: e.iid, tid: e.tid, price: super::tax_glue::taxed(e.price), count: e.count, grid: e.grid, name: e.name.clone() }).collect();
+        let labels = ["Buy_Price", "Money_Name", "Shrine_Coin", "Charisma_Point"].map(|k| crate::hud::ui_message(hud, assets, k));
+        let prices = &glue.shrine.get_or_insert_with(|| parse_shrine_prices(&client_text_in(assets, "ini", "itemdatatable.txt"))).prices;
+        let items: Vec<ShopEntry> = shop
+            .items
+            .iter()
+            .map(|e| {
+                let price = super::tax_glue::taxed(e.price);
+                let (charisma, coin) = prices.get(&e.tid).copied().unwrap_or((0, 0));
+                ShopEntry { iid: e.iid, tid: e.tid, price, count: e.count, grid: e.grid, name: e.name.clone(), tip: shop_tip(&e.name, e.count, price, coin, charisma, &labels) }
+            })
+            .collect();
         let view = ShopView { npc_name: &views.shop_name, items: &items, loading: shop.loading, first_row: &mut shop.first_row };
         crate::hud::draw_shop(ctx, hud, assets, view, &mut out);
     }
@@ -571,8 +699,26 @@ pub fn panel(
         }
     }
     if let Some((journal, title, entries, text)) = &views.quests {
-        let view = QuestView { journal: *journal, title: title.clone(), entries, selected: glue.selected_quest, text: text.clone() };
+        let available = glue.selected_quest.is_some_and(|t| glue.state(t) == QuestState::Available);
+        let left_label = glue.sys(assets, if available { 432 } else { 431 });
+        let view = QuestView { journal: *journal, title: title.clone(), entries, selected: glue.selected_quest, text: text.clone(), left_label };
         crate::hud::draw_quests(ctx, hud, assets, view, &mut out);
+    }
+    // Abandon : `QuestCancelDlg_Open` (« {{QuestMainCancel…}} » : sysstr 435 avec le nom, FUN_140655d60).
+    if let Some(tid) = glue.abandon {
+        let name = glue.quest_name(assets, tid);
+        let text = glue.sys(assets, 435).replacen("%s", &name, 1);
+        if let Some(yes) = crate::hud::confirm_box(ctx, hud, assets, ("quest-cancel", tid), &text) {
+            glue.abandon = None;
+            if yes {
+                send(net, NpcCommand::QuestAbandon(tid));
+            }
+        }
+    }
+    if let Some(text) = glue.info.clone() {
+        if crate::hud::info_box(ctx, hud, assets, &text) {
+            glue.info = None;
+        }
     }
 
     // Demandes du sac pendant qu'une boutique ou la banque est ouverte.
@@ -584,7 +730,7 @@ pub fn panel(
         ItemUi::Activate { iid, worn: false } if glue.bank.is_some() => {
             match free_bank_cell(items, glue.bank_page, pages) {
                 Some(grid) => send(net, NpcCommand::BankStore { iid, grid }),
-                None => ui.push_chat("[banque] La banque est pleine."),
+                None => log::debug!("banque : aucune case libre sur la page {}", glue.bank_page),
             }
             false
         }
@@ -605,9 +751,10 @@ pub fn panel(
             }
             NpcUi::CloseShop => glue.shop = None,
             NpcUi::Buy { iid, ask_count: true } => glue.buy = Some((iid, 1)),
+            // `NPCT_BuyItemDirect` : `Shrine_ItemBuyConfirmOpen_Event`, n = quantité de l'objet de boutique.
             NpcUi::Buy { iid, ask_count: false } => {
-                if let Some(s) = &glue.shop {
-                    send(net, NpcCommand::Buy { npc: s.npc, iid, count: 1 });
+                if let Some(e) = glue.shop.as_ref().and_then(|s| s.items.iter().find(|e| e.iid == iid)) {
+                    glue.confirm_buy = Some((iid, e.count.max(1)));
                 }
             }
             NpcUi::Sell(iid) => glue.sell = Some(iid),
@@ -621,9 +768,14 @@ pub fn panel(
                 glue.show_journal = false;
             }
             NpcUi::SelectQuest(tid) => glue.selected_quest = Some(tid),
+            // Journal plein (60 quêtes) : `QuestFull_Message` au lieu de la demande (FUN_140655180).
+            NpcUi::QuestAccept(tid) if glue.journal.len() >= 60 => {
+                log::info!("quête {tid} : journal plein");
+                glue.info = Some(super::portal_glue::ui_event_cached(&mut glue.events, assets, "QuestFull_Message")).filter(|t| !t.is_empty());
+            }
             NpcUi::QuestAccept(tid) => send(net, NpcCommand::QuestAccept { npc: glue.quest_npc, tid }),
             NpcUi::QuestComplete(tid) => send(net, NpcCommand::QuestComplete { npc: glue.quest_npc, tid, reward: 0 }),
-            NpcUi::QuestAbandon(tid) => send(net, NpcCommand::QuestAbandon(tid)),
+            NpcUi::QuestAbandon(tid) => glue.abandon = Some(tid),
         }
     }
 
@@ -636,8 +788,8 @@ pub fn panel(
         count = n.clamp(1, 99) as _;
         glue.buy = Some((iid, count));
         match (answer, &glue.shop) {
-            (Some(true), Some(s)) => {
-                send(net, NpcCommand::Buy { npc: s.npc, iid, count });
+            (Some(true), Some(_)) => {
+                glue.confirm_buy = Some((iid, count));
                 glue.buy = None;
             }
             (Some(_), _) | (None, None) => glue.buy = None,
@@ -645,11 +797,47 @@ pub fn panel(
         }
     }
 
+    // Confirmation de l'achat (`UI_SHRINEITEM_BUY_CONFIRM`).
+    if let Some((iid, count)) = glue.confirm_buy {
+        let entry = glue.shop.as_ref().and_then(|s| s.items.iter().find(|e| e.iid == iid).map(|e| (s.npc, e.tid, e.name.clone(), e.price)));
+        match entry {
+            None => glue.confirm_buy = None,
+            Some((npc, tid, name, unit_gold)) => {
+                let shrine = glue.shrine(assets);
+                let unit = shrine.prices.get(&tid).copied().unwrap_or((0, 0));
+                let coins = shrine_coins(items, &shrine.coins);
+                let charisma = hud.stats.factors.get(&(archrust_netclient::world::factor_part::STATUS, 4)).copied();
+                let money = hud.stats.money.unwrap_or(0);
+                let view = shrine_buy_view(name, tid, i64::from(count), unit_gold, super::tax_glue::taxed(unit_gold), unit, charisma.map_or(0, i64::from), coins, money);
+                let mut answer = Vec::new();
+                crate::hud::draw_shrine_buy_confirm(ctx, hud, assets, &view, &mut answer);
+                for a in answer {
+                    glue.confirm_buy = None;
+                    if a != crate::hud::ShrineBuyUi::Buy {
+                        continue;
+                    }
+                    // Charisme inconnu (facteur pas encore reçu) : le serveur tranche.
+                    let refused = if charisma.is_some() && view.charisma_rest < 0 {
+                        Some("NPCTMSG_NotEnoughCharisma")
+                    } else if view.coin_rest < 0 {
+                        Some("NPCTMSG_NotEnoughShrineCoin")
+                    } else {
+                        None
+                    };
+                    match refused {
+                        Some(key) => glue.info = Some(super::portal_glue::ui_event_cached(&mut glue.events, assets, key)).filter(|t| !t.is_empty()),
+                        None => send(net, NpcCommand::Buy { npc, iid, count }),
+                    }
+                }
+            }
+        }
+    }
+
     // Vente, après accord.
     if let Some(iid) = glue.sell {
         let name = items.get(&iid).and_then(|i| i.template_id).and_then(|t| item_name_for_tid(assets, t));
         // Message de l'[EventMap] d'Archonia (`Action=4:1:-1:`), suivi du nom de l'objet.
-        let text = format!("Do you wish to sell this item?___[{}]", name.as_deref().unwrap_or("?"));
+        let text = format!("{}___[{}]", super::portal_glue::ui_event_cached(&mut glue.events, assets, "NPCTMSG_ConfirmSell"), name.as_deref().unwrap_or_default());
         let answer = crate::hud::confirm_box(ctx, hud, assets, ("sell", iid), &text);
         match (answer, &glue.shop) {
             (Some(true), Some(s)) => {
@@ -701,7 +889,6 @@ impl App {
         };
         if let Some(text) = sysstr(&self.assets, id) {
             self.hud.push_system(&text);
-            self.ui.push_chat(format!("[banque] {text}"));
         }
     }
 
@@ -799,9 +986,9 @@ impl App {
             }
             NpcEvent::ShopItem { npc, iid, tid, price, count, grid } => {
                 if let Some(s) = self.npc.shop.as_mut().filter(|s| s.npc == npc) {
-                    let name = item_name_for_tid(&assets, tid).unwrap_or_else(|| format!("Objet TID {tid}"));
+                    let name = item_name_for_tid(&assets, tid).unwrap_or_default();
                     s.items.retain(|e| e.iid != iid);
-                    s.items.push(ShopEntry { iid, tid, price, count, grid, name });
+                    s.items.push(ShopEntry { iid, tid, price, count, grid, name, tip: Vec::new() });
                 }
             }
             // La fin de liste ne désigne pas toujours le PNJ (champ 0 absent) : boutique ouverte.
@@ -810,17 +997,25 @@ impl App {
                     s.loading = false;
                 }
             }
-            NpcEvent::Bought { result } => self.ui.push_chat(match result {
-                trade_result::BUY_OK => "[boutique] Achat effectué.".to_string(),
-                trade_result::NOT_ENOUGH_MONEY => "[boutique] Vous n'avez pas assez d'or.".to_string(),
-                trade_result::INVENTORY_FULL => "[boutique] Votre inventaire est plein.".to_string(),
-                r => format!("[boutique] Achat refusé (code {r})."),
-            }),
-            NpcEvent::Sold { result } => self.ui.push_chat(match result {
-                trade_result::SELL_OK => "[boutique] Objet vendu.".to_string(),
-                trade_result::TOO_MUCH_MONEY => "[boutique] Vous avez déjà trop d'or.".to_string(),
-                r => format!("[boutique] Vente refusée (code {r})."),
-            }),
+            // Inventaire plein : boîte `NPCTMSG_InvenFull` de l'[EventMap] ; Archonia n'affiche rien d'autre
+            // (les refus d'or arrivent en message système du serveur).
+            NpcEvent::Bought { result } => {
+                log::info!("boutique : achat, résultat {result}");
+                if result == trade_result::INVENTORY_FULL {
+                    let text = super::portal_glue::ui_event_cached(&mut self.npc.events, &assets, "NPCTMSG_InvenFull");
+                    self.hud.push_system(&text);
+                }
+                // Boutique des Shrines : boîtes `Action=4:0` de l'[EventMap] (rappels 10 et 11 d'AgcmEventNPCTrade).
+                let key = match result {
+                    trade_result::NOT_ENOUGH_CHARISMA => Some("NPCTMSG_NotEnoughCharisma"),
+                    trade_result::NOT_ENOUGH_SHRINE_COIN => Some("NPCTMSG_NotEnoughShrineCoin"),
+                    _ => None,
+                };
+                if let Some(key) = key {
+                    self.npc.info = Some(super::portal_glue::ui_event_cached(&mut self.npc.events, &assets, key)).filter(|t| !t.is_empty());
+                }
+            }
+            NpcEvent::Sold { result } => log::info!("boutique : vente, résultat {result}"),
             NpcEvent::BankOpened { npc } => {
                 self.npc.bank = Some(npc);
                 self.ui.show_inventory = true;
@@ -830,43 +1025,36 @@ impl App {
                 self.npc.show_journal = false;
                 self.npc.selected_quest = None;
             }
+            // Boîtes `QuestStart_Message` (sysstr 436, FUN_140656240) et `QuestComplete_Message` (sysstr 437,
+            // FUN_140655ce0) avec le nom de la quête ; les refus et l'abandon n'affichent rien.
             NpcEvent::QuestResult { op, tid, success } => {
                 let name = self.npc.quest_name(&assets, tid);
-                let text = match (op, success) {
+                log::info!("quête {tid} : op {op}, réussite {success}");
+                let id = match (op, success) {
                     (1, true) => {
                         self.npc.journal.entry(tid).or_insert(QuestProgress { tid, monster_a: 0, monster_b: 0, done: false });
-                        format!("Quête « {name} » acceptée.")
+                        Some(436)
                     }
-                    (1, false) => format!("Quête « {name} » refusée (niveau, race, classe, quête précédente, journal plein ou déjà faite)."),
                     (3, true) => {
                         self.npc.journal.remove(&tid);
                         self.npc.done.insert(tid as u32);
-                        format!("Quête « {name} » terminée !")
+                        Some(437)
                     }
-                    (3, false) => format!("Quête « {name} » : objectifs pas encore remplis."),
                     (7, true) => {
                         self.npc.journal.remove(&tid);
-                        format!("Quête « {name} » abandonnée.")
+                        None
                     }
-                    _ => format!("Quête « {name} » : demande refusée."),
+                    _ => None,
                 };
-                self.ui.push_chat(format!("[quête] {text}"));
+                if let Some(id) = id {
+                    self.npc.info = Some(self.npc.sys(&assets, id).replacen("%s", &name, 1)).filter(|t| !t.is_empty());
+                }
             }
             NpcEvent::QuestJournal { progress, update } => {
                 let before = self.npc.journal.insert(progress.tid, progress);
+                // Progression : Archonia la montre dans le texte de la quête, rien dans la discussion.
                 if update && before != Some(progress) {
-                    let name = self.npc.quest_name(&assets, progress.tid);
-                    let mut parts = Vec::new();
-                    if let Some(q) = self.npc.data(&assets).quests.get(&progress.tid) {
-                        for (i, (m, n)) in q.monsters.iter().enumerate() {
-                            parts.push(format!("{m} {}/{n}", if i == 0 { progress.monster_a } else { progress.monster_b }.min(*n)));
-                        }
-                    }
-                    if parts.is_empty() {
-                        parts.push(format!("{} / {}", progress.monster_a, progress.monster_b));
-                    }
-                    let done = if progress.done { " — objectifs remplis !" } else { "" };
-                    self.ui.push_chat(format!("[quête] {name} : {}{done}", parts.join(", ")));
+                    log::debug!("quête {} : {} / {}, remplie {}", progress.tid, progress.monster_a, progress.monster_b, progress.done);
                 }
             }
             NpcEvent::QuestsDone(list) => self.npc.done = list.into_iter().collect(),
@@ -882,7 +1070,7 @@ impl App {
             let line = self.npc.line;
             let text = template
                 .and_then(|t| self.npc.data(&assets).dialogs.get(&t).filter(|l| !l.is_empty()).map(|l| l[line % l.len()].clone()))
-                .unwrap_or_else(|| "Bonjour, voyageur.".into());
+                .unwrap_or_default();
             // Libellés d'Archonia (FUN_1406ca6a0) : chaîne `sysstr` de la fonction, « Quitter »
             // (`StaticText_Exit`) pour finir.
             let mut buttons = Vec::new();
@@ -927,7 +1115,7 @@ impl App {
                 .items
                 .values()
                 .filter(|i| i.status == Some(STATUS_BANK))
-                .map(|i| (i.clone(), i.template_id.and_then(|t| item_name_for_tid(&assets, t)).unwrap_or_else(|| "Objet".into())))
+                .map(|i| (i.clone(), i.template_id.and_then(|t| item_name_for_tid(&assets, t)).unwrap_or_default()))
                 .collect();
         }
         let journal = self.npc.show_journal && self.npc.quest_npc.is_none();
@@ -937,21 +1125,20 @@ impl App {
             let mut tids: Vec<i32> = give.iter().copied().filter(|t| !self.npc.done.contains(&(*t as u32))).collect();
             tids.extend(confirm.iter().copied().filter(|t| self.npc.journal.contains_key(t) && !give.contains(t)));
             let entries = self.quest_entries(&tids);
-            let title = format!("Quêtes — {}", self.npc_name(npc));
-            v.quests = Some((false, title, entries, String::new()));
+            // Titre : texte fixe de la fenêtre (`CONTROL_16487`), le nom du PNJ reste pour les journaux.
+            v.quests = Some((false, self.npc_name(npc), entries, String::new()));
         } else if journal {
             let tids: Vec<i32> = self.npc.journal.keys().copied().collect();
             let entries = self.quest_entries(&tids);
-            v.quests = Some((true, format!("Journal des quêtes ({}/60)", tids.len()), entries, String::new()));
+            v.quests = Some((true, String::new(), entries, String::new()));
         }
         if let Some(q) = v.quests.as_mut() {
             if self.npc.selected_quest.is_none_or(|t| !q.2.iter().any(|e| e.tid == t)) {
                 self.npc.selected_quest = q.2.first().map(|e| e.tid);
             }
             q.3 = match self.npc.selected_quest {
-                Some(t) => self.npc.quest_text(&assets, t),
-                None if q.0 => "Aucune quête en cours.".into(),
-                None => "Ce personnage n'a pas de quête à vous proposer.".into(),
+                Some(t) => self.npc.quest_text(&assets, t, self.hud.stats.level.unwrap_or(0), self.hud.stats.money.unwrap_or(0)),
+                None => String::new(),
             };
         }
         v
@@ -1061,6 +1248,37 @@ mod tests {
         items.insert(1, ItemRecord { operation: 0, id: 1, template_id: Some(1), owner_cid: None, count: Some(1), status: Some(STATUS_BANK), grid: Some([0, 0, 0]) });
         assert_eq!(free_bank_cell(&items, 0, 1), Some([0, 0, 1]));
         assert_eq!(free_bank_cell(&items, 1, 2), Some([1, 0, 0]));
+    }
+
+    #[test]
+    fn boutique_des_shrines() {
+        let text = "TID\tItemName\tItemType\tType\tNPC Price\tNPC Charisma Price\tNPC Shrine2 Coin\tNPC Shrine Coin\n\
+                    1836\tLetter of Great Pardon\t1\t0\t\t\t\t75\n\
+                    50139\tElixir\t1\t0\t\t2000\t\t\n\
+                    15213\tKaligo\t0\t0\t\t160000\t80\t\n\
+                    53000\tArena Coin\t2\t6\t\t\t\t\n\
+                    190\tPotion\t1\t1\t25\t\t\t\n";
+        let p = parse_shrine_prices(text);
+        assert_eq!(p.prices.get(&1836), Some(&(0, 75)));
+        assert_eq!(p.prices.get(&50139), Some(&(2000, 0)));
+        // Prix Bloodmark (col. 30, Archonia) ignoré : seul le charisme reste.
+        assert_eq!(p.prices.get(&15213), Some(&(160000, 0)));
+        assert!(!p.prices.contains_key(&190));
+        assert_eq!(p.coins, HashSet::from([53000]));
+        let mut items = HashMap::new();
+        for (id, count, status) in [(1, 60, STATUS_INVENTORY), (2, 30, STATUS_INVENTORY), (3, 99, STATUS_BANK)] {
+            items.insert(id, ItemRecord { operation: 0, id, template_id: Some(53000), owner_cid: None, count: Some(count), status: Some(status), grid: Some([0, 0, id as i16]) });
+        }
+        assert_eq!(shrine_coins(&items, &p.coins), 90);
+        // Deux lettres : 150 pièces pour 90 portées ; or taxé dans le prix, pas dans le reste.
+        let v = shrine_buy_view("Lettre".into(), 1836, 2, 100, 110, (0, 75), 500, 90, 1000);
+        assert_eq!((v.coin_price, v.coin_rest, v.charisma_price, v.charisma_rest), (150, -60, 0, 500));
+        assert_eq!((v.gold_price, v.gold_rest), (220, 800));
+        let labels = ["Prix d'achat".to_string(), "Or".to_string(), "Pieces d'arene".to_string(), "Points de charisme".to_string()];
+        let tip: Vec<String> = shop_tip("Lettre", 1, 0, 75, 2000, &labels).into_iter().map(|(t, _)| t).collect();
+        assert_eq!(tip[0], "Lettre");
+        assert_eq!(tip[1], "Prix d'achat : 75 Pieces d'arene");
+        assert!(tip[2].ends_with("2000 Points de charisme") && tip[2].starts_with(' '));
     }
 
     #[test]

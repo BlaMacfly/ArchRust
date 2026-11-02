@@ -5,6 +5,7 @@
 //! ```text
 //! vue optimisée op 2, champ 8 : paquets AGPMSKILL op 0 complets mis bout à bout (compétences connues)
 //! AGPMSKILL op 0 (1 identifiant, 2 propriétaire, 3 facteurs : « dirt » indice 4 = niveau, 4 TID)
+//! AGPMSKILL op 1 (1 identifiant) : compétence retirée (oubli des compétences, voir `consumables`)
 //! AGPMSKILL op 2 (1 identifiant, 3 facteurs) : nouveau niveau
 //! AGPMCHARACTER op 1, champ 7 : facteurs du joueur, « dirt » indice 5 = points de compétence
 //! 0x3B op 4 (1 EVENT_BASE, 2 CID)            → op 5 : fenêtre de l'instructeur
@@ -25,6 +26,8 @@ use archrust_protocol::schema::{main, mini, packet_type, Schema};
 /// Opérations d'AGPMSKILL.
 pub mod op {
     pub const ADD: i64 = 0;
+    /// Compétence retirée (1 identifiant ; `FUN_1402f5b70` cas 1 → `FUN_1402f8d20`), après un oubli par exemple.
+    pub const REMOVE: i64 = 1;
     pub const UPDATE: i64 = 2;
     /// Données attachées du personnage (champ 9 seul ; FUN_1402f5b70 n'a pas de cas 3).
     pub const ATTACH: i64 = 3;
@@ -73,6 +76,8 @@ pub mod upgrade_result {
 /// Indices du sous-paquet « dirt » des facteurs : niveau d'une compétence, points du personnage.
 const DIRT_SKILL_LEVEL: usize = 4;
 pub const DIRT_SKILL_POINT: usize = 5;
+/// Points héroïques restants du personnage (fenêtres `UI_HeroicSkill`…).
+pub const DIRT_HEROIC_POINT: usize = 7;
 /// Expérience cumulée d'une compétence de production (SKILL_EXP, lue par Archonia `FUN_1402a8540`).
 const DIRT_SKILL_EXP: usize = 6;
 /// Sous-paquet « dirt » d'AGPMCHAR_FACTORS.
@@ -190,6 +195,8 @@ pub enum SkillEvent {
     /// Compétence connue (entrée en jeu ou apprise) : identifiant, TID, niveau, expérience de production
     /// cumulée (« dirt » indice 6) si le serveur l'envoie.
     Known { owner: i32, id: i32, tid: i32, level: i32, exp: Option<i32> },
+    /// Compétence retirée (AGPMSKILL op 1).
+    Removed { id: i32 },
     /// Niveau d'une compétence changé (et son expérience de production, si elle est jointe).
     Level { id: i32, level: i32, exp: Option<i32> },
     /// Expérience de production seule changée (AGPMSKILL op 2 sans niveau).
@@ -240,6 +247,7 @@ pub fn translate(t: u8, values: &[Option<Value>]) -> Option<WorldEvent> {
                 level: bytes(values, 3).and_then(|f| factors_dirt(f, DIRT_SKILL_LEVEL)).unwrap_or(1),
                 exp: bytes(values, 3).and_then(|f| factors_dirt(f, DIRT_SKILL_EXP)),
             })),
+            op::REMOVE => Some(WorldEvent::Skill(SkillEvent::Removed { id: int(values, 1)? as i32 })),
             op::UPDATE => {
                 let id = int(values, 1)? as i32;
                 let exp = bytes(values, 3).and_then(|f| factors_dirt(f, DIRT_SKILL_EXP));
@@ -350,6 +358,9 @@ mod tests {
         let p = build_packet(k, &sparse(k, &[(0, Value::I8(0)), (1, Value::I32(9)), (2, base(42)), (3, f), (4, Value::I32(663))])).unwrap();
         let evs = decode_skill_block(&p);
         assert!(matches!(evs.as_slice(), [WorldEvent::Skill(SkillEvent::Known { owner: 42, id: 9, tid: 663, level: 3, exp: Some(960) })]));
+        // Retrait (op 1) : identifiant seul.
+        let p = decode_packet(k, &build_packet(k, &sparse(k, &[(0, Value::I8(1)), (1, Value::I32(9)), (2, base(42))])).unwrap()).unwrap();
+        assert!(matches!(translate(packet_type::SKILL, &p.values), Some(WorldEvent::Skill(SkillEvent::Removed { id: 9 }))));
 
         let (s, v) = command_packet(&SkillCommand::Cast { id: 2, target: 77, forced: false }, 42);
         assert_eq!(s.id, packet_type::SKILL);
@@ -361,6 +372,19 @@ mod tests {
         assert_eq!((int(&v, 0), int(&v, 1), base_cid(bytes(&v, 2)), int(&a, 0), base_cid(bytes(&a, 1))), (Some(7), Some(5), Some(42), Some(4), Some(42)));
         let (s, v) = command_packet(&SkillCommand::Learn { npc: 9, tid: 57 }, 42);
         assert_eq!((s.id, int(&v, 0), int(&v, 4)), (0x3b, Some(1), Some(57)));
+        // Arbres de maîtrise : apprendre par TID (op 1), améliorer par identifiant (op 2, champ 3).
+        let (s, v) = command_packet(&SkillCommand::Upgrade { npc: 9, id: 12 }, 42);
+        assert_eq!((s.id, int(&v, 0), int(&v, 3), int(&v, 2)), (0x3b, Some(2), Some(12), Some(42)));
+    }
+
+    #[test]
+    fn points_heroiques() {
+        // « dirt » indice 5 : points de compétence ; indice 7 : points héroïques (fenêtres héroïques).
+        let d = mini::FACTOR_DIRT;
+        let dirt = build_mini(d, &sparse(d, &[(5, Value::I32(12)), (7, Value::I32(41))])).unwrap();
+        let cf = mini::CHAR_FACTORS;
+        let f = build_mini(cf, &sparse(cf, &[(11, Value::Packet(dirt))])).unwrap();
+        assert_eq!((factors_dirt(&f, DIRT_SKILL_POINT), factors_dirt(&f, DIRT_HEROIC_POINT)), (Some(12), Some(41)));
     }
 
     #[test]

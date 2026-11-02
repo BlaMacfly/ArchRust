@@ -994,6 +994,14 @@ pub mod mini {
     // Options d'un objet (AGPMITEM champ 20) : TID de 5 options d'itemoptiontable.txt au plus — drapeaux 1.
     schema!(pub ITEM_OPTION = "AGPMITEM_OPTION", 142, 1, [f!(UInt16), f!(UInt16), f!(UInt16), f!(UInt16), f!(UInt16)]);
 
+    // Objet Cash (AGPMITEM champ 23, constructeur FUN_1401a9540 d'Archonia) — drapeaux 1 : « en cours
+    // d'utilisation » (0 non, 1 oui, 2 en pause ; `+0x4f4`), temps restant en ms (`+0x4f8`), date d'expiration
+    // (`+0x500`), INT32 (`+0x508`), INT64 (non lu).
+    schema!(pub ITEM_CASH = "AGPMITEM_CASH", 143, 1, [f!(Int8), f!(Int64), f!(UInt64), f!(Int32), f!(Int64)]);
+
+    // Ramassage automatique du sac du familier (AGPMITEM op 30, champ 20) : INT16 0/1 — drapeaux 1.
+    schema!(pub ITEM_AUTO_PICK = "AGPMITEM_AUTOPICK", 144, 1, [f!(Int16)]);
+
     // Désignation d'un événement : type de la source (1 objet du décor, 3 personnage), identifiant (section
     // de l'objet, CID du PNJ), identifiant d'événement, fonction (8 portail, 21 dialogue, 9 boutique, 20 banque,
     // 25 compétences, 27 quêtes).

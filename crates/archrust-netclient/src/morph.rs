@@ -44,12 +44,13 @@ pub mod item_op {
     pub const USE_ITEM_RESULT: i64 = 27;
 }
 
-/// Codes de l'op 27 d'AgpmItem (champ 1) et clés d'uimessage affichées (`FUN_14053f7c0`) ; le code 3 ouvre une
-/// fenêtre au sens inconnu.
+/// Codes de l'op 27 d'AgpmItem (champ 1) et clés d'uimessage affichées (`FUN_14053f7c0`) ; le code 3
+/// (`ReverseOrbError` : `UI_Resurrection` rouverte et boîte « You cannot use the resurrection item. ») est traité
+/// par le moteur avec l'orbe de résurrection (`app_consumables.rs`).
 pub mod use_result {
     pub const FAILED_BY_SIEGEWAR: i32 = 1;
     pub const CANNOT_TRANSFORM_CREATURE: i32 = 2;
-    pub const OPEN_WINDOW: i32 = 3;
+    pub const REVERSE_ORB_ERROR: i32 = 3;
     pub const CANNOT_TRANSFORM_POTION: i32 = 4;
 
     pub fn message(code: i32) -> Option<&'static str> {

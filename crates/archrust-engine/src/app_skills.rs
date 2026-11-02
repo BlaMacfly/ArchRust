@@ -7,12 +7,25 @@
 //!   classe de la fonction 25), comme la règle du serveur.
 //! * Lancement : sur la cible choisie, sinon sur soi ; le serveur mène la marche jusqu'à portée et
 //!   annonce le lancement (op 7), d'où vient le délai de relance affiché.
-//! * Barre : le serveur ne garde pas son contenu (module UI_STATUS absent d'ArchCore), elle est
-//!   enregistrée par personnage dans `saved-variables/raccourcis-<personnage>.txt`.
+//! * Maîtrises (`app_mastery.rs`, `hud_mastery.rs`) : onglets Combat… Passive filtrés par `SKILLMASTERY.txt`, AL
+//!   (compétences d'ArchLord), arbres Combo (supérieur), Heroic et du Dragon Scion ; un instructeur d'un
+//!   Dragon Scion (race 4) ouvre `UI_SkillUpDragonScion_Scion` (`Skill_OpenUpUIScion`), les autres
+//!   `UI_SkillBuy`. « Apprendre » / « Améliorer » d'un arbre demande confirmation (`Skill_ConfirmLearnSkill`,
+//!   `Skill_ConfirmUpgradeSkill`), puis envoie 0x3B op 1 (TID) ou op 2 (identifiant).
+//! * Barre : gardée par le serveur (AgpmUIStatus 0x14, `archrust_netclient::ui_status`). Les 50 cases
+//!   du serveur (couche × 10 + colonne) sont les cases locales 2 à 51 (barre principale puis barres en
+//!   plus) ; les potions (cases 0 et 1) sont les champs 6 et 7. L'op 0 reçue remplace les 50 cases
+//!   (objet : IID → TID par l'inventaire ; compétence : identifiant d'instance → TID par la liste des
+//!   compétences) ; chaque pose ou retrait envoie l'op 1 (index + mini, ou index seul), une potion posée
+//!   son TID (jamais 0), un seuil déplacé sa valeur une seconde après le dernier mouvement. Sans champ 2
+//!   dans l'op 0 (serveur qui ne garde pas la barre), repli sur
+//!   `saved-variables/raccourcis-<personnage>.txt`, qui ne garde sinon que le nombre de barres affichées.
 
 use super::App;
 use crate::assets::Assets;
-use crate::hud::{BookEntry, BookView, HudState, Shortcut, SkillUi, SlotView, TrainerEntry, TrainerView, EXTRA_BELTS, QUICK_SLOTS};
+use super::mastery_glue::{MasteryRow, MasteryTables};
+use crate::hud::{BookEntry, BookView, HudState, Shortcut, SkillTab, SkillUi, SlotView, TrainerEntry, TrainerView, TreeSlot, TreeView, EXTRA_BELTS, QUICK_SLOTS};
+use archrust_netclient::world::factor_part;
 use egui::Color32;
 use crate::net::NetLink;
 use archrust_netclient::items::ItemCommand;
@@ -61,6 +74,9 @@ struct Level {
     classes: u16,
     require_level: i32,
     require_point: i32,
+    /// Points héroïques et charisme exigés (`require_heroic_point`, `require_charisma_point`).
+    require_heroic: i32,
+    require_charisma: i32,
     cost: i64,
     upgrade_cost: i64,
     /// Coûts (PV, PM, flèches), temps d'incantation, de relance et durée en ms (`cost_hp`, `cost_mp`,
@@ -80,6 +96,95 @@ struct SkillData {
     levels: Vec<Level>,
     /// `skill_type` de SKILL_CONST (9 : compétence d'ArchLord, `FUN_1402fa5c0`).
     kind: i32,
+    /// Drapeaux de `SKILL_SPEC.txt` du décompte des maîtrises.
+    spec: Spec,
+}
+
+/// Drapeaux de `SKILL_SPEC.txt` (une ligne par compétence, chargeur FUN_14023d850) lus par le décompte des
+/// niveaux des maîtrises (FUN_1402fdc60, FUN_1402fd210).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+struct Spec {
+    /// Reste 9 d'`attribute` (bit 0x400) : passive.
+    passive: bool,
+    /// Reste 8 d'`attribute` (bit 0x2000) : production, niveau compté borné à 100 au lieu de 30.
+    product: bool,
+    /// `transform_target` 5 (« … of Evolution », drapeaux 0x8000000001000).
+    evolution: bool,
+    /// `auto_attack` rempli (attaque normale, `+0x13e60`).
+    auto_attack: bool,
+}
+
+/// Reste d'`attribute` une fois ôtés, dans l'ordre, 40000, 20000, 10000, 1000, 200, 100, 40, puis 20 ou 10
+/// (FUN_14023d850) : 1 à 6 éléments, 8 production, 9 passive.
+fn attribute_rest(attribute: i32) -> i32 {
+    let mut a = attribute;
+    for step in [40000, 20000, 10000, 1000, 200, 100, 40] {
+        if a >= step {
+            a -= step;
+        }
+    }
+    if a >= 20 {
+        a - 20
+    } else if a >= 10 {
+        a - 10
+    } else {
+        a
+    }
+}
+
+/// `SKILL_SPEC.txt` : drapeaux par nom de compétence (première ligne de chaque nom).
+fn parse_spec(text: &str) -> HashMap<String, Spec> {
+    let mut lines = text.lines();
+    let header: Vec<&str> = lines.next().unwrap_or("").split('\t').map(str::trim).collect();
+    let col = |n: &str| header.iter().position(|h| h.eq_ignore_ascii_case(n));
+    let (c_attr, c_transform, c_auto) = (col("attribute"), col("transform_target"), col("auto_attack"));
+    let mut out = HashMap::new();
+    for line in lines {
+        let f: Vec<&str> = line.split('\t').map(str::trim).collect();
+        let get = |c: Option<usize>| c.and_then(|i| f.get(i)).copied().unwrap_or("");
+        let num = |c: Option<usize>| get(c).parse::<i32>().unwrap_or(0);
+        let name = f.first().copied().unwrap_or("");
+        if name.is_empty() {
+            continue;
+        }
+        let rest = (!get(c_attr).is_empty()).then(|| attribute_rest(num(c_attr)));
+        out.entry(name.to_string()).or_insert(Spec {
+            passive: rest == Some(9),
+            product: rest == Some(8),
+            evolution: num(c_transform) == 5,
+            auto_attack: !get(c_auto).is_empty(),
+        });
+    }
+    out
+}
+
+/// Niveau compté d'une compétence apprise (FUN_1402fd210, « dirt » 4) : borné à 30, à 100 pour une production.
+fn counted_level(d: &SkillData, level: i32) -> i32 {
+    level.clamp(0, if d.spec.product { 100 } else { 30 })
+}
+
+/// Le niveau 1 de la compétence admet la race et la classe (colonne `require_class_*` remplie, FUN_1402fe170) :
+/// races 1 à 3 en classes 1, 2, 4 ; race 4 en classes 1 (slayer), 2 (obiter), 3 (scion), 4 (summoner).
+fn admits(d: &SkillData, race: i32, class: i32) -> bool {
+    let col = match (race, class) {
+        (1..=3, 1 | 2 | 4) | (4, 1..=4) => class_column(race, class),
+        _ => None,
+    };
+    col.zip(d.levels.first()).is_some_and(|(c, l)| l.classes & (1 << c) != 0)
+}
+
+/// Niveaux cumulés des compétences apprises (FUN_1402fdc60) : de toutes sans race ni classe (ConditionD de l'arbre
+/// supérieur, appel (-1, -1), sans exclusion) ; sinon de celles qu'admettent la race et la classe, hors passives,
+/// évolutions et attaque normale (ConditionC).
+fn mastery_levels(by_tid: &HashMap<i32, SkillData>, known: &HashMap<i32, i32>, race_class: Option<(i32, i32)>) -> i32 {
+    known
+        .iter()
+        .filter_map(|(tid, lv)| {
+            let d = by_tid.get(tid)?;
+            let counted = race_class.is_none_or(|(r, c)| admits(d, r, c) && !d.spec.passive && !d.spec.evolution && !d.spec.auto_attack);
+            counted.then(|| counted_level(d, *lv))
+        })
+        .sum()
 }
 
 #[derive(Default)]
@@ -117,11 +222,14 @@ fn parse_tips(text: &str) -> HashMap<String, TipRow> {
     out
 }
 
-/// Durée en ms écrite en secondes (« 2 s », « 7,45 s »).
-fn seconds(ms: i64) -> String {
-    let text = format!("{:.2}", ms as f64 / 1000.0);
-    let text = text.trim_end_matches('0').trim_end_matches('.');
-    format!("{} s", text.replace('.', ","))
+/// Durée en ms écrite en secondes comme FUN_140875040 : « %.1f %s » pour l'incantation, « %d %s » (secondes
+/// entières) pour la relance et la durée ; `unit` est sysstr 8.
+fn seconds(ms: i64, tenth: bool, unit: &str) -> String {
+    if tenth {
+        format!("{:.1} {unit}", ms as f64 / 1000.0)
+    } else {
+        format!("{} {unit}", ms / 1000)
+    }
 }
 
 fn load_tables(assets: &Assets) -> SkillTables {
@@ -164,6 +272,8 @@ fn load_tables(assets: &Assets) -> SkillTables {
             classes,
             require_level: num(c_level) as i32,
             require_point: num(c_point) as i32,
+            require_heroic: num(col("require_heroic_point")) as i32,
+            require_charisma: num(col("require_charisma_point")) as i32,
             cost: num(c_cost) as i64,
             upgrade_cost: num(c_up) as i64,
             cost_hp: num(col("cost_hp")) as i64,
@@ -174,6 +284,15 @@ fn load_tables(assets: &Assets) -> SkillTables {
             duration_ms: num(col("duration")) as i64,
         });
     }
+    // SKILL_SPEC.txt : drapeaux du décompte des maîtrises.
+    let spec = assets
+        .read_file("ini/SKILL_SPEC.txt")
+        .map(|raw| {
+            let plain = archrust_data::ini::decrypt_ini(&raw);
+            if plain.get(..4).is_some_and(|h| h.eq_ignore_ascii_case("name")) { plain } else { String::from_utf8_lossy(&raw).into_owned() }
+        })
+        .map(|t| parse_spec(&t))
+        .unwrap_or_default();
     // SKILLTEMPLATE.ini : TID → nom.
     let mut tables = SkillTables::default();
     if let Ok(t) = assets.table("ini", "SKILLTEMPLATE.ini") {
@@ -183,7 +302,8 @@ fn load_tables(assets: &Assets) -> SkillTables {
             let name = name.trim().to_string();
             let levels = by_name.get(&name).cloned().unwrap_or_default();
             let kind = kinds.get(&name).copied().unwrap_or(0);
-            tables.by_tid.insert(tid, SkillData { name, levels, kind });
+            let spec = spec.get(&name).copied().unwrap_or_default();
+            tables.by_tid.insert(tid, SkillData { name, levels, kind, spec });
         }
     }
     // Infobulles : `skilltooltip.txt` anglais (noms de SKILLTEMPLATE) et celui du dossier de langue.
@@ -218,8 +338,37 @@ pub struct SkillsGlue {
     pub auto: [u8; 2],
     /// Dernière prise automatique de chaque potion.
     auto_at: [Option<Instant>; 2],
-    /// Potions de vie et de mana gardées par le serveur, à poser sur les cases 1 et 2 si elles sont vides.
-    server_potions: Option<(i32, i32)>,
+    /// Paquets 0x14 reçus (op 0 et op 1), appliqués par `skills_frame` après le chargement de la barre
+    /// du personnage.
+    server_status: Vec<archrust_netclient::ui_status::UiStatus>,
+    /// La barre est gardée par le serveur (op 0 avec champ 2) : plus de cases dans le fichier local.
+    server_belt: bool,
+    /// Cases reçues dont l'objet ou la compétence n'est pas encore connu : (case locale, base).
+    unresolved: Vec<(usize, archrust_netclient::ui_status::BeltBase)>,
+    /// Seuils connus du serveur et dernier mouvement d'un curseur (envoi une seconde après).
+    auto_sent: [i8; 2],
+    auto_moved: [Option<Instant>; 2],
+    /// Arbres et catégories des maîtrises (`app_mastery.rs`).
+    mastery: Option<MasteryTables>,
+    /// Onglet du livre (`None` : celui d'ouverture, Combat ou Scion) et de l'instructeur.
+    book_tab: Option<SkillTab>,
+    trainer_tab: SkillTab,
+    /// Case choisie dans un arbre (TID).
+    tree_selected: Option<i32>,
+    /// Confirmation en attente : TID et apprentissage (sinon amélioration).
+    confirm: Option<(i32, bool)>,
+    /// Boîte d'information (`Action=4:…` des événements `Skill_*` de l'[EventMap]).
+    info: Option<String>,
+    /// uimessage `SkillLevel` (« Niveau ») des infobulles.
+    level_word: Option<String>,
+    /// Messages des événements d'interface (`[EventMap]`).
+    events: Option<HashMap<String, String>>,
+}
+
+/// Phrase de `uimessage.txt` du dossier de langue sans l'état du HUD (vide si absente).
+fn ui_message_in(assets: &Assets, key: &str) -> String {
+    let text = super::npc_glue::client_text(assets, "uimessage.txt");
+    text.lines().filter_map(|l| l.split_once('\t')).find(|(k, _)| k.trim() == key).map(|(_, v)| v.trim().to_string()).unwrap_or_default()
 }
 
 impl SkillsGlue {
@@ -227,8 +376,18 @@ impl SkillsGlue {
         self.tables.get_or_insert_with(|| load_tables(assets))
     }
 
+    fn mastery(&mut self, assets: &Assets) -> &MasteryTables {
+        self.mastery.get_or_insert_with(|| MasteryTables::load(assets))
+    }
+
+    /// Points héroïques dépensés dans les niveaux connus (ConditionD d'un arbre héroïque, FUN_1402b9200).
+    fn heroic_spent(&mut self, assets: &Assets, known: &HashMap<i32, i32>) -> i32 {
+        let tables = self.tables(assets);
+        known.iter().filter_map(|(tid, lv)| tables.by_tid.get(tid).map(|d| d.levels.iter().take((*lv).max(0) as usize).map(|l| l.require_heroic).sum::<i32>())).sum()
+    }
+
     fn name(&mut self, assets: &Assets, tid: i32) -> String {
-        self.tables(assets).by_tid.get(&tid).map(|d| d.name.clone()).unwrap_or_else(|| format!("Compétence {tid}"))
+        self.tables(assets).by_tid.get(&tid).map(|d| d.name.clone()).unwrap_or_default()
     }
 
     /// Infobulle d'une compétence au niveau `level` (1 et plus ; 0 : le premier niveau), comme celle
@@ -244,18 +403,25 @@ impl SkillsGlue {
         let lv = data.and_then(|d| d.levels.get((level.max(1) - 1) as usize).or(d.levels.last())).cloned();
         let mut lines = vec![(name, Color32::from_rgb(255, 210, 110))];
         if level > 0 {
-            lines.push((format!("Niveau {level}"), Color32::from_rgb(255, 235, 170)));
+            // uimessage `SkillLevel` (« %s %d » de « SkillLevel2 », FUN_1405d8200).
+            let word = self.level_word.get_or_insert_with(|| ui_message_in(assets, "SkillLevel")).clone();
+            lines.push((format!("{word} {level}"), Color32::from_rgb(255, 235, 170)));
         }
         if !description.is_empty() {
             lines.push((description, Color32::from_rgb(225, 225, 225)));
         }
         let (Some(row), Some(lv)) = (row, lv) else { return lines };
-        let rows: [(&str, u32, Option<String>); 8] = [
+        let unit = super::npc_glue::sysstr(assets, 8).unwrap_or_default();
+        // Points héroïques et charisme exigés : colonnes `RequiredHeroicPoints`, `RequireCharismaPoints` de
+        // `skilltooltip.txt`, libellés sysstr 791 et 792.
+        let rows: [(&str, u32, Option<String>); 10] = [
             ("RequiredLevel", 67, (lv.require_level > 0).then(|| lv.require_level.to_string())),
             ("RequiredPoints", 68, (lv.require_point > 0).then(|| lv.require_point.to_string())),
-            ("CastTime", 69, (lv.cast_ms > 0).then(|| seconds(lv.cast_ms))),
-            ("RecastTime", 70, (lv.recast_ms > 0).then(|| seconds(lv.recast_ms))),
-            ("Duration", 71, (lv.duration_ms > 0).then(|| seconds(lv.duration_ms))),
+            ("RequiredHeroicPoints", 791, (lv.require_heroic > 0).then(|| lv.require_heroic.to_string())),
+            ("RequireCharismaPoints", 792, (lv.require_charisma > 0).then(|| lv.require_charisma.to_string())),
+            ("CastTime", 69, (lv.cast_ms > 0).then(|| seconds(lv.cast_ms, true, &unit))),
+            ("RecastTime", 70, (lv.recast_ms > 0).then(|| seconds(lv.recast_ms, false, &unit))),
+            ("Duration", 71, (lv.duration_ms > 0).then(|| seconds(lv.duration_ms, false, &unit))),
             ("CostHP", 77, (lv.cost_hp > 0).then(|| lv.cost_hp.to_string())),
             ("CostMP", 78, (lv.cost_mp > 0).then(|| lv.cost_mp.to_string())),
             ("CostArrow", 79, (lv.cost_arrow > 0).then(|| lv.cost_arrow.to_string())),
@@ -287,6 +453,21 @@ impl SkillsGlue {
 
 /// Intervalle minimal entre deux prises automatiques de la même potion.
 const AUTO_POTION_GAP: Duration = Duration::from_secs(1);
+/// Délai d'envoi d'un seuil après le dernier mouvement de son curseur (OnIdle FUN_140650b00).
+const AUTO_SEND_DELAY: Duration = Duration::from_secs(1);
+/// Cases locales avant la barre : les deux potions.
+const POTION_SLOTS: usize = 2;
+
+/// Case locale d'une case du serveur (couche × 10 + colonne) : la barre principale suit les potions,
+/// les barres en plus la suivent (12 + (couche − 1) × 10 + colonne = 2 + index).
+fn local_slot(index: usize) -> usize {
+    index + POTION_SLOTS
+}
+
+/// Case du serveur d'une case locale (`None` : potions).
+fn belt_index(slot: usize) -> Option<usize> {
+    slot.checked_sub(POTION_SLOTS).filter(|i| *i < archrust_netclient::ui_status::BELT_SLOTS)
+}
 
 fn slots_path(dir: &Path, name: &str) -> PathBuf {
     let safe: String = name.chars().map(|c| if c.is_alphanumeric() || c == '-' || c == '_' { c } else { '_' }).collect();
@@ -338,6 +519,15 @@ fn save_slots(dir: &Path, name: &str, slots: &[Option<Shortcut>], belts: usize) 
 #[derive(Default)]
 pub struct SkillViews {
     book: Vec<BookEntry>,
+    book_tab: SkillTab,
+    /// Cases de l'arbre du livre ou de l'instructeur ouvert, nom de la classe, points héroïques.
+    book_tree: Vec<Option<TreeSlot>>,
+    trainer_tree: Vec<Option<TreeSlot>>,
+    title: String,
+    heroic_points: Option<i32>,
+    /// Onglets ouvrables (arbre connu pour la classe).
+    allowed: Vec<SkillTab>,
+    confirm: Option<String>,
     trainer: Option<(String, Vec<TrainerEntry>)>,
     slots: Vec<SlotView>,
     belts: usize,
@@ -349,12 +539,42 @@ pub struct SkillViews {
 pub fn panel(ctx: &egui::Context, glue: &mut SkillsGlue, views: &SkillViews, hud: &mut HudState, assets: &Assets) {
     let mut out = Vec::new();
     crate::hud::draw_quickbar(ctx, hud, assets, &views.slots, views.belts, views.auto, &mut out);
+    let allowed = |t: SkillTab| views.allowed.contains(&t);
     if glue.show_book {
-        crate::hud::draw_skill_book(ctx, hud, assets, BookView { entries: &views.book, points: views.points, first: &mut glue.book_first }, &mut out);
+        let tab = views.book_tab;
+        if tab.is_tree() {
+            let points = if tab.heroic() { views.heroic_points } else { views.points };
+            let view = TreeView { tab, trainer: false, title: views.title.clone(), slots: &views.book_tree, points, selected: glue.tree_selected, allowed: &allowed };
+            crate::hud::draw_tree(ctx, hud, assets, view, &mut out);
+        } else {
+            let view = BookView { entries: &views.book, points: views.points, first: &mut glue.book_first, tab, allowed: &allowed, title: views.title.clone() };
+            crate::hud::draw_skill_book(ctx, hud, assets, view, &mut out);
+        }
     }
     if let Some((title, entries)) = &views.trainer {
-        let view = TrainerView { title: title.clone(), entries, selected: glue.trainer_selected, points: views.points, first: &mut glue.trainer_first };
-        crate::hud::draw_trainer(ctx, hud, assets, view, &mut out);
+        let tab = glue.trainer_tab;
+        if tab.is_tree() {
+            let points = if tab.heroic() { views.heroic_points } else { views.points };
+            let view = TreeView { tab, trainer: true, title: title.clone(), slots: &views.trainer_tree, points, selected: glue.tree_selected, allowed: &allowed };
+            crate::hud::draw_tree(ctx, hud, assets, view, &mut out);
+        } else {
+            let view = TrainerView { title: title.clone(), entries, selected: glue.trainer_selected, points: views.points, first: &mut glue.trainer_first, tab, allowed: &allowed };
+            crate::hud::draw_trainer(ctx, hud, assets, view, &mut out);
+        }
+    }
+    if let Some(text) = glue.info.clone() {
+        if crate::hud::info_box(ctx, hud, assets, &text) {
+            glue.info = None;
+        }
+    }
+    // Confirmation d'Archonia avant l'apprentissage ou l'amélioration d'une case d'arbre.
+    if let (Some(text), Some((tid, learn))) = (&views.confirm, glue.confirm) {
+        if let Some(yes) = crate::hud::confirm_box(ctx, hud, assets, ("skill-tree-confirm", tid), text) {
+            glue.confirm = None;
+            if yes {
+                out.push(if learn { SkillUi::Learn(tid) } else { SkillUi::Upgrade(tid) });
+            }
+        }
     }
     glue.pending.extend(out);
 }
@@ -366,6 +586,15 @@ fn send(net: Option<&NetLink>, cmd: SkillCommand) {
 }
 
 impl App {
+    /// Compétences apprises qui ont un prix (`FUN_1402ba630` avec `param_5` nul : prix du niveau 1, taxe comprise,
+    /// non nul ; « Normal Attack » exclue) : la Gem of origin est refusée s'il n'y en a aucune (`SkillInitNoOwnSkill`).
+    pub(super) fn skills_paid_count(&mut self) -> usize {
+        let assets = self.assets.clone();
+        let tids: Vec<i32> = self.skills.known.values().map(|(t, _)| *t).filter(|t| *t != NORMAL_ATTACK).collect();
+        let tables = self.skills.tables(&assets);
+        tids.iter().filter(|t| tables.by_tid.get(t).and_then(|d| d.levels.first()).is_some_and(|l| super::tax_glue::taxed(l.cost) != 0)).count()
+    }
+
     /// Compétences du joueur et réponses des instructeurs.
     pub(super) fn on_skill_event(&mut self, ev: SkillEvent) {
         let assets = self.assets.clone();
@@ -376,20 +605,25 @@ impl App {
                     self.skills.known.insert(id, (tid, level));
                 }
             }
+            // Compétence retirée (AGPMSKILL op 1, oubli des compétences : voir `app_consumables.rs`) ; relance et
+            // case de la barre restent, comme dans Archonia qui garde son raccourci grisé.
+            SkillEvent::Removed { id } => {
+                if let Some((tid, _)) = self.skills.known.remove(&id) {
+                    log::info!("compétence {tid} (identifiant {id}) retirée");
+                }
+            }
             SkillEvent::Level { id, level, .. } => {
                 if let Some(tid) = self.skills.known.get_mut(&id).map(|s| {
                     s.1 = level;
                     s.0
                 }) {
-                    let name = self.skills.name(&assets, tid);
-                    self.ui.push_chat(format!("[compétence] {name} passe au niveau {level}."));
+                    log::info!("compétence {tid} : niveau {level}");
                 }
             }
             SkillEvent::Cast { caster, id, tid, cast_ms, recast_ms, .. } if caster == me => {
                 let total = Duration::from_millis(cast_ms as u64 + recast_ms as u64);
                 self.skills.cooldowns.insert(id, (Instant::now() + total, total));
-                let name = self.skills.name(&assets, tid);
-                self.ui.push_chat(format!("[compétence] {name}."));
+                log::debug!("compétence {tid} lancée");
             }
             SkillEvent::Cast { .. } => {}
             // Expérience de production : relevée par `product_observe` (voir `app_product.rs`).
@@ -407,39 +641,43 @@ impl App {
                         self.skills.trainer = Some((npc, t));
                         self.skills.trainer_first = 0;
                         self.skills.trainer_selected = None;
+                        self.skills.tree_selected = None;
+                        // Instructeur du Dragon Scion : arbre du Scion (`Skill_OpenUpUIScion`, `SKILLMASTERY.txt`
+                        // ne donne au Scion aucune liste à acheter).
+                        self.skills.trainer_tab = if t.0 == 4 { SkillTab::Scion } else { SkillTab::Combat };
                     }
-                    None => self.ui.push_chat("[compétence] Cet instructeur n'enseigne rien que le client connaisse."),
+                    None => log::info!("instructeur {npc} : rien que le client connaisse"),
                 }
             }
             // Points héroïques ou charisme manquants : la fenêtre d'Archonia n'affiche rien, le serveur le dit
             // par un message système.
             SkillEvent::Learned { result: learn_result::NOT_ENOUGH_HEROIC_POINTS | learn_result::NOT_ENOUGH_CHARISMA, .. } => {}
+            // Boîtes de l'[EventMap] d'Archonia : Skill_LearnSuccess, Skill_ErrorAlreadyLearnSkill,
+            // …NotEnoughSkillPoint, …LowLevel, …InvalidClass, …NotEnoughMoney (événements nommés d'après le code).
             SkillEvent::Learned { tid, result } => {
-                let name = self.skills.name(&assets, tid);
-                self.ui.push_chat(format!(
-                    "[compétence] {}",
-                    match result {
-                        learn_result::SUCCESS => format!("Vous apprenez {name} !"),
-                        learn_result::ALREADY_LEARNED => format!("Vous connaissez déjà {name}."),
-                        learn_result::NOT_ENOUGH_POINTS => format!("Pas assez de points de compétence pour {name}."),
-                        learn_result::LOW_LEVEL => format!("Niveau trop bas pour {name}."),
-                        learn_result::WRONG_CLASS => format!("{name} n'est pas pour votre classe."),
-                        _ => format!("Impossible d'apprendre {name} (or insuffisant ?)."),
-                    }
-                ));
+                let event = match result {
+                    learn_result::SUCCESS => "Skill_LearnSuccess",
+                    learn_result::ALREADY_LEARNED => "Skill_ErrorAlreadyLearnSkill",
+                    learn_result::NOT_ENOUGH_POINTS => "Skill_ErrorNotEnoughSkillPoint",
+                    learn_result::LOW_LEVEL => "Skill_ErrorLowLevel",
+                    learn_result::WRONG_CLASS => "Skill_ErrorInvalidClass",
+                    _ => "Skill_ErrorNotEnoughMoney",
+                };
+                log::info!("apprentissage de la compétence {tid} : résultat {result}");
+                self.skills.info = Some(super::portal_glue::ui_event_cached(&mut self.skills.events, &assets, event)).filter(|t| !t.is_empty());
             }
-            // Messages de l'[EventMap] d'Archonia (FUN_1405dd9c0 : Skill_UpgradeSuccess, Skill_ErrorNotEnoughMoney,
+            // Boîtes de l'[EventMap] d'Archonia (FUN_1405dd9c0 : Skill_UpgradeSuccess, Skill_ErrorNotEnoughMoney,
             // …SkillPoint, …HeroicPoint, …CharismaPoint).
             SkillEvent::Upgraded { result, .. } => {
-                let text = match result {
-                    upgrade_result::SUCCESS => "Skill Upgraded",
-                    upgrade_result::NOT_ENOUGH_MONEY => "You do not have enough Gold",
-                    upgrade_result::NOT_ENOUGH_POINTS => "You do not have enough skill points",
-                    upgrade_result::NOT_ENOUGH_HEROIC_POINTS => "You don't have enough Heroic Points.",
-                    upgrade_result::NOT_ENOUGH_CHARISMA => "You do not have enough charisma.",
+                let event = match result {
+                    upgrade_result::SUCCESS => "Skill_UpgradeSuccess",
+                    upgrade_result::NOT_ENOUGH_MONEY => "Skill_ErrorNotEnoughMoney",
+                    upgrade_result::NOT_ENOUGH_POINTS => "Skill_ErrorNotEnoughSkillPoint",
+                    upgrade_result::NOT_ENOUGH_HEROIC_POINTS => "Skill_ErrorNotEnoughHeroicPoint",
+                    upgrade_result::NOT_ENOUGH_CHARISMA => "Skill_ErrorNotEnoughCharismaPoint",
                     _ => return,
                 };
-                self.ui.push_chat(format!("[compétence] {text}"));
+                self.skills.info = Some(super::portal_glue::ui_event_cached(&mut self.skills.events, &assets, event)).filter(|t| !t.is_empty());
             }
         }
     }
@@ -459,12 +697,10 @@ impl App {
         let assets = self.assets.clone();
         let name = self.skills.name(&assets, tid);
         let Some(id) = self.skills.id_of(tid) else {
-            self.ui.push_chat(format!("[compétence] Vous ne connaissez pas {name}."));
+            log::debug!("compétence {name} inconnue : rien n'est lancé");
             return;
         };
         if self.skills.cooldown(id) > 0.0 {
-            let left = self.skills.cooldowns.get(&id).map(|(e, _)| (*e - Instant::now()).as_secs()).unwrap_or(0);
-            self.ui.push_chat(format!("[compétence] {name} sera prête dans {left} s."));
             return;
         }
         let Some(me) = self.player.as_ref().map(|p| p.cid) else { return };
@@ -513,9 +749,13 @@ impl App {
                     return;
                 }
                 let item = self.items.values().filter(|i| i.template_id == Some(tid) && i.status == Some(2)).min_by_key(|i| i.id).map(|i| i.id);
+                // Orbe de résurrection, Gem of origin : refus et confirmation du client (voir `app_consumables.rs`).
+                if item.is_some_and(|iid| self.consumables_intercepts(iid)) {
+                    return;
+                }
                 match (item, &self.net) {
                     (Some(iid), Some(net)) => net.send(Command::Item(ItemCommand::Use(iid))),
-                    (None, _) => self.ui.push_chat("[objet] Plus aucun exemplaire dans l'inventaire."),
+                    (None, _) => log::debug!("raccourci : plus aucun objet {tid} dans l'inventaire"),
                     _ => {}
                 }
             }
@@ -523,10 +763,183 @@ impl App {
         }
     }
 
-    /// Statut d'interface reçu à l'entrée en jeu : seuils de prise automatique et potions de la barre.
+    /// Statut d'interface reçu (op 0 à l'entrée en jeu, op 1) : appliqué par `skills_frame`, après le
+    /// chargement de la barre du personnage.
     pub(super) fn on_ui_status(&mut self, st: archrust_netclient::ui_status::UiStatus) {
-        self.skills.auto = [st.auto_hp.clamp(0, 100) as u8, st.auto_mp.clamp(0, 100) as u8];
-        self.skills.server_potions = Some((st.hp_potion_tid, st.mp_potion_tid));
+        self.skills.server_status.push(st);
+    }
+
+    /// Raccourci d'une case du serveur : objet (IID → TID de l'inventaire) ou compétence (identifiant
+    /// d'instance → TID) ; `None` s'il n'est pas (encore) connu.
+    fn skills_resolve(&self, b: archrust_netclient::ui_status::BeltBase) -> Option<Shortcut> {
+        use archrust_netclient::ui_status::base_type;
+        match b.kind {
+            base_type::SKILL => self.skills.known.get(&b.id).map(|(tid, _)| Shortcut::Skill(*tid)),
+            base_type::ITEM => self.items.get(&b.id).and_then(|i| i.template_id).map(Shortcut::Item),
+            _ => None,
+        }
+    }
+
+    /// Base envoyée pour un raccourci : compétence possédée (7, identifiant) ; objet (5, IID du premier
+    /// exemplaire du sac, sinon de n'importe où). `None` : rien à envoyer (compétence ou objet absents).
+    fn skills_base_of(&self, sc: Shortcut) -> Option<archrust_netclient::ui_status::BeltBase> {
+        use archrust_netclient::ui_status::{base_type, BeltBase};
+        match sc {
+            Shortcut::Skill(tid) => self.skills.id_of(tid).map(|id| BeltBase { kind: base_type::SKILL, id }),
+            Shortcut::Item(tid) => {
+                let mine = self.items.values().filter(|i| i.template_id == Some(tid));
+                let iid = mine.clone().filter(|i| i.status == Some(2)).map(|i| i.id).min().or_else(|| mine.map(|i| i.id).min())?;
+                Some(BeltBase { kind: base_type::ITEM, id: iid })
+            }
+        }
+    }
+
+    /// Envoie l'op 1 d'une case locale changée, comme `AgcmUIStatus` : potion posée (champ 6 ou 7, jamais
+    /// 0, rien au retrait), case de la barre posée (index + mini) ou vidée (index seul).
+    fn skills_sync_slot(&mut self, slot: usize) {
+        use archrust_netclient::ui_status::UiStatusUpdate;
+        self.skills.unresolved.retain(|(s, _)| *s != slot);
+        let content = self.skills.slots.get(slot).copied().flatten();
+        let mut u = UiStatusUpdate::default();
+        match (belt_index(slot), content) {
+            (None, Some(Shortcut::Item(tid))) if tid != 0 => {
+                if slot == 0 {
+                    u.hp_potion_tid = Some(tid);
+                } else {
+                    u.mp_potion_tid = Some(tid);
+                }
+            }
+            (None, _) => return,
+            (Some(index), None) => u.slot = Some((index, None)),
+            (Some(index), Some(sc)) => match self.skills_base_of(sc) {
+                Some(b) => u.slot = Some((index, Some(b))),
+                // Ni compétence possédée ni objet : Archonia n'envoie rien pour ce qu'il ne sait pas désigner.
+                None => return,
+            },
+        }
+        if let Some(net) = &self.net {
+            net.send(Command::UiStatus(u));
+        }
+    }
+
+    /// Paquets 0x14 reçus : op 0 (les 50 cases remplacées si le champ 2 est là, potions telles quelles,
+    /// seuils ≥ 0) et op 1 (case posée après avoir retiré la même base de sa rangée de 10, ou vidée ;
+    /// potions ≠ 0 ; seuils ≥ 0). Rend `true` si la barre a changé.
+    fn skills_apply_status(&mut self) -> bool {
+        use archrust_netclient::ui_status::op;
+        let mut changed = false;
+        for st in std::mem::take(&mut self.skills.server_status) {
+            for (k, v) in [st.auto_hp, st.auto_mp].into_iter().enumerate() {
+                if v >= 0 {
+                    self.skills.auto[k] = v.min(100) as u8;
+                    self.skills.auto_sent[k] = v;
+                    self.skills.auto_moved[k] = None;
+                }
+            }
+            let potions = [st.hp_potion_tid, st.mp_potion_tid];
+            if st.op == op::ADD {
+                if let Some(belt) = &st.belt {
+                    self.skills.server_belt = true;
+                    self.skills.unresolved.clear();
+                    for (i, base) in belt.iter().enumerate() {
+                        let slot = local_slot(i);
+                        let sc = base.and_then(|b| self.skills_resolve(b));
+                        if let (Some(b), None) = (base, sc) {
+                            self.skills.unresolved.push((slot, *b));
+                        }
+                        if let Some(cell) = self.skills.slots.get_mut(slot) {
+                            *cell = sc;
+                        }
+                    }
+                }
+                for (slot, tid) in potions.into_iter().enumerate() {
+                    let Some(cell) = self.skills.slots.get_mut(slot) else { continue };
+                    if self.skills.server_belt {
+                        // Copiées telles quelles, 0 compris.
+                        *cell = (tid > 0).then_some(Shortcut::Item(tid));
+                    } else if tid > 0 && cell.is_none() {
+                        // Serveur sans barre : potions posées sur les cases restées vides du fichier local.
+                        *cell = Some(Shortcut::Item(tid));
+                    }
+                }
+                changed = true;
+            } else {
+                for (slot, tid) in potions.into_iter().enumerate() {
+                    if let (true, Some(cell)) = (tid != 0, self.skills.slots.get_mut(slot)) {
+                        *cell = Some(Shortcut::Item(tid));
+                        changed = true;
+                    }
+                }
+                let Some((index, base)) = st.slot else { continue };
+                let slot = local_slot(index);
+                self.skills.unresolved.retain(|(s, _)| *s != slot);
+                let sc = base.and_then(|b| self.skills_resolve(b));
+                if let (Some(b), None) = (base, sc) {
+                    self.skills.unresolved.push((slot, b));
+                }
+                if let Some(sc) = sc {
+                    let row = local_slot(index / 10 * 10);
+                    for cell in self.skills.slots.iter_mut().skip(row).take(10) {
+                        if *cell == Some(sc) {
+                            *cell = None;
+                        }
+                    }
+                }
+                if let Some(cell) = self.skills.slots.get_mut(slot) {
+                    *cell = sc;
+                }
+                changed = true;
+            }
+        }
+        // Objets et compétences arrivés après la barre.
+        if !self.skills.unresolved.is_empty() {
+            for (slot, b) in std::mem::take(&mut self.skills.unresolved) {
+                match self.skills_resolve(b) {
+                    Some(sc) => {
+                        if let Some(cell) = self.skills.slots.get_mut(slot) {
+                            *cell = Some(sc);
+                            changed = true;
+                        }
+                    }
+                    None => self.skills.unresolved.push((slot, b)),
+                }
+            }
+        }
+        changed
+    }
+
+    /// Seuils déplacés : envoyés une seconde après le dernier mouvement, si la valeur a changé.
+    fn skills_send_auto(&mut self) {
+        for k in 0..2 {
+            let Some(at) = self.skills.auto_moved[k] else { continue };
+            if at.elapsed() < AUTO_SEND_DELAY {
+                continue;
+            }
+            self.skills.auto_moved[k] = None;
+            let value = self.skills.auto[k].min(100) as i8;
+            if value == self.skills.auto_sent[k] {
+                continue;
+            }
+            self.skills.auto_sent[k] = value;
+            let mut u = archrust_netclient::ui_status::UiStatusUpdate::default();
+            if k == 0 {
+                u.auto_hp = Some(value);
+            } else {
+                u.auto_mp = Some(value);
+            }
+            if let Some(net) = &self.net {
+                net.send(Command::UiStatus(u));
+            }
+        }
+    }
+
+    /// Enregistre la barre du personnage : nombre de barres affichées, et cases seulement si le serveur
+    /// ne les garde pas.
+    fn skills_save(&self) {
+        if let Some(name) = &self.skills.slots_owner {
+            let slots: &[Option<Shortcut>] = if self.skills.server_belt { &[] } else { &self.skills.slots };
+            save_slots(&self.config.saved_dir, name, slots, self.skills.belts);
+        }
     }
 
     /// Prise automatique des potions des cases 1 (vie) et 2 (mana) quand la jauge passe sous son seuil,
@@ -560,6 +973,8 @@ impl App {
     /// Touches 1 à = : cases de la barre (potions sur 1 et 2). Maj, Ctrl et Alt + 3 à = : cases des
     /// barres en plus 1, 2 et 3 (`Hotkey=1:4…`, `2:4…`, `3:4…` « Quick Slot 2-1… 4-10 » d'Archonia ;
     /// la barre 4 n'a pas de touches).
+    /// Plus appelée : les touches passent par la table d'Archonia (`app_hotkey.rs`, `skills_hotkey_*` ci-dessous).
+    #[allow(dead_code)]
     pub(super) fn skills_key(&mut self, code: KeyCode) -> bool {
         let m = self.addon_glue.modifiers;
         let belt = if m.shift_key() {
@@ -596,9 +1011,29 @@ impl App {
         true
     }
 
+    /// Touches de la table d'Archonia (`app_hotkey.rs`) : `QuickBeltUseHPPotion` (0) / `QuickBeltUseMPPotion` (1).
+    pub(super) fn skills_hotkey_potion(&mut self, potion: usize) {
+        self.skills_use_slot(potion.min(1));
+    }
+
+    /// `QuickBeltUse_<couche>_<case>` (couche 1 à 4, case 1 à 10) : même case que `skills_key` (couche 1 : cases
+    /// 2 à 11 de la barre ; couches 2 à 4 : barres en plus).
+    pub(super) fn skills_hotkey_belt(&mut self, layer: usize, col: usize) {
+        let (layer, col) = (layer.clamp(1, 4), col.clamp(1, 10));
+        let slot = if layer == 1 { 2 + (col - 1) } else { 12 + (layer - 2) * 10 + (col - 1) };
+        self.skills_use_slot(slot);
+    }
+
+    /// `QuickBeltLayerUp` (+1) / `QuickBeltLayerDown` (−1) : barres en plus montrées ou cachées.
+    pub(super) fn skills_hotkey_layer(&mut self, delta: i32) {
+        self.skills_apply(vec![SkillUi::Belts(delta as _)]);
+    }
+
     /// Demandes des fenêtres et de la barre.
     fn skills_apply(&mut self, requests: Vec<SkillUi>) {
         let mut changed = false;
+        // Cases changées, envoyées au serveur (op 1) après le traitement des demandes.
+        let mut touched: Vec<usize> = Vec::new();
         for r in requests {
             match r {
                 SkillUi::CloseBook => self.skills.show_book = false,
@@ -619,21 +1054,13 @@ impl App {
                     let Some(cell) = self.skills.slots.get_mut(slot) else { continue };
                     *cell = Some(shortcut);
                     changed = true;
-                    // Potions des cases 1 et 2 : gardées aussi par le serveur (statut d'interface).
-                    if let (0 | 1, Shortcut::Item(tid), Some(net)) = (slot, shortcut, &self.net) {
-                        let mut u = archrust_netclient::ui_status::UiStatusUpdate::default();
-                        if slot == 0 {
-                            u.hp_potion_tid = Some(tid);
-                        } else {
-                            u.mp_potion_tid = Some(tid);
-                        }
-                        net.send(Command::UiStatus(u));
-                    }
+                    touched.push(slot);
                 }
                 SkillUi::SlotSwap(a, b) => {
                     if a < self.skills.slots.len() && b < self.skills.slots.len() {
                         self.skills.slots.swap(a, b);
                         changed = true;
+                        touched.extend([a, b]);
                     }
                 }
                 SkillUi::Belts(delta) => {
@@ -643,28 +1070,42 @@ impl App {
                 SkillUi::SlotClear(slot) => {
                     if let Some(cell) = self.skills.slots.get_mut(slot) {
                         *cell = None;
+                        touched.push(slot);
                     }
                     changed = true;
                 }
                 SkillUi::SlotUse(slot) => self.skills_use_slot(slot),
+                SkillUi::Tab(tab) => {
+                    self.skills.book_tab = Some(tab);
+                    self.skills.book_first = 0;
+                    self.skills.tree_selected = None;
+                }
+                SkillUi::TrainerTab(tab) => {
+                    self.skills.trainer_tab = tab;
+                    self.skills.trainer_first = 0;
+                    self.skills.trainer_selected = None;
+                    self.skills.tree_selected = None;
+                }
+                SkillUi::TreeSelect(tid) => self.skills.tree_selected = Some(tid),
+                SkillUi::TreeLearn(tid) => {
+                    let learn = self.skills.id_of(tid).is_none();
+                    self.skills.confirm = Some((tid, learn));
+                }
+                // Seuil : envoyé une seconde après le dernier mouvement (`skills_send_auto`).
                 SkillUi::AutoGauge { hp, value } => {
-                    self.skills.auto[if hp { 0 } else { 1 }] = value.min(100);
-                    let mut u = archrust_netclient::ui_status::UiStatusUpdate::default();
-                    if hp {
-                        u.auto_hp = Some(value.min(100) as i8);
-                    } else {
-                        u.auto_mp = Some(value.min(100) as i8);
-                    }
-                    if let Some(net) = &self.net {
-                        net.send(Command::UiStatus(u));
-                    }
+                    let k = if hp { 0 } else { 1 };
+                    self.skills.auto[k] = value.min(100);
+                    self.skills.auto_moved[k] = Some(Instant::now());
                 }
             }
         }
+        touched.sort_unstable();
+        touched.dedup();
+        for slot in touched {
+            self.skills_sync_slot(slot);
+        }
         if changed {
-            if let Some(name) = self.skills.slots_owner.clone() {
-                save_slots(&self.config.saved_dir, &name, &self.skills.slots, self.skills.belts);
-            }
+            self.skills_save();
         }
     }
 
@@ -675,24 +1116,26 @@ impl App {
         if !requests.is_empty() {
             self.skills_apply(requests);
         }
+        // Livre fermé : il rouvre sur son premier onglet.
+        if !self.skills.show_book {
+            self.skills.book_tab = None;
+        }
+        if self.skills.trainer.is_none() {
+            self.skills.confirm = None;
+        }
         let Some((name, me)) = self.player.as_ref().filter(|p| p.cid != 0 && !p.name.is_empty()).map(|p| (p.name.clone(), p.position)) else { return };
         if self.skills.slots_owner.as_deref() != Some(name.as_str()) {
+            // Fichier local : barres affichées, et cases en repli tant que le serveur n'envoie pas la sienne.
             (self.skills.slots, self.skills.belts) = load_slots(&self.config.saved_dir, &name);
             self.skills.slots_owner = Some(name);
+            self.skills.server_belt = false;
+            self.skills.unresolved.clear();
         }
-        // Potions gardées par le serveur : sur les cases 1 et 2 restées vides (autre poste, barre effacée).
-        if let Some((hp, mp)) = self.skills.server_potions.take() {
-            let mut changed = false;
-            for (slot, tid) in [(0, hp), (1, mp)] {
-                if let Some(cell) = self.skills.slots.get_mut(slot).filter(|c| tid > 0 && c.is_none()) {
-                    *cell = Some(Shortcut::Item(tid));
-                    changed = true;
-                }
-            }
-            if let (true, Some(owner)) = (changed, self.skills.slots_owner.clone()) {
-                save_slots(&self.config.saved_dir, &owner, &self.skills.slots, self.skills.belts);
-            }
+        // Barre gardée par le serveur (AgpmUIStatus 0x14).
+        if (!self.skills.server_status.is_empty() || !self.skills.unresolved.is_empty()) && self.skills_apply_status() {
+            self.skills_save();
         }
+        self.skills_send_auto();
         self.skills_auto_potions();
         if let Some((npc, _)) = self.skills.trainer {
             let far = self.entities.iter().find(|e| e.cid == npc).is_none_or(|e| Vec3::new(e.position.x - me.x, 0.0, e.position.z - me.z).length() > CLOSE_RANGE);
@@ -705,11 +1148,45 @@ impl App {
     /// Données des fenêtres et de la barre.
     pub(super) fn skills_views(&mut self) -> SkillViews {
         let assets = self.assets.clone();
-        let mut v = SkillViews { points: self.hud.stats.skill_points, auto: self.skills.auto, ..Default::default() };
+        let mut v = SkillViews { points: self.hud.stats.skill_points, heroic_points: self.hud.stats.heroic_points, auto: self.skills.auto, ..Default::default() };
         let known: Vec<(i32, (i32, i32))> = self.skills.known.iter().map(|(id, s)| (*id, *s)).collect();
-        if self.skills.show_book {
+        let (race, class) = player_race_class(&self.hud).unwrap_or((0, 0));
+        let scion = race == 4;
+        // Onglets ouvrables : listes toujours, arbres connus pour la classe (Heroic : arbre héroïque de la classe).
+        v.allowed = [SkillTab::Combat, SkillTab::Buff, SkillTab::Class, SkillTab::Passive, SkillTab::Al, SkillTab::ScionAl, SkillTab::Combo, SkillTab::Heroic, SkillTab::Scion, SkillTab::Slayer, SkillTab::Orbiter, SkillTab::Summoner, SkillTab::ScionPassive, SkillTab::ScionHeroic]
+            .into_iter()
+            .filter(|t| !t.is_tree() || self.skills.mastery(&assets).tree(*t, race, class).is_some())
+            .collect();
+        let book_tab = *self.skills.book_tab.get_or_insert(if scion { SkillTab::Scion } else { SkillTab::Combat });
+        v.book_tab = book_tab;
+        v.title = {
+            let key = self.skills.mastery(&assets).class_key(race, class);
+            key.map(|k| crate::login_settings::template_identity(&assets, k).1).filter(|c| !c.is_empty()).map(|c| crate::hud::ui_message(&mut self.hud, &assets, &c)).unwrap_or_default()
+        };
+        // Noms de l'onglet à liste du livre : catégorie de `SKILLMASTERY.txt`, ou liste « Archlord ».
+        let book_names: Option<Vec<String>> = match book_tab {
+            SkillTab::Al | SkillTab::ScionAl => Some(self.skills.mastery(&assets).categories.archlord.clone()),
+            t => t.category().map(|c| self.skills.mastery(&assets).categories.names(race, class, c).to_vec()),
+        };
+        if self.skills.show_book && book_tab.is_tree() {
+            v.book_tree = self.skills_tree(book_tab, false);
+        }
+        if self.skills.show_book && !book_tab.is_tree() {
             for (id, (tid, level)) in &known {
                 if *tid == NORMAL_ATTACK {
+                    continue;
+                }
+                let in_tab = {
+                    let tables = self.skills.tables(&assets);
+                    let lower = tables.by_tid.get(tid).map(|d| d.name.to_lowercase()).unwrap_or_default();
+                    let archlord = tables.by_tid.get(tid).is_some_and(|d| d.kind == 9);
+                    match &book_names {
+                        _ if matches!(book_tab, SkillTab::Al | SkillTab::ScionAl) && archlord => true,
+                        Some(names) => names.contains(&lower),
+                        None => true,
+                    }
+                };
+                if !in_tab {
                     continue;
                 }
                 let name = self.skills.name(&assets, *tid);
@@ -718,6 +1195,14 @@ impl App {
             }
             v.book.sort_by(|a, b| a.name.cmp(&b.name));
         }
+        if let (Some(_), true) = (self.skills.trainer, self.skills.trainer_tab.is_tree()) {
+            v.trainer_tree = self.skills_tree(self.skills.trainer_tab, true);
+        }
+        if let Some((_, learn)) = self.skills.confirm {
+            // Messages de l'[EventMap] d'Archonia (Skill_ConfirmLearnSkill, Skill_ConfirmUpgradeSkill), sans le nom.
+            v.confirm = Some(super::portal_glue::ui_event_cached(&mut self.skills.events, &assets, if learn { "Skill_ConfirmLearnSkill" } else { "Skill_ConfirmUpgradeSkill" }));
+        }
+        let trainer_names: Option<Vec<String>> = self.skills.trainer_tab.category().map(|c| self.skills.mastery(&assets).categories.names(race, class, c).to_vec());
         if let Some((npc, (race, class))) = self.skills.trainer {
             let col = class_column(race, class);
             let (level, money, points) = (self.hud.stats.level.unwrap_or(1), self.hud.stats.money.unwrap_or(0), self.hud.stats.skill_points.unwrap_or(0));
@@ -740,6 +1225,10 @@ impl App {
             let mut entries = Vec::new();
             for (tid, d) in tids {
                 if !seen_names.insert(d.name.clone()) {
+                    continue;
+                }
+                // Onglet Combat… Passive : catégorie de `SKILLMASTERY.txt` (`SkillSetBuyMastery0` à `3`).
+                if trainer_names.as_ref().is_some_and(|n| !n.is_empty() && !n.contains(&d.name.to_lowercase())) {
                     continue;
                 }
                 let owned = known.iter().find(|(_, (t, _))| *t == tid).map(|(_, (_, l))| *l).unwrap_or(0);
@@ -768,7 +1257,8 @@ impl App {
                 Shortcut::Item(t) => {
                     let n: i32 = self.items.values().filter(|it| it.template_id == Some(*t) && it.status == Some(2)).map(|it| it.count.unwrap_or(1)).sum();
                     // Potion de métamorphose : recharge commune de 10 min (AgpmItem op 19, voir `app_morph.rs`).
-                    let (cooldown, left_s) = self.morph_item_cooldown(*t).unwrap_or((0.0, 0));
+                    // Objets à compétence et orbe de résurrection : recharge de l'op 4 / 18 (voir `app_consumables.rs`).
+                    let (cooldown, left_s) = self.morph_item_cooldown(*t).or_else(|| self.consumables_item_cooldown(*t)).unwrap_or((0.0, 0));
                     (Some(n), cooldown, left_s)
                 }
             };
@@ -827,6 +1317,100 @@ impl App {
     }
 }
 
+/// Race et classe du joueur dans ses facteurs (`FACTOR_TYPE` 0 et 2) ; celles de la forme courante du Dragon Scion.
+fn player_race_class(hud: &HudState) -> Option<(i32, i32)> {
+    let f = &hud.stats.factors;
+    Some((*f.get(&(factor_part::TYPE, 0))?, *f.get(&(factor_part::TYPE, 2))?))
+}
+
+impl App {
+    /// Cases de l'arbre `tab` (livre, ou instructeur avec `trainer`) : niveau connu, prochaine étape possible
+    /// et infobulle avec les conditions de l'arbre (FUN_1402b8f40 : compétences exigées, niveaux cumulés, points
+    /// héroïques dépensés).
+    fn skills_tree(&mut self, tab: SkillTab, trainer: bool) -> Vec<Option<TreeSlot>> {
+        let assets = self.assets.clone();
+        let (race, class) = player_race_class(&self.hud).unwrap_or((0, 0));
+        let rows: Vec<MasteryRow> = self.skills.mastery(&assets).tree(tab, race, class).map(<[MasteryRow]>::to_vec).unwrap_or_default();
+        let known: HashMap<i32, i32> = self.skills.known.values().map(|(t, l)| (*t, *l)).collect();
+        let heroic = tab.heroic();
+        // ConditionD : points héroïques dépensés, ou niveaux cumulés de toutes les compétences apprises.
+        let total = if heroic { self.skills.heroic_spent(&assets, &known) } else { mastery_levels(&self.skills.tables(&assets).by_tid, &known, None) };
+        let (level, money) = (self.hud.stats.level.unwrap_or(1), self.hud.stats.money.unwrap_or(0));
+        let points = if heroic { self.hud.stats.heroic_points } else { self.hud.stats.skill_points }.unwrap_or(0);
+        let mut out = Vec::new();
+        for row in rows {
+            let Some(d) = self.skills.tables(&assets).by_tid.get(&row.tid).cloned() else {
+                out.push(None);
+                continue;
+            };
+            let owned = known.get(&row.tid).copied().unwrap_or(0);
+            let id = self.skills.id_of(row.tid);
+            // Conditions (FUN_1402b8f40) : A et B, niveau compté de la compétence ; C (« 1722;30 »), niveaux cumulés
+            // des compétences de la race et de la classe du gabarit ; D, total. Lignes de l'infobulle dans l'ordre des
+            // colonnes, textes de FUN_1408756f0 : « %s %s : %s %d%s » (sysstr 678, 14, nom, niveau, 262),
+            // `RequireSkillPoint` (nom de la classe : `Slayer`, `Obiter`, `Scion`, `Summerner`), `RequireTotalSkillPoint`
+            // ou `RequireTotalHeroicSkillPoint`.
+            let mut lines: Vec<(String, bool)> = Vec::new();
+            let mut met = true;
+            for &(rtid, n) in &row.requires {
+                let name = self.skills.name(&assets, rtid);
+                let got = self.skills.tables(&assets).by_tid.get(&rtid).map_or(0, |r| counted_level(r, known.get(&rtid).copied().unwrap_or(0)));
+                let [required, skill, lv] = [678, 14, 262].map(|id| super::npc_glue::sysstr(&assets, id).unwrap_or_default());
+                lines.push((format!("{required} {skill} : {name} {n} {lv}"), got >= n));
+                met &= got >= n;
+            }
+            if let Some((ctid, n)) = row.class_levels {
+                let rc = self.skills.mastery(&assets).class_of.get(&ctid).copied().or_else(|| crate::scene::template_race_class(&assets, ctid));
+                let got = rc.map(|rc| mastery_levels(&self.skills.tables(&assets).by_tid, &known, Some(rc)));
+                let ok = got.is_some_and(|g| g >= n);
+                met &= ok;
+                if let Some((_, class)) = rc {
+                    let key = match class {
+                        1 => "Slayer",
+                        2 => "Obiter",
+                        3 => "Scion",
+                        4 => "Summerner",
+                        _ => "",
+                    };
+                    let class_name = if key.is_empty() { String::new() } else { crate::hud::ui_message(&mut self.hud, &assets, key) };
+                    let format = crate::hud::ui_message(&mut self.hud, &assets, "RequireSkillPoint");
+                    if !format.is_empty() {
+                        lines.push((super::chat_glue::printf(&format, &[class_name.as_str(), n.to_string().as_str()]), ok));
+                    }
+                }
+            }
+            if row.total > 0 {
+                let format = crate::hud::ui_message(&mut self.hud, &assets, if heroic { "RequireTotalHeroicSkillPoint" } else { "RequireTotalSkillPoint" });
+                if !format.is_empty() {
+                    lines.push((super::chat_glue::printf(&format, &[row.total.to_string().as_str()]), total >= row.total));
+                }
+                met &= total >= row.total;
+            }
+            let next = d.levels.get(owned.max(0) as usize).cloned();
+            let cost = super::tax_glue::taxed(next.as_ref().map(|l| if owned == 0 { l.cost } else { l.upgrade_cost }).unwrap_or(0));
+            let possible = trainer
+                && met
+                && next.as_ref().is_some_and(|l| level >= l.require_level && points >= if heroic { l.require_heroic } else { l.require_point } && money >= cost);
+            let mut tip = self.skills.tooltip(&assets, row.tid, if trainer { (owned + 1).min(d.levels.len() as i32) } else { owned });
+            // Prix (FUN_1408756f0) : « %s : %d%s » (sysstr 137, prix, `Money_Name`), en rouge sans l'or ; points
+            // héroïques et charisme : lignes de `skilltooltip.txt` (voir `tooltip`).
+            if let (true, Some(_)) = (trainer, &next) {
+                if cost > 0 {
+                    let label = super::npc_glue::sysstr(&assets, 137).unwrap_or_default();
+                    let money_name = crate::hud::ui_message(&mut self.hud, &assets, "Money_Name");
+                    tip.push((format!("{label} : {cost}{money_name}"), if money >= cost { Color32::from_rgb(255, 220, 120) } else { Color32::from_rgb(255, 110, 90) }));
+                }
+            }
+            for (text, ok) in lines {
+                tip.push((text, if ok { Color32::from_rgb(160, 230, 160) } else { Color32::from_rgb(255, 110, 90) }));
+            }
+            let cooldown = id.map(|id| self.skills.cooldown(id)).unwrap_or(0.0);
+            out.push(Some(TreeSlot { tid: row.tid, name: d.name.clone(), level: owned, max_level: d.levels.len() as i32, possible, cooldown, tip }));
+        }
+        out
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -846,6 +1430,44 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
+    /// Décompte des maîtrises (FUN_1402fdc60, FUN_1402fd210, FUN_1402fe170).
+    #[test]
+    fn niveaux_des_maitrises() {
+        assert_eq!([1, 9, 109, 210, 20010, 29, 18, 1009].map(attribute_rest), [1, 9, 9, 0, 0, 9, 8, 9]);
+        let spec = parse_spec("Name\tattribute\ttransform_target\tauto_attack\nSupreme Damage\t109\t\t\nCooking\t8\t\t\nSlayer of Evolution\t10\t5\t\nNormal Attack\t1\t\t1\nDual Slash\t1\t\t\n");
+        assert!(spec["Supreme Damage"].passive && spec["Cooking"].product && spec["Slayer of Evolution"].evolution && spec["Normal Attack"].auto_attack);
+        assert_eq!(spec["Dual Slash"], Spec::default());
+        // Compétences admises au niveau 1 par le Slayer (race 4, classe 1), sauf la 6 (Knight seulement).
+        let slayer = 1 << class_column(4, 1).unwrap();
+        let skill = |classes: u16, spec: Spec| SkillData { levels: vec![Level { classes, ..Level::default() }], spec, ..SkillData::default() };
+        let by_tid: HashMap<i32, SkillData> = [
+            (1, skill(slayer, Spec::default())),
+            (2, skill(slayer, Spec { passive: true, ..Spec::default() })),
+            (3, skill(slayer, Spec { evolution: true, ..Spec::default() })),
+            (4, skill(slayer, Spec { auto_attack: true, ..Spec::default() })),
+            (5, skill(slayer, Spec { product: true, ..Spec::default() })),
+            (6, skill(1 << class_column(1, 1).unwrap(), Spec::default())),
+        ]
+        .into_iter()
+        .collect();
+        let known: HashMap<i32, i32> = [(1, 40), (2, 5), (3, 1), (4, 1), (5, 50), (6, 7), (99, 3)].into_iter().collect();
+        // ConditionC : niveaux (30 au plus, 100 pour une production), sans passives, évolutions ni attaque normale.
+        assert_eq!(mastery_levels(&by_tid, &known, Some((4, 1))), 30 + 50);
+        assert_eq!(mastery_levels(&by_tid, &known, Some((4, 2))), 0);
+        assert_eq!(mastery_levels(&by_tid, &known, Some((4, 0))), 0);
+        // ConditionD (-1, -1) : toutes les compétences connues, sans exclusion.
+        assert_eq!(mastery_levels(&by_tid, &known, None), 30 + 5 + 1 + 1 + 50 + 7);
+        assert!(admits(&by_tid[&6], 1, 1) && !admits(&by_tid[&6], 1, 3));
+        // Textes de l'infobulle (FUN_1408756f0) dans la copie déchiffrée d'ArchCore.
+        let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../../ArchCore/data/client-ini");
+        let Ok(raw) = std::fs::read(dir.join("uimessage.txt")) else { return };
+        let text = String::from_utf8_lossy(&raw).into_owned();
+        let msg = |k: &str| text.lines().find_map(|l| l.split_once('\t').filter(|(a, _)| a.trim() == k).map(|(_, v)| v.trim().to_string())).unwrap_or_default();
+        assert_eq!(super::super::chat_glue::printf(&msg("RequireSkillPoint"), &[msg("Slayer").as_str(), "30"]), "Slayer Skill 30 Points Requirement");
+        assert_eq!(super::super::chat_glue::printf(&msg("RequireTotalSkillPoint"), &["20"]), "All Skills 20 Points Requirement");
+        assert_eq!(super::super::chat_glue::printf(&msg("RequireTotalHeroicSkillPoint"), &["9"]), "Total Heroic Skill Points Required: 9.");
+    }
+
     #[test]
     fn infobulles_des_competences() {
         let text = "Name\tDescription\tLevel\tRequiredLevel\tCostMP\tCastTime\nDual Slash\tDouble Attack\tV\tV\tV\t\nPower Rush\t\t\t\t\t\n";
@@ -854,8 +1476,8 @@ mod tests {
         assert_eq!(row.description, "Double Attack");
         assert!(row.shown.contains("RequiredLevel") && row.shown.contains("CostMP") && !row.shown.contains("CastTime"));
         assert!(tips["power rush"].shown.is_empty());
-        assert_eq!(seconds(2000), "2 s");
-        assert_eq!(seconds(7450), "7,45 s");
-        assert_eq!(seconds(2500), "2,5 s");
+        assert_eq!(seconds(2000, true, "Seconde"), "2.0 Seconde");
+        assert_eq!(seconds(7450, false, "Seconde"), "7 Seconde");
+        assert_eq!(seconds(2500, true, "Seconde"), "2.5 Seconde");
     }
 }

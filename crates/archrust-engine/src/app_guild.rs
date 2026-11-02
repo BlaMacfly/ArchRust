@@ -432,7 +432,7 @@ fn shown_name(name: &str) -> String {
 }
 
 /// Remplace les `{{…}}` d'un message d'événement par `value`.
-fn fill_braces(text: &str, value: &str) -> String {
+pub(super) fn fill_braces(text: &str, value: &str) -> String {
     let mut out = String::new();
     let mut rest = text;
     while let Some(i) = rest.find("{{") {
@@ -1998,7 +1998,7 @@ impl App {
             .filter(|i| i.status == Some(guild::warehouse::ITEM_STATUS))
             .filter_map(|i| {
                 let tid = i.template_id?;
-                let name = crate::scene::item_name_for_tid(&assets, tid).unwrap_or_else(|| format!("Objet TID {tid}"));
+                let name = crate::scene::item_name_for_tid(&assets, tid).unwrap_or_default();
                 Some(GwareItem { iid: i.id, tid, count: i.count.unwrap_or(1), grid: i.grid?, name })
             })
             .collect();

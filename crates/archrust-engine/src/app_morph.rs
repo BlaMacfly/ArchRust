@@ -18,7 +18,7 @@
 //!   (durée en minutes), puis chaque minute tant que le joueur est métamorphosé ou évolué, `Transform_Restore_Notice`
 //!   à l'échéance ;
 //! * AgpmItem op 27 : messages `UseItemFailedBySiegewar`, `UseItemCannotTransformCreature`,
-//!   `UseItemCannotTransformPotion` (code 3 : fenêtre au sens inconnu, ignoré) ; ops 19 / 20 : recharge commune des
+//!   `UseItemCannotTransformPotion` (code 3, `ReverseOrbError` : voir `app_consumables.rs`) ; ops 19 / 20 : recharge commune des
 //!   potions de métamorphose (10 min), affichée sur la barre de raccourcis ;
 //! * refus du client métamorphosé, sauf l'ArchLord (`FUN_1402944c0`) : compétences (`FUN_14069a0c0`, sans
 //!   message), dialogue des PNJ (`FUN_140574e80`, sans message), passeports (`Item_TryUseTelScrollOnTransform`,
@@ -430,7 +430,7 @@ impl MorphGlue {
 
 /// Infobulle des deux icônes : `sysstr` 665 « Cancel Metamorphosis ».
 fn tooltip(glue: &mut MorphGlue, assets: &Assets) -> Vec<(String, Color32)> {
-    let text = glue.data(assets).sysstr.get(&665).cloned().filter(|t| !t.is_empty()).unwrap_or_else(|| "Cancel Metamorphosis".into());
+    let text = glue.data(assets).sysstr.get(&665).cloned().unwrap_or_default();
     vec![(text, Color32::WHITE)]
 }
 
@@ -485,7 +485,7 @@ fn equip_request(r: &ItemUi, items: &HashMap<i32, ItemRecord>, d: &MorphData) ->
 /// équipement porté ou retiré refusé par `FUN_1401bca10` sous métamorphose ou évolution (`flags` : drapeaux
 /// d'état des objets, AGPMITEM champ 19). Avant `app_items::panel`.
 #[allow(clippy::too_many_arguments)]
-pub fn item_requests(glue: &mut MorphGlue, items: &HashMap<i32, ItemRecord>, flags: &HashMap<i32, u32>, requests: &mut Vec<ItemUi>, hud: &mut HudState, assets: &Assets, ui: &mut UiState) {
+pub fn item_requests(glue: &mut MorphGlue, items: &HashMap<i32, ItemRecord>, flags: &HashMap<i32, u32>, requests: &mut Vec<ItemUi>, hud: &mut HudState, assets: &Assets, _ui: &mut UiState) {
     let (transformed, archlord, race_class) = (glue.transformed(glue.me), glue.archlord, race_class(hud));
     let changed_form = transformed || glue.evolved(glue.me);
     let factors = char_factors(hud);
@@ -507,7 +507,6 @@ pub fn item_requests(glue: &mut MorphGlue, items: &HashMap<i32, ItemRecord>, fla
             Err(key) => crate::hud::ui_message(hud, assets, key),
         };
         hud.push_system(&text);
-        ui.push_chat(format!("[métamorphose] {text}"));
         false
     });
 }
@@ -573,7 +572,6 @@ impl App {
     fn morph_message(&mut self, text: &str) {
         if !text.trim().is_empty() {
             self.hud.push_system(text);
-            self.ui.push_chat(format!("[métamorphose] {text}"));
         }
     }
 
@@ -674,7 +672,8 @@ impl App {
                     let text = crate::hud::ui_message(&mut self.hud, &self.assets, key);
                     self.morph_message(&text);
                 }
-                None => log::info!("objet : refus {code} du serveur (fenêtre d'Archonia non reproduite)"),
+                // Code 3 (`ReverseOrbError`) : relevé par `consumables_observe` (voir `app_consumables.rs`).
+                None => {}
             },
             MorphEvent::ReuseTime { cid, remain_ms } if cid == me || cid == 0 => {
                 self.morph.reuse_end = Some(Instant::now() + Duration::from_millis(remain_ms));

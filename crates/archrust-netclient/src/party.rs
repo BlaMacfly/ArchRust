@@ -7,6 +7,10 @@
 //!   reçu   : 0 invitation (auteur, nom de l'auteur), 1 refus et 2 acceptation (cible, nom de l'invité),
 //!            4 exclusion, 11 nouveau chef (auteur), échecs 5 autre groupe, 6 déjà membre, 7 plein,
 //!            8 pas chef, 10 joueur absent
+//! Rappel de groupe (Summoning Orb, usage 15 ; Archonia AgcmParty FUN_1406ec890, AgcmUIParty) :
+//!   reçu   : 15 demande (1 = CID du lanceur, ignorée s'il n'est pas du même groupe : `UI_ConfirmRecall`),
+//!            16 et 17 au lanceur (1 = CID du membre qui accepte / refuse)
+//!   envoyé : 16 accepter (1 soi, 2 lanceur ; précédé de l'annulation d'échange 0x07 op 5), 17 refuser
 //! Groupe (0x08, drapeaux 2) : 0 opération, 1 identifiant, 2 membres au plus, 3 membres, 4 CID d'un
 //!   membre, 5 liste des CID (u32, chef en tête), 8 répartition de l'expérience, 10 des objets.
 //!   reçu   : 0 groupe et liste, 3 membre ajouté, 4 membre retiré, 1 groupe retiré, 5 et 6 réglages
@@ -47,6 +51,10 @@ pub mod mgmt {
     /// L'invité refuse les invitations de groupe (options).
     pub const FAILED_REFUSE: i8 = 14;
     pub const DELEGATION_LEADER: i8 = 11;
+    /// Rappel de groupe : demande (S → C), acceptation et refus (C → S, puis S → C au lanceur).
+    pub const REQUEST_RECALL: i8 = 15;
+    pub const ACCEPT_RECALL: i8 = 16;
+    pub const REJECT_RECALL: i8 = 17;
 }
 
 /// Répartition de l'expérience (champ 8).
@@ -152,6 +160,11 @@ pub enum PartyCommand {
     SetExpType(i8),
     /// Répartition des objets (chef).
     SetItemDivision(i8),
+    /// Rappel accepté (« Accept » d'`UI_ConfirmRecall`) : CID du lanceur. L'annulation d'échange (0x07 op 5) qui
+    /// le précède dans Archonia (FUN_1405e2db0) est envoyée à part par le moteur.
+    AcceptRecall(i32),
+    /// Rappel refusé (« Ignore ») : CID du lanceur.
+    RejectRecall(i32),
 }
 
 /// Paquet à envoyer pour une demande : schéma et valeurs. `me` = CID du joueur.
@@ -176,6 +189,8 @@ pub fn command_packet(
         PartyCommand::Leave => management(mgmt::LEAVE, None, None),
         PartyCommand::Banish(cid) => management(mgmt::BANISH, Some(*cid), None),
         PartyCommand::Delegate(cid) => management(mgmt::DELEGATION_LEADER, Some(*cid), None),
+        PartyCommand::AcceptRecall(leader) => management(mgmt::ACCEPT_RECALL, Some(*leader), None),
+        PartyCommand::RejectRecall(leader) => management(mgmt::REJECT_RECALL, Some(*leader), None),
         PartyCommand::SetExpType(t) => (
             main::PARTY,
             sparse(
@@ -226,6 +241,11 @@ pub enum PartyNotice {
     Banished,
     /// Échec d'une demande : opération (`mgmt::FAILED_*`) et nom concerné.
     Failed { code: i8, name: String },
+    /// Un membre du groupe a utilisé un orbe de rappel (op 15) : lanceur et son nom.
+    RecallRequested(Invitation),
+    /// Au lanceur : ce membre accepte (op 16) ou refuse (op 17) d'être rappelé.
+    RecallAccepted(i32),
+    RecallRejected(i32),
 }
 
 impl PartyNotice {
@@ -251,6 +271,9 @@ impl PartyNotice {
             PartyNotice::Rejected(n) => format!("{n} refuse votre invitation."),
             PartyNotice::Accepted(n) => format!("{n} accepte votre invitation."),
             PartyNotice::Banished => "Vous avez été exclu du groupe.".into(),
+            PartyNotice::RecallRequested(i) => format!("rappel demandé par {}", i.name),
+            PartyNotice::RecallAccepted(c) => format!("rappel accepté par {}", name(c)),
+            PartyNotice::RecallRejected(c) => format!("rappel refusé par {}", name(c)),
             PartyNotice::Failed { code, name } => {
                 let who = if name.is_empty() { "Ce joueur" } else { name.as_str() };
                 match *code {
@@ -281,6 +304,8 @@ pub struct PartyState {
     pub invitations: Vec<Invitation>,
     /// Noms connus (paquets de gestion, fiches de personnage).
     pub names: HashMap<i32, String>,
+    /// Rappel en attente de réponse (`UI_ConfirmRecall` ouverte) : lanceur.
+    pub recall: Option<Invitation>,
 }
 
 impl PartyState {
@@ -380,8 +405,8 @@ impl PartyState {
 
     /// Applique un paquet de gestion reçu.
     pub fn apply_management(&mut self, m: &PartyManagement) -> Option<PartyNotice> {
-        // Nom transmis : celui de l'auteur pour une invitation, de la cible sinon.
-        let named = if m.op == mgmt::INVITE { m.author } else { m.target };
+        // Nom transmis : celui de l'auteur pour une invitation et le rappel, de la cible sinon.
+        let named = if matches!(m.op, mgmt::INVITE | mgmt::REQUEST_RECALL | mgmt::ACCEPT_RECALL | mgmt::REJECT_RECALL) { m.author } else { m.target };
         if let Some(cid) = named {
             self.learn_name(cid, &m.name);
         }
@@ -407,6 +432,19 @@ impl PartyState {
                 }
                 Some(PartyNotice::LeaderChanged(leader))
             }
+            // FUN_1405e4a90 : lanceur inconnu ou d'un autre groupe → rien ; sinon nom et CID retenus (+0x1b04).
+            mgmt::REQUEST_RECALL => {
+                let cid = m.author?;
+                if !self.in_party() || !self.contains(cid) {
+                    return None;
+                }
+                let name = if m.name.is_empty() { self.name_of(cid) } else { m.name.clone() };
+                let request = Invitation { cid, name };
+                self.recall = Some(request.clone());
+                Some(PartyNotice::RecallRequested(request))
+            }
+            mgmt::ACCEPT_RECALL => Some(PartyNotice::RecallAccepted(m.author?)),
+            mgmt::REJECT_RECALL => Some(PartyNotice::RecallRejected(m.author?)),
             code @ (mgmt::FAILED_OTHER_PARTY
             | mgmt::FAILED_ALREADY_MEMBER
             | mgmt::FAILED_FULL
@@ -431,6 +469,7 @@ impl PartyState {
     pub fn reset(&mut self) {
         self.clear_party();
         self.invitations.clear();
+        self.recall = None;
     }
 }
 
@@ -530,6 +569,29 @@ mod tests {
         let n = s.apply_management(&management(mgmt::FAILED_NO_LOGIN, 1, 0, "Inconnu"));
         let n = n.unwrap();
         assert_eq!(n.message(&s), "Inconnu n'est pas en jeu.");
+    }
+
+    #[test]
+    fn rappel_de_groupe() {
+        let mut s = PartyState { id: Some(1), members: vec![7, 9], ..Default::default() };
+        s.learn_name(7, "Alice");
+        // Lanceur d'un autre groupe : ignoré.
+        assert_eq!(s.apply_management(&management(mgmt::REQUEST_RECALL, 12, 0, "")), None);
+        assert_eq!(s.recall, None);
+        let n = s.apply_management(&management(mgmt::REQUEST_RECALL, 7, 0, ""));
+        assert_eq!(n, Some(PartyNotice::RecallRequested(Invitation { cid: 7, name: "Alice".into() })));
+        assert_eq!(s.recall.as_ref().map(|r| r.cid), Some(7));
+        // Côté lanceur : réponses des membres (champ 1).
+        assert_eq!(s.apply_management(&management(mgmt::ACCEPT_RECALL, 9, 7, "")), Some(PartyNotice::RecallAccepted(9)));
+        assert_eq!(s.apply_management(&management(mgmt::REJECT_RECALL, 9, 7, "")), Some(PartyNotice::RecallRejected(9)));
+        // Envoi : 1 soi, 2 lanceur.
+        for (cmd, op) in [(PartyCommand::AcceptRecall(7), mgmt::ACCEPT_RECALL), (PartyCommand::RejectRecall(7), mgmt::REJECT_RECALL)] {
+            let (schema, values) = command_packet(&cmd, 9);
+            let m = decode_management(&incoming(schema, &values)).unwrap();
+            assert_eq!((m.op, m.author, m.target), (op, Some(9), Some(7)));
+        }
+        s.reset();
+        assert_eq!(s.recall, None);
     }
 
     #[test]

@@ -39,8 +39,6 @@ const COLS: i16 = 4;
 const TYPE_EQUIP: i32 = 0;
 /// `Type` d'`ItemTemplateAll.ini` : objet qui s'utilise (potion, parchemin…).
 const TYPE_USABLE: i32 = 1;
-/// Parties du corps des mains (`Part` 9 gauche, 10 droite) : armes et boucliers.
-const HAND_PARTS: [i32; 2] = [9, 10];
 /// Partie du corps du casque (`Part` 3, colonne « Head » des options d'objets).
 const PART_HEAD: i32 = 3;
 
@@ -54,11 +52,10 @@ struct ItemTemplate {
 #[derive(Default)]
 pub struct ItemsGlue {
     templates: Option<HashMap<i32, ItemTemplate>>,
+    /// Messages des événements d'interface (`[EventMap]`).
+    events: Option<HashMap<String, String>>,
     /// Fenêtre du personnage (`Character_Status`) ouverte.
     pub show_character: bool,
-    /// Ensemble d'animations de l'arme portée par le joueur (`animation::weapon_anim_equip`) : les
-    /// armes ne font pas partie de `player.equipment` (pas encore dessinées en main).
-    pub weapon_equip: u32,
     /// Objet dont la destruction attend l'accord du joueur.
     destroy: Option<i32>,
     /// Pile à séparer et quantité choisie.
@@ -96,7 +93,7 @@ fn load_templates(assets: &Assets) -> HashMap<i32, ItemTemplate> {
 fn item_label(assets: &Assets, item: &ItemRecord) -> String {
     item.template_id
         .and_then(|tid| item_name_for_tid(assets, tid))
-        .unwrap_or_else(|| format!("Objet TID {}", item.template_id.unwrap_or_default()))
+        .unwrap_or_default()
 }
 
 /// Première case libre de l'inventaire (sac, ligne, colonne).
@@ -130,7 +127,8 @@ fn request(glue: &mut ItemsGlue, assets: &Assets, items: &HashMap<i32, ItemRecor
         }
         ItemUi::DropOnBag { drag, grid } => {
             let item = items.get(&drag.iid)?;
-            (item.grid != Some(grid)).then_some(Ok(ItemCommand::Move { iid: drag.iid, grid }))
+            // Objet du sac du familier (statut 13) : sorti vers cette case, même si elle a les mêmes coordonnées.
+            (item.status != Some(status::INVENTORY) || item.grid != Some(grid)).then_some(Ok(ItemCommand::Move { iid: drag.iid, grid }))
         }
         ItemUi::DropOnEquip(drag) => {
             let item = items.get(&drag.iid)?;
@@ -148,6 +146,8 @@ fn request(glue: &mut ItemsGlue, assets: &Assets, items: &HashMap<i32, ItemRecor
         }
         // Traité par la maison des ventes (`app_auction.rs`).
         ItemUi::SalesBox => None,
+        // Traité par l'inventaire Cash (`app_petbag.rs`).
+        ItemUi::CashInventory => None,
     }
 }
 
@@ -168,12 +168,13 @@ pub fn panel(
     hud: &mut HudState,
     assets: &Assets,
     net: Option<&NetLink>,
-    ui: &mut UiState,
+    _ui: &mut UiState,
 ) {
     for r in requests {
         match request(glue, assets, items, r) {
             Some(Ok(cmd)) => send(net, cmd),
-            Some(Err(text)) => ui.push_chat(format!("[objet] {text}")),
+            // Refus du client : Archonia n'affiche rien.
+            Some(Err(text)) => log::debug!("objet : {text}"),
             None => {}
         }
     }
@@ -190,7 +191,7 @@ pub fn panel(
     if let Some(iid) = glue.destroy {
         let name = items.get(&iid).map(|i| item_label(assets, i));
         // Message de l'[EventMap] d'Archonia (`Action=4:1:-1:`), suivi du nom de l'objet.
-        let text = format!("Do you really want to destroy this item?___[{}]", name.as_deref().unwrap_or("?"));
+        let text = format!("{}___[{}]", super::portal_glue::ui_event_cached(&mut glue.events, assets, "Item_ConfirmDestroyItem"), name.as_deref().unwrap_or_default());
         let answer = crate::hud::confirm_box(ctx, hud, assets, ("destroy", iid), &text);
         match (answer, name) {
             (Some(true), Some(_)) => {
@@ -212,7 +213,8 @@ pub fn panel(
             Some(true) if total > 1 => {
                 match free_cell(items.values()) {
                     Some(grid) => send(net, ItemCommand::Split { iid, count: count.clamp(1, total - 1), grid }),
-                    None => ui.push_chat("[objet] Aucune case libre dans l'inventaire."),
+                    // Inventaire plein : `INV_MSG_Full` de l'[EventMap].
+                    None => hud.push_system(&super::portal_glue::ui_event_cached(&mut glue.events, assets, "INV_MSG_Full")),
                 }
                 glue.split = None;
             }
@@ -246,8 +248,7 @@ impl App {
             WorldEvent::ItemUsed { tid, user, .. } => {
                 let mine = self.player.as_ref().is_some_and(|p| Some(p.cid) == user);
                 if let (true, Some(tid)) = (mine || user.is_none(), tid) {
-                    let name = item_name_for_tid(&self.assets, tid).unwrap_or_else(|| format!("Objet TID {tid}"));
-                    self.ui.push_chat(format!("[objet] « {name} » utilisé."));
+                    log::debug!("objet {tid} utilisé");
                 }
             }
             WorldEvent::ReturnPoint { enabled } => {
@@ -260,28 +261,23 @@ impl App {
         }
     }
 
-    /// L'équipement porté s'affiche sur le modèle du joueur : modèle rechargé quand il change. Les
-    /// armes et boucliers sont laissés de côté tant qu'ils ne suivent pas les os de la main ; le casque
-    /// aussi quand la case « Afficher le casque » des options est décochée.
+    /// L'équipement porté s'affiche sur le modèle du joueur : modèle rechargé quand il change. Armes et
+    /// boucliers vont dans les mains (voir `worn`) ; le casque est laissé de côté quand la case
+    /// « Afficher le casque » des options est décochée ; un objet à durabilité nulle n'est pas dessiné
+    /// (`worn::durability_hides`, durabilité reçue par `app_repair.rs`).
     pub(super) fn items_frame(&mut self) {
         let (glue, assets) = (&mut self.item_ui, &self.assets);
         let helmet = self.options.display.helmet;
+        let durability = &self.repair.durability;
         let mut worn: Vec<EquipmentView> = self
             .items
             .values()
             .filter(|i| i.status == Some(status::EQUIP))
-            .filter(|i| glue.template(assets, i.template_id).part.is_none_or(|p| !HAND_PARTS.contains(&p) && (helmet || p != PART_HEAD)))
+            .filter(|i| glue.template(assets, i.template_id).part.is_none_or(|p| helmet || p != PART_HEAD))
+            .filter(|i| !i.template_id.and_then(|t| crate::worn::item_look(assets, t)).is_some_and(|l| crate::worn::durability_hides(&l, durability.get(&i.id).copied())))
             .filter_map(|i| Some(EquipmentView { item_id: i.id, template_id: i.template_id?, count: i.count.unwrap_or(1) as i16 }))
             .collect();
         worn.sort_by_key(|e| e.item_id);
-        let hands: Vec<EquipmentView> = self
-            .items
-            .values()
-            .filter(|i| i.status == Some(status::EQUIP))
-            .filter(|i| glue.template(assets, i.template_id).part.is_some_and(|p| HAND_PARTS.contains(&p)))
-            .filter_map(|i| Some(EquipmentView { item_id: i.id, template_id: i.template_id?, count: 1 }))
-            .collect();
-        glue.weapon_equip = crate::animation::weapon_anim_equip(crate::scene::equipped_weapon_type(assets, &hands));
         let Some(player) = self.player.as_ref() else { return };
         // Métamorphosé : rien n'est redessiné ; l'op 12 rend le modèle d'origine, puis ce rechargement pose
         // l'équipement changé pendant la forme (voir `app_morph.rs`).

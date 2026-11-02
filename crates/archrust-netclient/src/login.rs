@@ -409,6 +409,50 @@ impl LoginClient {
         })
     }
 
+    /// Retour à la sélection des personnages depuis le monde (voir `return_login`) : nouvelle connexion au
+    /// serveur de connexion, op 6 (compte, clé du monde) au lieu de la demande de clé de hachage, clé de hachage
+    /// reçue, connexion avec le compte et le mot de passe gardés, op 7 attendu ; puis, comme FUN_14072d9e0
+    /// d'Archonia, le monde choisi (op 3/4/5) et la liste des personnages (op 6/7). La liste des mondes n'est pas
+    /// redemandée (le client garde la sienne).
+    pub async fn return_to_selection(
+        host: &str,
+        port: u16,
+        language: Option<&str>,
+        account: &str,
+        password: &str,
+        key: i32,
+        world: &str,
+    ) -> Result<(Self, Vec<CharacterSummary>), NetError> {
+        let mut conn = Connection::connect("login", host, port).await?;
+        conn.language = language.map(str::to_string);
+        conn.handshake().await?;
+        let (schema, values) = crate::return_login::reconnect_packet(account, key);
+        conn.send(schema, &values).await?;
+        let hk = conn
+            .expect_where("clé de hachage du retour", |p| {
+                p.is(packet_type::LOGIN, Some(login_op::HASHKEY as i64)) || p.is(packet_type::LOGIN, Some(login_op::LOGIN_RESULT as i64))
+            })
+            .await?;
+        if hk.op() == Some(login_op::LOGIN_RESULT as i64) {
+            let code = hk.get(10).and_then(Value::as_i64).unwrap_or(-1);
+            return Err(NetError::Server(format!("retour à la sélection refusé (résultat {code})")));
+        }
+        let hash_key = text(hk.get(1));
+        if hash_key.is_empty() {
+            return Err(NetError::Server("clé de hachage vide".into()));
+        }
+        let mut login = Self { conn, worlds: Vec::new(), hash_key, names: Vec::new() };
+        login.authenticate(account, password).await?;
+        login
+            .conn
+            .expect(packet_type::RETURN_TO_LOGIN, Some(crate::return_login::op::END_PROCESS as i64))
+            .await?;
+        log::info!("[login] retour à la sélection des personnages : fin (0x2F op 7)");
+        login.select_world(world).await?;
+        let chars = login.list_characters().await?;
+        Ok((login, chars))
+    }
+
     pub async fn close(self) {
         self.conn.close().await;
     }

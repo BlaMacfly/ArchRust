@@ -140,6 +140,9 @@ pub struct Mesh {
     /// Liaison au squelette d'une géométrie skinnée du client, pour l'animation
     /// (voir `animation`). `None` pour les maillages statiques.
     pub skin: Option<Arc<crate::animation::SkinBinding>>,
+    /// Pièce d'un objet porté (arme, bouclier, lance) : nœud de la main et matrice d'attache, voir
+    /// `worn`. `None` pour les autres maillages.
+    pub worn: Option<crate::worn::Worn>,
 }
 
 pub struct GpuTexture {
@@ -637,6 +640,7 @@ impl Renderer {
             bounds_center: center,
             bounds_radius: radius,
             skin: None,
+            worn: None,
         }
     }
 

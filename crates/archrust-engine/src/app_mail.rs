@@ -120,7 +120,7 @@ pub fn format_date(secs: i64) -> String {
 
 /// Décalage de l'heure locale à l'instant `secs` (heure d'été comprise), en secondes.
 #[cfg(windows)]
-fn local_offset(secs: i64) -> i64 {
+pub(super) fn local_offset(secs: i64) -> i64 {
     use windows_sys::Win32::Foundation::{FILETIME, SYSTEMTIME};
     use windows_sys::Win32::System::Time::{FileTimeToSystemTime, SystemTimeToFileTime, SystemTimeToTzSpecificLocalTime};
     let ticks = (secs + 11_644_473_600) as u64 * 10_000_000;
@@ -139,7 +139,7 @@ fn local_offset(secs: i64) -> i64 {
 }
 
 #[cfg(not(windows))]
-fn local_offset(_secs: i64) -> i64 {
+pub(super) fn local_offset(_secs: i64) -> i64 {
     0
 }
 

@@ -14,7 +14,7 @@ fn main() -> anyhow::Result<()> {
     let args: Vec<String> = std::env::args().skip(1).collect();
     let assets = Assets::new(Some(PathBuf::from(&args[0])), &[]);
     for tid in args[1..].iter().filter_map(|t| t.parse::<i32>().ok()) {
-        let set = AnimationSet::for_tid(&assets, tid, 0);
+        let set = AnimationSet::for_tid(&assets, tid, 0, true);
         let models = models_for_tid(&assets, tid);
         println!("== TID {tid} : modèles {models:?}, {} type(s) d'animation", set.by_type.len());
         for model in &models {
@@ -25,7 +25,7 @@ fn main() -> anyhow::Result<()> {
             for (gi, geom) in clump.geometries.iter().enumerate() {
                 let Some(skin) = &geom.skin else { continue };
                 let base = geometry_vertices(geom);
-                let binding = SkinBinding { clump: clump.clone(), geometry: gi, base: base.clone() };
+                let binding = SkinBinding { clump: clump.clone(), geometry: gi, base: base.clone(), wearer: None };
                 let radius = geom.bound_radius.max(1.0);
                 let bad_weights = skin.weights.iter().filter(|w| (w.iter().sum::<f32>() - 1.0).abs() > 0.01).count();
                 for (kind, variants) in &set.by_type {

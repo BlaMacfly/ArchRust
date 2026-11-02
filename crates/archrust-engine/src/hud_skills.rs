@@ -1,5 +1,6 @@
-//! Compétences dans les fenêtres d'Archonia : livre des compétences (`UI_Skill`), instructeur
-//! (`UI_SkillBuy`) et barre de raccourcis de `UI_CharInfo` (grilles `Quick_Belt_0(L)`/`(R)` et cases
+//! Compétences dans les fenêtres d'Archonia : livre des compétences (`UI_Skill` et ses onglets Combat, Buff,
+//! Class, Passive, AL ; `UI_ScionArchlordSkill` du Dragon Scion), instructeur (`UI_SkillBuy`, onglets Combat à
+//! Passive ; Combo et Heroic ouvrent les arbres de `hud_mastery.rs`) et barre de raccourcis de `UI_CharInfo` (grilles `Quick_Belt_0(L)`/`(R)` et cases
 //! des potions de vie et de mana).
 //!
 //! Glisser une compétence du livre, ou un objet du sac, sur une case de la barre l'y range ; glisser
@@ -9,6 +10,7 @@
 //! `app_skills.rs`).
 
 use super::items_ui::{icon as item_icon, ItemDrag};
+use super::mastery_ui::{draw_tabs, SkillTab};
 use super::*;
 
 /// Barres de raccourcis en plus d'Archonia (`UI_QuickBelt_1` à `_4`, 520 × 52, fond
@@ -56,6 +58,13 @@ pub enum SkillUi {
     AutoGauge { hp: bool, value: u8 },
     /// Flèches de la barre : une barre en plus (+1) ou en moins (-1).
     Belts(i8),
+    /// Onglet du livre, ou de l'instructeur, choisi (change de fenêtre pour les arbres).
+    Tab(SkillTab),
+    TrainerTab(SkillTab),
+    /// Case d'un arbre de maîtrise choisie.
+    TreeSelect(i32),
+    /// « Apprendre » / « Améliorer » d'un arbre de l'instructeur (confirmation d'Archonia, puis envoi).
+    TreeLearn(i32),
 }
 
 /// Compétence du livre.
@@ -74,6 +83,11 @@ pub struct BookView<'a> {
     pub entries: &'a [BookEntry],
     pub points: Option<i32>,
     pub first: &'a mut usize,
+    /// Onglet courant (Combat… AL, ou AL du Scion : `UI_ScionArchlordSkill`) et onglets ouvrables.
+    pub tab: SkillTab,
+    pub allowed: &'a dyn Fn(SkillTab) -> bool,
+    /// Nom de la classe (texte `2:0:主_Character …`).
+    pub title: String,
 }
 
 /// Compétence enseignée par un instructeur.
@@ -98,6 +112,8 @@ pub struct TrainerView<'a> {
     pub selected: Option<i32>,
     pub points: Option<i32>,
     pub first: &'a mut usize,
+    pub tab: SkillTab,
+    pub allowed: &'a dyn Fn(SkillTab) -> bool,
 }
 
 /// Case de la barre : raccourci, nombre d'objets, part de relance restante, infobulle.
@@ -117,7 +133,7 @@ fn shortcut_icon(ctx: &egui::Context, hud: &mut HudState, assets: &Assets, paint
     }
 }
 
-fn skill_icon(ctx: &egui::Context, hud: &mut HudState, assets: &Assets, painter: &egui::Painter, cell: Rect, tid: i32, tint: Color32) {
+pub(super) fn skill_icon(ctx: &egui::Context, hud: &mut HudState, assets: &Assets, painter: &egui::Painter, cell: Rect, tid: i32, tint: Color32) {
     match hud.skill_icon(assets, tid).and_then(|n| texture_icon(ctx, hud, assets, &n)) {
         Some(t) => {
             painter.image(t, cell.shrink(1.0), Rect::from_min_max(Pos2::ZERO, Pos2::new(1.0, 1.0)), tint);
@@ -130,7 +146,7 @@ fn skill_icon(ctx: &egui::Context, hud: &mut HudState, assets: &Assets, painter:
 
 /// Voile de relance : la part restante du délai assombrit l'icône depuis le haut, avec les
 /// secondes restantes au centre.
-fn cooldown_veil(painter: &egui::Painter, cell: Rect, part: f32, left_s: u32) {
+pub(super) fn cooldown_veil(painter: &egui::Painter, cell: Rect, part: f32, left_s: u32) {
     if part > 0.0 {
         let h = cell.height() * part.clamp(0.0, 1.0);
         painter.rect_filled(Rect::from_min_size(cell.min, Vec2::new(cell.width(), h)), 0.0, Color32::from_black_alpha(200));
@@ -165,7 +181,7 @@ fn list_cells(ui: &egui::Ui, layout: &Layout, origin: Pos2, list: &UiControl, it
         .collect()
 }
 
-fn frame_window<R>(ctx: &egui::Context, hud: &mut HudState, assets: &Assets, w: &UiWindow, id: &str, add: impl FnOnce(&mut egui::Ui, &mut HudState, &Layout, Pos2, &egui::Painter) -> R) {
+pub(super) fn frame_window<R>(ctx: &egui::Context, hud: &mut HudState, assets: &Assets, w: &UiWindow, id: &str, add: impl FnOnce(&mut egui::Ui, &mut HudState, &Layout, Pos2, &egui::Painter) -> R) {
     let layout = Layout::new(ctx.screen_rect());
     let size = Vec2::new(w.size[0], w.size[1]) * layout.scale;
     egui::Area::new(egui::Id::new(id)).default_pos(layout.window_origin(w)).movable(true).constrain(true).order(egui::Order::Middle).show(ctx, |ui| {
@@ -181,7 +197,7 @@ fn frame_window<R>(ctx: &egui::Context, hud: &mut HudState, assets: &Assets, w: 
     });
 }
 
-fn x_button(ctx: &egui::Context, ui: &mut egui::Ui, hud: &mut HudState, assets: &Assets, painter: &egui::Painter, r: Rect, c: &UiControl, id: &str) -> bool {
+pub(super) fn x_button(ctx: &egui::Context, ui: &mut egui::Ui, hud: &mut HudState, assets: &Assets, painter: &egui::Painter, r: Rect, c: &UiControl, id: &str) -> bool {
     let resp = ui.interact(r, egui::Id::new(id), egui::Sense::click());
     if let Some(tex) = button_texture(c).map(str::to_string) {
         control_image(ctx, hud, assets, painter, r, c.size, &tex, 1.0);
@@ -191,25 +207,41 @@ fn x_button(ctx: &egui::Context, ui: &mut egui::Ui, hud: &mut HudState, assets: 
 
 /// Livre des compétences : icône, nom et niveau ; clic droit pour lancer, glisser vers la barre.
 pub fn draw_skill_book(ctx: &egui::Context, hud: &mut HudState, assets: &Assets, view: BookView, out: &mut Vec<SkillUi>) {
-    let Some(w) = hud.windows(assets).iter().find(|w| w.name == "UI_Skill").cloned() else { return };
+    let window = view.tab.book_window();
+    let Some(w) = hud.windows(assets).iter().find(|w| w.name == window).cloned() else { return };
     let ctl = |n: &str| w.controls.iter().find(|c| c.name == n).cloned();
     let (Some(list), Some(item)) = (ctl("CONTROL_SkillList"), ctl("CONTROL_SkillListItem")) else { return };
     let back = item.textures.first().map(|(_, t)| t.clone());
     let box_tex = ctl("CONTROL_16100").and_then(|c| c.textures.first().map(|(_, t)| t.clone()));
-    frame_window(ctx, hud, assets, &w, "archonia-skill-book", |ui, hud, layout, origin, painter| {
+    // Libellé fixe « Niveau » (`CONTROL_14935`) et niveau (`CONTROL_28200`, « SkillLevel » : « %d ») de chaque ligne.
+    let level_label = ctl("CONTROL_14935").map(|c| c.fixed_label().to_string()).unwrap_or_default();
+    frame_window(ctx, hud, assets, &w, &format!("archonia-skill-book-{window}"), |ui, hud, layout, origin, painter| {
         let s = layout.scale;
         let font = (11.0 * s).max(9.0);
+        if let Some(tab) = draw_tabs(ctx, ui, hud, assets, painter, layout, origin, &w, view.tab.is_scion(), view.tab, view.allowed) {
+            out.push(SkillUi::Tab(tab));
+        }
         for c in &w.controls {
             let r = layout.rect(origin, c.pos, c.size);
             match c.name.as_str() {
-                "CONTROL_2968" => shadow_text(painter, r.left_center(), Align2::LEFT_CENTER, "Compétences", font * 1.1, Color32::from_rgb(255, 230, 160)),
+                "CONTROL_2968" => shadow_text(painter, r.left_center(), Align2::LEFT_CENTER, c.fixed_label(), font * 1.1, Color32::from_rgb(255, 230, 160)),
                 "CONTROL_21134" => {
-                    if x_button(ctx, ui, hud, assets, painter, r, c, "skill-book-x") {
+                    if x_button(ctx, ui, hud, assets, painter, r, c, &format!("skill-book-x-{window}")) {
                         out.push(SkillUi::CloseBook);
                     }
                 }
-                "CONTROL_28776" => shadow_text(painter, r.left_center(), Align2::LEFT_CENTER, "Points", font, Color32::from_rgb(235, 225, 200)),
-                "CONTROL_12489" => shadow_text(painter, r.center(), Align2::CENTER_CENTER, &view.points.map_or("—".into(), |p| p.to_string()), font, Color32::from_rgb(255, 230, 160)),
+                "CONTROL_28776" => shadow_text(painter, r.left_center(), Align2::LEFT_CENTER, c.fixed_label(), font, Color32::from_rgb(235, 225, 200)),
+                "CONTROL_12489" => shadow_text(painter, r.center(), Align2::CENTER_CENTER, &view.points.map_or(String::new(), |p| p.to_string()), font, Color32::from_rgb(255, 230, 160)),
+                // Nom de la classe (`UI_Skill`) ou « AL » (`UI_ScionArchlordSkill`).
+                "CONTROL_32752" => {
+                    let text = c.display.as_deref().and_then(|d| d.strip_prefix("1:")).map_or(view.title.clone(), str::to_string);
+                    shadow_text(painter, r.center(), Align2::CENTER_CENTER, &text, font, Color32::from_rgb(255, 230, 160));
+                }
+                "CONTROL_1134" => {
+                    if super::npc_ui::button(ctx, ui, hud, assets, painter, r, c, c.fixed_label(), font, true, ("skill-book-close", window)).clicked() {
+                        out.push(SkillUi::CloseBook);
+                    }
+                }
                 _ => {}
             }
         }
@@ -226,7 +258,8 @@ pub fn draw_skill_book(ctx: &egui::Context, hud: &mut HudState, assets: &Assets,
             skill_icon(ctx, hud, assets, painter, icon_rect, e.tid, Color32::WHITE);
             cooldown_veil(painter, icon_rect, e.cooldown, e.left_s);
             shadow_text(painter, cell.min + Vec2::new(67.0, 10.0) * s, Align2::LEFT_TOP, &e.name, font, Color32::WHITE);
-            shadow_text(painter, cell.min + Vec2::new(67.0, 30.0) * s, Align2::LEFT_TOP, &format!("Niveau {}", e.level), font, Color32::from_rgb(255, 230, 160));
+            shadow_text(painter, cell.min + Vec2::new(67.0, 30.0) * s, Align2::LEFT_TOP, &level_label, font, Color32::from_rgb(255, 230, 160));
+            shadow_text(painter, cell.min + Vec2::new(103.0, 30.0) * s, Align2::LEFT_TOP, &e.level.to_string(), font, Color32::from_rgb(255, 230, 160));
             let resp = ui.interact(cell, egui::Id::new(("skill-book", e.tid)), egui::Sense::click_and_drag());
             if resp.dragged() {
                 resp.dnd_set_drag_payload(SkillDrag { tid: e.tid });
@@ -236,12 +269,8 @@ pub fn draw_skill_book(ctx: &egui::Context, hud: &mut HudState, assets: &Assets,
             }
             if resp.hovered() && !dragging {
                 painter.rect_stroke(cell, 2.0, egui::Stroke::new(1.0_f32, Color32::from_rgb(120, 200, 255)), egui::StrokeKind::Inside);
-                super::item_tooltip(ctx, &e.tip, "Clic droit ou double clic : lancer · glisser vers la barre de raccourcis");
+                super::item_tooltip(ctx, &e.tip, "");
             }
-        }
-        if view.entries.is_empty() {
-            let r = layout.rect(origin, list.pos, list.size);
-            shadow_text(painter, r.center(), Align2::CENTER_CENTER, "Aucune compétence.", font, Color32::GRAY);
         }
     });
 }
@@ -254,9 +283,15 @@ pub fn draw_trainer(ctx: &egui::Context, hud: &mut HudState, assets: &Assets, vi
     let back = item.textures.first().map(|(_, t)| t.clone());
     let disabled = ctl("CONTROL_Disable").and_then(|c| c.textures.first().map(|(_, t)| t.clone()));
     let selected = view.entries.iter().find(|e| Some(e.tid) == view.selected);
+    let (level_word, money_name) = (crate::hud::ui_message(hud, assets, "SkillLevel"), crate::hud::ui_message(hud, assets, "Money_Name"));
     frame_window(ctx, hud, assets, &w, "archonia-skill-trainer", |ui, hud, layout, origin, painter| {
         let s = layout.scale;
         let font = (11.0 * s).max(9.0);
+        // Onglets Combat… Passive (`SkillSetBuyMastery0` à `3`), Combo (`UI_SkillHighLevelUp`), Heroic
+        // (`UI_HeroicSkill_Upgrade`).
+        if let Some(tab) = draw_tabs(ctx, ui, hud, assets, painter, layout, origin, &w, false, view.tab, view.allowed) {
+            out.push(SkillUi::TrainerTab(tab));
+        }
         for c in &w.controls {
             let r = layout.rect(origin, c.pos, c.size);
             match c.name.as_str() {
@@ -266,17 +301,18 @@ pub fn draw_trainer(ctx: &egui::Context, hud: &mut HudState, assets: &Assets, vi
                         out.push(SkillUi::CloseTrainer);
                     }
                 }
-                "CONTROL_24921" => shadow_text(painter, r.left_center(), Align2::LEFT_CENTER, "Points", font, Color32::from_rgb(235, 225, 200)),
-                "CONTROL_9296" => shadow_text(painter, r.center(), Align2::CENTER_CENTER, &view.points.map_or("—".into(), |p| p.to_string()), font, Color32::from_rgb(255, 230, 160)),
-                // Bouton d'action : apprendre ou améliorer la compétence choisie.
+                "CONTROL_24921" => shadow_text(painter, r.left_center(), Align2::LEFT_CENTER, c.fixed_label(), font, Color32::from_rgb(235, 225, 200)),
+                "CONTROL_9296" => shadow_text(painter, r.center(), Align2::CENTER_CENTER, &view.points.map_or(String::new(), |p| p.to_string()), font, Color32::from_rgb(255, 230, 160)),
+                // Bouton d'action : apprendre ou améliorer la compétence choisie. Libellé de « SkillBuyButton »
+                // (FUN_1405d8030) : uimessage `SkillBuy`, `SkillUpgrade` si la compétence choisie est connue.
                 "CONTROL_18446" => {
-                    let (label, enabled) = match selected {
-                        Some(e) if e.level == 0 => ("Apprendre", e.possible),
-                        Some(e) if e.level < e.max_level => ("Améliorer", e.possible),
-                        Some(_) => ("Niveau max", false),
-                        None => ("Apprendre", false),
+                    let (key, enabled) = match selected {
+                        Some(e) if e.level == 0 => ("SkillBuy", e.possible),
+                        Some(e) => ("SkillUpgrade", e.possible && e.level < e.max_level),
+                        None => ("SkillBuy", false),
                     };
-                    let resp = super::npc_ui::button(ctx, ui, hud, assets, painter, r, c, label, font, enabled, "skill-trainer-do");
+                    let label = crate::hud::ui_message(hud, assets, key);
+                    let resp = super::npc_ui::button(ctx, ui, hud, assets, painter, r, c, &label, font, enabled, "skill-trainer-do");
                     if resp.clicked() {
                         if let Some(e) = selected {
                             out.push(if e.level == 0 { SkillUi::Learn(e.tid) } else { SkillUi::Upgrade(e.tid) });
@@ -284,7 +320,7 @@ pub fn draw_trainer(ctx: &egui::Context, hud: &mut HudState, assets: &Assets, vi
                     }
                 }
                 "CONTROL_17539" => {
-                    if super::npc_ui::button(ctx, ui, hud, assets, painter, r, c, "Fermer", font, true, "skill-trainer-close").clicked() {
+                    if super::npc_ui::button(ctx, ui, hud, assets, painter, r, c, c.fixed_label(), font, true, "skill-trainer-close").clicked() {
                         out.push(SkillUi::CloseTrainer);
                     }
                 }
@@ -298,12 +334,12 @@ pub fn draw_trainer(ctx: &egui::Context, hud: &mut HudState, assets: &Assets, vi
             }
             let icon_rect = Rect::from_min_size(cell.min + Vec2::new(3.0, 3.0) * s, Vec2::splat(50.0 * s));
             skill_icon(ctx, hud, assets, painter, icon_rect, e.tid, Color32::WHITE);
-            let state = if e.level == 0 { format!("Niv. requis {}", e.require_level) } else { format!("Niveau {}/{}", e.level, e.max_level) };
-            shadow_text(painter, cell.min + Vec2::new(62.0, 8.0) * s, Align2::LEFT_TOP, &e.name, font, Color32::WHITE);
-            shadow_text(painter, cell.min + Vec2::new(62.0, 24.0) * s, Align2::LEFT_TOP, &state, font * 0.95, Color32::from_rgb(255, 230, 160));
-            if e.level < e.max_level {
-                shadow_text(painter, cell.min + Vec2::new(62.0, 38.0) * s, Align2::LEFT_TOP, &format!("{} or", format_money(e.cost)), font * 0.95, Color32::from_rgb(255, 220, 120));
-            }
+            // Nom (`CONTROL_5918`), « SkillLevel2 » (`CONTROL_4297`, « %s %d » : uimessage `SkillLevel`, niveau) et
+            // « SkillPrice » (`CONTROL_24573`, « %d %s » : prix, `Money_Name`) ; FUN_1405d8200, FUN_1405d9cc0.
+            let state = format!("{} {}", level_word, e.level.max(1));
+            shadow_text(painter, cell.min + Vec2::new(62.0, 10.0) * s, Align2::LEFT_TOP, &e.name, font, Color32::WHITE);
+            shadow_text(painter, cell.min + Vec2::new(62.0, 30.0) * s, Align2::LEFT_TOP, &state, font * 0.95, Color32::from_rgb(255, 230, 160));
+            shadow_text(painter, cell.min + Vec2::new(185.0, 30.0) * s, Align2::RIGHT_TOP, &format!("{} {}", e.cost.max(0), money_name), font * 0.95, Color32::from_rgb(255, 220, 120));
             if !e.possible {
                 if let Some(t) = &disabled {
                     control_image(ctx, hud, assets, painter, Rect::from_min_size(cell.min + Vec2::splat(2.0 * s), Vec2::new(196.0, 52.0) * s), [196.0, 52.0], t, 1.0);
@@ -321,10 +357,6 @@ pub fn draw_trainer(ctx: &egui::Context, hud: &mut HudState, assets: &Assets, vi
             if resp.hovered() && !e.tip.is_empty() {
                 super::item_tooltip(ctx, &e.tip, "");
             }
-        }
-        if view.entries.is_empty() {
-            let r = layout.rect(origin, list.pos, list.size);
-            shadow_text(painter, r.center(), Align2::CENTER_CENTER, "Aucune compétence à apprendre ici.", font, Color32::GRAY);
         }
     });
 }

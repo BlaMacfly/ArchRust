@@ -64,7 +64,8 @@ Licence : [GPL-3.0-or-later](LICENSE.md).
 | Invocations et familiers (`UI_TargetSummonsMenu`), heure du monde, ciel d'après `skyset.ini` (nuages, étoiles, lune, brouillard, lumière), pluie et neige | 🟡 testé contre les paquets d'ArchCore (tests sans affichage), à confirmer en jeu |
 | Shrines (`UI_Shrine_info`), annonces du Battleground, fenêtre des boss (`UI_Boss`), sièges (fenêtres du siège, carving), ArchLord, taxes (`UI_TaxSteward`, `UI_TaxView`) | 🟡 testé contre les paquets d'ArchCore (tests sans affichage), à confirmer en jeu |
 | Échange entre joueurs (`UI_PrivateTrade`, demande et boîte oui/non, entrée « Trade » du menu du joueur ciblé), métamorphose et évolution du Dragon Scion (modèle de la forme, règles d'équipement et de cible), effets d'Archonia (particules, traînées, dépendances entre éléments, lumières), caractéristiques secondaires de `Character_Status` (critiques, ignorances, renvois, résistances) | 🟡 testé contre les paquets et les données d'ArchCore (tests sans affichage), à confirmer en jeu |
-| Armes et lances dessinées en main, montures glTF animées, déplacement au clavier, fenêtre des macros (`UI_SkillMacro`), aperçu 3D du coiffeur | ⏳ à faire |
+| Armes, boucliers et lances en main (nœuds 101/102, matrices `TRANSFORM_DATA`), montures d'origine (selle, animations suivies), touches d'Archonia (`UI_Hotkey`, déplacement au clavier), fenêtre de sortie, aide et astuces, connexion par `UI_LG_IDPASSWORD` / `UI_SelectServer`, retour à la sélection, barre de raccourcis gardée par le serveur, fenêtres de maîtrise, titres, inventaire Cash et sac du familier, résurrection par orbe, oubli des compétences, rappel de groupe, actions sociales, boutique des Shrines | 🟡 testé contre les paquets et les données d'ArchCore (tests sans affichage), à confirmer en jeu |
+| Montures glTF animées, aperçu 3D du coiffeur | ⏳ à faire |
 
 ## Démarrage rapide
 
@@ -101,13 +102,15 @@ set realmlist 127.0.0.1:11002
 
 Forme `set realmlist <hôte>[:<port>]` (port 11002 par défaut, guillemets facultatifs, la dernière
 ligne l'emporte). Le fichier est cherché à côté de l'exécutable, puis dans le dossier courant, puis
-dans le dossier `Game` ; il préremplit l'écran de connexion. `--connect utilisateur:mdp@/personnage`
-(sans hôte) se connecte à ce serveur ; un hôte donné à `--connect` reste prioritaire.
+dans le dossier `Game` ; il donne le serveur de l'écran de connexion. Sans `realmlist.wtf`, ArchRust lit
+en repli l'`ArchoniaTest.ini` d'Archonia (XML `IPInfo/ServerGroup/GroupName/IP`, première adresse).
+`--connect utilisateur:mdp@/personnage` (sans hôte) se connecte à ce serveur ; un hôte donné à
+`--connect` reste prioritaire.
 
-L'écran de connexion affiche `crates/archrust-engine/assets/login-screen.png` (« ArchRust — Awakening of the
-Eternal Storm ») et, par-dessus, le panneau illustré `crates/archrust-engine/assets/login-panel.png` : les champs,
-la case « Enregistrer le compte » et les boutons sont posés sur leur dessin. Les deux images sont intégrées à
-l'exécutable ; comme dans WoW, l'interface des AddOns n'apparaît qu'en jeu.
+La connexion passe par les fenêtres d'Archonia : saisie du compte (`UI_LG_IDPASSWORD`, « Confirm »),
+puis choix du monde (`UI_SelectServer` : liste des mondes du serveur de connexion, « Connect » ou
+double clic sur un monde), puis sélection du personnage. Le compte n'est envoyé qu'au « Connect ».
+`--connect` prend le premier monde. Comme dans WoW, l'interface des AddOns n'apparaît qu'en jeu.
 
 Après la connexion, l'écran de sélection reprend la scène d'Archonia (personnages du compte dans
 la salle du trône, clic pour choisir) ; « Créer un personnage » ouvre la scène de création de la

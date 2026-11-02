@@ -1,0 +1,175 @@
+//! Consommables, résurrection par objet et oubli des compétences. Relevé dans Archonia (répartiteurs
+//! d'AgpmItem `FUN_1401b0e10`, d'AgpmCharacter `FUN_140173f10`, d'AgpmSkill `FUN_1402f5b70` ; AgcmUIItem,
+//! AgcmUISkill2) :
+//!
+//! ```text
+//! AGPMITEM op 3 (2 IID)                         client → serveur : utiliser l'objet (orbe, Gem of origin…) ; voir `items`
+//! AGPMITEM op 4 (3 TID, 4 CID, 18 recharge)     objet utilisé (rappel 0x1c → FUN_14053f540) ; voir `world::ItemUsed`
+//! AGPMITEM op 5 (3 TID, 4 CID)                  échec (rappel 0x1d → FUN_14053f740 : orbe → « Regeneration has failed »)
+//! AGPMITEM op 18 (4 CID, 18 restant en ms)      recharge de l'orbe : début = maintenant + restant − 900 000 (rappel 0x46)
+//! AGPMITEM op 27 code 3 (1 code, 4 CID)         `ReverseOrbError` (décodé par `morph`)
+//! AGPMCHARACTER op 0 champ 19 (CHAR[32])        chaîne « skill init » du personnage (`+0xd0`, FUN_140175bb0)
+//! AGPMCHARACTER op 23 (1 CID, 19 chaîne)        chaîne « skill init » mise à jour (strncpy dans `+0xd0`)
+//! AGPMSKILL op 1 (1 identifiant)                compétence retirée (FUN_1402f8d20) ; voir `skills::SkillEvent::Removed`
+//! 0x3B op 8 (2 CID, sans événement)             client → serveur : oubli des compétences chez le maître (FUN_1402b88e0)
+//! 0x3B op 9 (5 résultat)                        réponse (rappel 0xd → FUN_1405dcc40) : 0 réussi, 1 échec, 2 pas de place
+//! ```
+//!
+//! L'op 1 d'AGPMCHARACTER ne touche pas au champ 19 (FUN_140176730 ne le reçoit pas) : seuls l'ajout (op 0) et
+//! l'op 23 le posent.
+
+use archrust_protocol::packet::{sparse, Value};
+use archrust_protocol::schema::{main, packet_type, Schema};
+
+/// Opérations d'AgpmItem propres à ce module.
+pub mod item_op {
+    pub const USE_ITEM_FAILED_BY_TID: i64 = 5;
+    pub const UPDATE_REUSE_TIME_FOR_REVERSE_ORB: i64 = 18;
+}
+
+/// Opérations d'AgpmCharacter propres à ce module.
+pub mod character_op {
+    pub const ADD: i64 = 0;
+    pub const UPDATE_SKILLINIT_STRING: i64 = 23;
+}
+
+/// Opérations d'AgpmEventSkillMaster (0x3B) propres à ce module.
+pub mod master_op {
+    pub const SKILL_INITIALIZE: i8 = 8;
+    pub const SKILL_INITIALIZE_RESULT: i64 = 9;
+}
+
+/// Résultats de l'op 9 (champ 5, `FUN_1405dcc40`).
+pub mod init_result {
+    pub const SUCCESS: i32 = 0;
+    pub const FAILED: i32 = 1;
+    /// Pas assez de place pour le remboursement : `sysstr` 748.
+    pub const NO_ROOM: i32 = 2;
+}
+
+/// Champ « skill init » d'AGPMCHARACTER.
+pub const SKILL_INIT_FIELD: usize = 19;
+
+/// Recharge de l'orbe de résurrection, constante du client (op 18 : début = maintenant + restant − 900 000).
+pub const REVERSE_ORB_REUSE_MS: u64 = 900_000;
+
+/// Annonces du serveur.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ConsumableEvent {
+    /// Échec d'utilisation d'un objet (AgpmItem op 5).
+    UseFailed { tid: i32, cid: i32 },
+    /// Recharge de l'orbe : temps restant en ms (AgpmItem op 18).
+    ReverseOrbReuse { cid: i32, remain_ms: u64 },
+    /// Chaîne « skill init » d'un personnage (AgpmCharacter op 0 ou 23, champ 19) ; vide : oubli encore permis.
+    SkillInit { cid: i32, value: String },
+    /// Résultat de l'oubli des compétences chez le maître (0x3B op 9, champ 5).
+    SkillInitResult { result: i32 },
+}
+
+/// Demandes du client.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ConsumableCommand {
+    /// Oublier toutes les compétences chez le maître (0x3B op 8, champ 2 = CID, champ 1 nul).
+    SkillInitialize,
+}
+
+fn int(values: &[Option<Value>], i: usize) -> Option<i64> {
+    values.get(i).and_then(Option::as_ref).and_then(Value::as_i64)
+}
+
+/// Chaîne « skill init » (champ 19) d'un paquet AgpmCharacter op 0 ou 23 qui la porte.
+pub fn skill_init_of(ptype: u8, values: &[Option<Value>]) -> Option<ConsumableEvent> {
+    if ptype != packet_type::CHARACTER || !matches!(int(values, 0)?, character_op::ADD | character_op::UPDATE_SKILLINIT_STRING) {
+        return None;
+    }
+    let value = values.get(SKILL_INIT_FIELD).and_then(Option::as_ref).and_then(Value::as_text)?;
+    Some(ConsumableEvent::SkillInit { cid: int(values, 1)? as i32, value })
+}
+
+/// Paquet AgpmItem (ops 5, 18), AgpmCharacter (op 23) ou 0x3B (op 9) traduit, sinon `None`. L'op 0
+/// d'AgpmCharacter est relevée à part ([`skill_init_of`], `world::extra_events`).
+pub fn translate(ptype: u8, values: &[Option<Value>]) -> Option<ConsumableEvent> {
+    match ptype {
+        packet_type::ITEM => {
+            let cid = int(values, 4).unwrap_or(0) as i32;
+            match int(values, 0)? {
+                item_op::USE_ITEM_FAILED_BY_TID => Some(ConsumableEvent::UseFailed { tid: int(values, 3)? as i32, cid }),
+                item_op::UPDATE_REUSE_TIME_FOR_REVERSE_ORB => {
+                    let remain_ms = match values.get(18).and_then(Option::as_ref) {
+                        Some(Value::U64(v)) => *v,
+                        Some(v) => v.as_i64().unwrap_or(0).max(0) as u64,
+                        None => 0,
+                    };
+                    Some(ConsumableEvent::ReverseOrbReuse { cid, remain_ms })
+                }
+                _ => None,
+            }
+        }
+        packet_type::CHARACTER if int(values, 0)? == character_op::UPDATE_SKILLINIT_STRING => skill_init_of(ptype, values),
+        packet_type::EVENT_SKILL_MASTER if int(values, 0)? == master_op::SKILL_INITIALIZE_RESULT => {
+            Some(ConsumableEvent::SkillInitResult { result: int(values, 5).unwrap_or(-1) as i32 })
+        }
+        _ => None,
+    }
+}
+
+/// Paquet d'une demande pour le personnage `me`.
+pub fn command_packet(cmd: &ConsumableCommand, me: i32) -> (&'static Schema, Vec<Option<Value>>) {
+    match cmd {
+        ConsumableCommand::SkillInitialize => {
+            let s = main::EVENT_SKILL_MASTER;
+            (s, sparse(s, &[(0, Value::I8(master_op::SKILL_INITIALIZE)), (2, Value::I32(me))]))
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use archrust_protocol::packet::{build_packet, decode_packet};
+
+    fn roundtrip(schema: &'static Schema, pairs: &[(usize, Value)]) -> Vec<Option<Value>> {
+        let bytes = build_packet(schema, &sparse(schema, pairs)).unwrap();
+        decode_packet(schema, &bytes).unwrap().values
+    }
+
+    #[test]
+    fn oubli_chez_le_maitre() {
+        let (s, v) = command_packet(&ConsumableCommand::SkillInitialize, 42);
+        let bytes = build_packet(s, &v).unwrap();
+        let back = decode_packet(main::EVENT_SKILL_MASTER, &bytes).unwrap().values;
+        assert_eq!((int(&back, 0), int(&back, 2)), (Some(8), Some(42)));
+        assert!(back[1].is_none(), "sans événement");
+
+        for (code, expected) in [(0, init_result::SUCCESS), (1, init_result::FAILED), (2, init_result::NO_ROOM)] {
+            let v = roundtrip(main::EVENT_SKILL_MASTER, &[(0, Value::I8(9)), (5, Value::I8(code))]);
+            assert_eq!(translate(0x3b, &v), Some(ConsumableEvent::SkillInitResult { result: expected }));
+        }
+        // Les autres opérations du maître restent à `skills`.
+        let v = roundtrip(main::EVENT_SKILL_MASTER, &[(0, Value::I8(6)), (5, Value::I8(0))]);
+        assert_eq!(translate(0x3b, &v), None);
+    }
+
+    #[test]
+    fn objets_orbe_et_echec() {
+        let v = roundtrip(main::ITEM, &[(0, Value::U8(5)), (3, Value::I32(842)), (4, Value::I32(42))]);
+        assert_eq!(translate(0x04, &v), Some(ConsumableEvent::UseFailed { tid: 842, cid: 42 }));
+        let v = roundtrip(main::ITEM, &[(0, Value::U8(18)), (4, Value::I32(42)), (18, Value::U64(60_000))]);
+        assert_eq!(translate(0x04, &v), Some(ConsumableEvent::ReverseOrbReuse { cid: 42, remain_ms: 60_000 }));
+        // Op 4 (objet utilisé) : laissée à `world`.
+        let v = roundtrip(main::ITEM, &[(0, Value::U8(4)), (3, Value::I32(842)), (4, Value::I32(42))]);
+        assert_eq!(translate(0x04, &v), None);
+    }
+
+    #[test]
+    fn chaine_skill_init() {
+        let v = roundtrip(main::CHARACTER, &[(0, Value::I8(23)), (1, Value::I32(42)), (19, Value::Str(b"1".to_vec()))]);
+        assert_eq!(translate(0x02, &v), Some(ConsumableEvent::SkillInit { cid: 42, value: "1".into() }));
+        let v = roundtrip(main::CHARACTER, &[(0, Value::I8(0)), (1, Value::I32(42)), (19, Value::Str(Vec::new()))]);
+        assert_eq!(skill_init_of(0x02, &v), Some(ConsumableEvent::SkillInit { cid: 42, value: String::new() }));
+        // L'ajout (op 0) passe par `skill_init_of`, pas par `translate` ; l'op 1 ne porte pas la chaîne.
+        assert_eq!(translate(0x02, &v), None);
+        let v = roundtrip(main::CHARACTER, &[(0, Value::I8(1)), (1, Value::I32(42)), (19, Value::Str(b"1".to_vec()))]);
+        assert_eq!(skill_init_of(0x02, &v), None);
+    }
+}

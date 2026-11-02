@@ -665,6 +665,16 @@ impl App {
         self.siege.data(&assets).castles.iter().find(|c| c.regions.contains(&region)).cloned()
     }
 
+    /// Le joueur se tient dans un château en guerre (statut 3 à 8) dont sa guilde assiège ou défend
+    /// (`FUN_1402123e0`, `FUN_14021dda0` / `FUN_14021dd20`) : « Revive in town » sans `UI_ResurrectTownConfirm`
+    /// (`FUN_1404f86a0`, voir `app_combat.rs`).
+    pub(super) fn siege_war_participant(&mut self) -> bool {
+        let Some(cd) = self.siege_my_castle() else { return false };
+        let guild = self.guild.state.name().to_string();
+        let at_war = self.siege.castle(&cd.name).is_some_and(|c| status::at_war(c.status.unwrap_or(0)));
+        at_war && (self.siege.is_attacker(&cd.name, &guild) || self.siege.is_defender(&cd.name, &guild))
+    }
+
     /// Pour les taxes (voir `app_tax.rs`) : fiche du château où se tient le joueur (`FUN_1402123e0`) — nom,
     /// indice dans SiegeWar.txt, propriétaire connu — et nom de la fiche 0 (Rensphere, château de l'ArchLord).
     pub(super) fn siege_tax_castles(&mut self) -> (Option<(String, usize, Option<String>)>, Option<String>) {

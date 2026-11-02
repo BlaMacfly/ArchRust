@@ -73,7 +73,7 @@ fn main() -> anyhow::Result<()> {
             pairs.push((k, j, t));
         }
     }
-    let set = AnimationSet::for_tid(&assets, tid, 0);
+    let set = AnimationSet::for_tid(&assets, tid, 0, true);
     let file = set.pick(kind, 0.0).unwrap().file.clone();
     let clip = load_clip(&assets, &file).unwrap();
     let mut worst = vec![f32::MAX; pairs.len()];

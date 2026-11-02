@@ -153,6 +153,12 @@ pub(super) fn ui_event_text(assets: &Assets, event: &str) -> String {
     ui_events(assets).remove(event).unwrap_or_default()
 }
 
+/// Message d'un événement d'interface, les événements lus une fois dans `cache` (textes demandés à
+/// chaque image : boîtes de confirmation).
+pub(super) fn ui_event_cached(cache: &mut Option<HashMap<String, String>>, assets: &Assets, event: &str) -> String {
+    cache.get_or_insert_with(|| ui_events(assets)).get(event).cloned().unwrap_or_default()
+}
+
 fn load_data(assets: &Assets) -> PortalData {
     let mut d = PortalData::default();
     if let Ok(t) = assets.table("ini", "TeleportPoint.ini") {
@@ -241,7 +247,7 @@ pub fn panel(ctx: &egui::Context, glue: &mut PortalGlue, hud: &mut HudState, ass
             Some(true) => {
                 glue.confirm = None;
                 let data = glue.data(assets);
-                ui.push_chat(format!("[portail] départ vers {} (zone de combat entre joueurs)", data.name(&point)));
+                log::info!("portail : départ vers {} (zone de combat entre joueurs)", data.name(&point));
                 send(net, TeleportCommand::Go { object, point });
             }
             Some(false) => glue.confirm = None,
@@ -269,7 +275,7 @@ pub fn panel(ctx: &egui::Context, glue: &mut PortalGlue, hud: &mut HudState, ass
 
 /// Ligne `i` de la liste choisie (clic ou `/portail n`) : la fenêtre se ferme, puis départ si l'or
 /// suffit et que l'arrivée n'est pas en zone dangereuse.
-fn choose(glue: &mut PortalGlue, i: usize, hud: &mut HudState, assets: &Assets, net: Option<&NetLink>, ui: &mut UiState) {
+fn choose(glue: &mut PortalGlue, i: usize, hud: &mut HudState, assets: &Assets, net: Option<&NetLink>, _ui: &mut UiState) {
     let Some(open) = glue.open.take() else { return };
     if open.return_only {
         send(net, TeleportCommand::Return(open.object));
@@ -286,12 +292,18 @@ fn choose(glue: &mut PortalGlue, i: usize, hud: &mut HudState, assets: &Assets, 
         // Zone de combat entre joueurs : la boîte de confirmation décide du départ (`panel`).
         glue.confirm = Some((open.object, point));
     } else {
-        ui.push_chat(format!("[portail] départ vers {} ({fee} {})", data.name(&point), data.message("Money_Name")));
+        log::info!("portail : départ vers {} ({fee})", data.name(&point));
         send(net, TeleportCommand::Go { object: open.object, point });
     }
 }
 
 impl App {
+    /// Mode combat du joueur en cours (AgpdCharacter+0xb38, lu par FUN_14017aaa0) : aussi refusé par le retour à la
+    /// sélection des personnages (`app_return_login.rs`).
+    pub(super) fn portal_combat_mode(&self) -> bool {
+        self.portal.combat_until.is_some_and(|t| std::time::Instant::now() < t)
+    }
+
     /// Relevé des événements : mode combat (coups et compétences du joueur ou sur lui, FUN_14017aab0)
     /// et métamorphose, que les portails refusent.
     pub(super) fn portal_observe(&mut self, ev: &WorldEvent) {
@@ -350,6 +362,11 @@ impl App {
         if self.portal.open.as_ref().is_some_and(|o| Vec3::new(me.x - o.at.x, 0.0, me.z - o.at.z).length() > CLOSE_MOVE) {
             self.portal.open = None;
         }
+    }
+
+    /// Ferme la liste des destinations (`UI_Teleport`), par exemple au rappel de groupe accepté.
+    pub(super) fn portal_close_list(&mut self) {
+        self.portal.open = None;
     }
 
     /// Clic gauche sur un portail : demande au serveur (op 4). Rend `true` si un portail est visé.

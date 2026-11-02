@@ -203,6 +203,68 @@ bloc. Vérifié sur 1280 secteurs (tuiles 1717, 1924, 2024, 2025, 3232) : 1536 s
   commandes avec ses propres fenêtres ; la mise en page et les textures d'interface d'origine ne
   sont pas encore reprises.
 
+## Connexion et choix du monde
+
+Établi sur Archonia.exe et `UI_1024X768.ini` ; implémenté dans `realmlist.rs`, `net.rs`
+(`LoginCommand::SelectWorld`, `NetEvent::Worlds`, `NetEvent::AuthRefused`), `hud_login.rs`
+(`draw_id_password`, `draw_select_server`) et `app.rs` (`Phase::SelectServer`).
+
+* **Adresse** — `realmlist.wtf` (`set realmlist hôte[:port]`, convention d'ArchRust) ; sans lui,
+  `ArchoniaTest.ini` d'Archonia, lu en clair (FUN_1408eb790) : XML
+  `<IPInfo><ServerGroup><GroupName>…</GroupName><IP>hôte:port</IP>…</ServerGroup>…</IPInfo>`
+  (FUN_1408ec080) ; ArchRust prend la première `IP` du premier groupe. `Archonia.ini` (même XML,
+  chiffré RC4 « 1111 ») n'est pas lu.
+* **`UI_LG_IDPASSWORD`** (variantes `_1280`, `_1600`, la plus grande qui tient dans la fenêtre) :
+  `CT_LG_EDIT_ID`, `CT_LG_EDIT_PASSWORD` (masqué), « Confirm » (`LG_IdPasswordOK`, identifiant et mot
+  de passe non vides) et « Finish » (`Quit_Event_Call`). Rien n'est envoyé du compte à ce stade :
+  ArchRust joint le serveur de connexion (`WORLD` op 0 → op 2, `LOGIN` op 0), message sysstr 457.
+* **`UI_SelectServer`** : liste `Login_Servers` (lignes `CONTROL_25949` de 22 px, 50 au plus) en arbre
+  par groupe (`Nom=Groupe=0=Statut=Drapeau;…` de `WORLD` op 2). État → texte de `uimessage.txt` et
+  couleur `Status2` de `Server_Status` (FUN_1407c2c80) :
+
+  | Statut | 1 | 2 | 3 | 4 | 5 | autre |
+  |---|---|---|---|---|---|---|
+  | Message | `ServerStatusGood` | `…AboveNormal` | `…Normal` | `…BelowNormal` | `…Bad` | `…Unknown` |
+  | Couleur | Good | Normal | Busy | Full | Close | Close |
+
+  Clic sur un monde = choix, second clic ou « Connect » (`LG_SelectServer`) = connexion ; statut 5 :
+  refusé par le client. Puis `LOGIN` op 1 (compte), op 3 (monde), message `LOGIN_WAITING` ; compte
+  refusé : `LG_IDPASSWORD_FAILD` et champs vidés ; échec : `LG_CONNECT_FAILED_LOGIN_SERVER` avant la
+  liste, `LOGIN_WAITING_FAILE` après. Ensuite sélection et création comme ci-dessus. `--connect`
+  garde le premier monde.
+
+## Barre de raccourcis gardée par le serveur (AgpmUIStatus 0x14)
+
+Constructeur `AgpmUIStatus` FUN_140266520 : type 0x14, drapeaux 2 octets, 12 champs — 0 op, 1 CID,
+2 `PACKET` × 50 (mini `AGPMSKILL_BASE` par case), 3 `INT8` index, 4 `PACKET` contenu, 5 bloc (op 2),
+6/7 `INT32` TID des potions de vie / mana, 8 casque, 9/10 `INT8` seuils de prise automatique (%),
+11 bloc (op 2). Mini `AGPMSKILL_BASE` : drapeaux 1 octet, `INT8` type de base, `INT32` identifiant ;
+types 5 objet (IID) et 7 compétence (identifiant d'instance), les seuls affichés et envoyés. Liste du
+champ 2 : compteur `u8` puis `u32` longueur + mini pour chacun ; mini vide, absent ou illisible = case
+vide.
+
+* **Disposition** — 5 couches × 10 cases, index = couche × 10 + colonne (deux grilles de 5 par
+  couche). Dans ArchRust, case du serveur i = case locale i + 2 (potions 0 et 1, barre principale 2-11,
+  barres en plus 12-51).
+* **op 0 reçue** (FUN_1402671f0) — les 50 cases remplacées (IID → TID par l'inventaire, identifiant de
+  compétence → TID par la liste des compétences ; une case pas encore résolue l'est dès que l'objet ou
+  la compétence arrive), potions 6/7 copiées telles quelles, seuils 9/10 s'ils sont ≥ 0. Sans champ 2
+  (serveur qui ne garde pas la barre), ArchRust garde en repli `saved-variables/raccourcis-<nom>.txt` ;
+  sinon ce fichier ne garde que le nombre de barres affichées.
+* **op 1 reçue** — index 0-49 : avec contenu, la même base est retirée des autres cases de sa rangée de
+  10 (`index / 10 × 10` … `+ 9`) puis posée ; sans contenu, case vidée. Potions appliquées si ≠ 0,
+  seuils si ≥ 0.
+* **op 1 envoyée** (FUN_140650c50 → FUN_140266e90) — pose : champ 3 index + champ 4 mini ; retrait :
+  champ 3 seul ; potion posée : champ 6 ou 7, jamais 0 (rien au retrait) ; seuil : champ 9 ou 10, une
+  seconde après le dernier mouvement du curseur, si la valeur a changé. Un échange de cases envoie les
+  deux. Raccourci sans base connue (compétence non possédée, objet absent) : rien n'est envoyé.
+* **Non employé** — op 2 (barre encodée en texte, champs 5 et 11 : aucun abonné dans le client) ; le
+  client n'envoie jamais d'op 0.
+
+Côté serveur (proposition de la spec, rien dans le client) : table `character_quickbelt`
+(personnage, case, type, TID, IID), op 0 après les objets et les compétences, compétences retrouvées
+par TID (identifiants attribués à l'entrée en jeu), objet consommé remplacé par un autre de même TID.
+
 ## Objets du monde
 
 Établi sur Archonia.exe (sha256 e9c7609b…) et les données du client ; implémenté dans
@@ -359,7 +421,7 @@ sans étirement (jauge PV : image 512 × 16 pour un contrôle de 372 × 11). Pos
 | PV, PM | `UI_CharInfo` · `CONTROL_HPBar`, `CONTROL_18458` (`CharInfo_HP/MP_Bar.png`) | `FACTOR_POINT` 0/1 sur `FACTOR_POINTMAX` 0/1 |
 | Expérience | `CONTROL_10445` (`CharInfo_EXP_Bar.png`), texte `Exp_현단계_백분율` | `FACTOR_POINT` 3 + 4 << 32 sur `LevelUpExp.txt` |
 | Niveau | `CONTROL_25173` (`현재_레벨`) | `FACTOR_STATUS` 7 |
-| Raccourcis | `CONTROL_GRID_LEFT_0` / `RIGHT_0`, 2 × 5 cases de 50 px, touches 3…7, 8, 9, 0, -, + ; potions 1 et 2 | contenu : module UI_STATUS (0x14), pas encore envoyé par ArchCore |
+| Raccourcis | `CONTROL_GRID_LEFT_0` / `RIGHT_0`, 2 × 5 cases de 50 px, touches 3…7, 8, 9, 0, -, + ; potions 1 et 2 | contenu : AgpmUIStatus (0x14) champ 2, voir « Barre de raccourcis gardée par le serveur » |
 | Menus | `MainBtnCharacter`… `MainBtnOption` | — |
 | Minicarte | `MiniMap` · `CONTROL_MINIMAP1` (148 px), `Main_Minimap_Base.png` | voir ci-dessous |
 | Améliorations | rangée sous la minicarte (choix d'ArchRust) | AGPMSKILL op 4/5 |
@@ -485,7 +547,8 @@ Deux curseurs `PointScrollBar.png` (15 × 15) sont posés sur les jauges de PV e
 Automatically »), 370 × 15, `Scroll=0:0:350`. Le rappel `ChangeHPPointScrollBarValue` d'Archonia
 (`FUN_14060c520`) garde position × 100 comme seuil en pourcentage. ArchRust boit la potion de la case 1
 (vie) ou 2 (mana) de la barre quand la jauge passe sous le seuil, une fois par seconde au plus ; seuils et
-potions sont envoyés au serveur (AgpmUIStatus op 1) qui les renvoie à l'entrée en jeu (op 0). Commande
+potions sont envoyés au serveur (AgpmUIStatus op 1 ; le seuil une seconde après le dernier mouvement du
+curseur) qui les renvoie à l'entrée en jeu (op 0). Commande
 d'essai : `/potionauto vie|mana 0-100`.
 
 ### Langue et AddOns
@@ -1069,6 +1132,52 @@ cuisine ou l'alchimie ouvre `UI_Compose` sans rien envoyer (barre de 3 s puis op
 lancer la récolte sur un cadavre contrôle outil, cible et distance (≤ 250), puis, à l'action de lancement
 renvoyée par le serveur, barre de 5,4 s et op 2. Messages : `sysstr` 41–51, 351, 517, 518, 522, 426–430.
 
+## Maîtrises des compétences (arbres supérieur, héroïque, Dragon Scion)
+
+Tables TSV d'`ini/` (en-tête sur la première ligne) :
+
+| Fichier | Contenu |
+|---|---|
+| `SKILLMASTERY.txt` | section par race et classe (« Human Knight »… « MoonElf Elementalist », « DragonScion Monk » : `Produce` seulement), catégories `Battle`, `Enchant`, `Special`, `Passive`, `Produce` (colonne 1), noms (colonne 2) ; section `Archlord` |
+| `SkillMastery_High.txt` | ligne de classe (TID du gabarit en colonne 0), puis une compétence par case : 1 TID, 2 nom, 3–4 ConditionA–B `TID;niveau` d'une compétence, 5 ConditionC `TID;N` d'un gabarit de personnage (rangée à part, FUN_140229e10), 6 ConditionD `total;` ; classes 96, 1, 6, 4, 8, 3, 460, 9, 377 (11 cases), Scion 1724 (18), Slayer 1722 (11), Orbiter 1723 (12), Summoner 1732 (12), « 10004;4 » passives du Scion (15 ; 10004 = 10000 + race 4, le « ;4 » n'est lu par aucun contrôle) |
+| `SkillMastery_Heroic.txt` | même forme, 10 cases, seules ConditionA et D lues (FUN_14022a510) ; Berserker (4) : lignes « 0 » et « 1 » puis compétences décalées d'une colonne, le second arbre rangé sous 10004 (FUN_14022a510) ; Slayer, Orbiter, Summoner du Scion, pas le Scion de base |
+| `SKILL_CONST.txt` | par niveau : `require_class_*`, `require_point`, `require_heroic_point`, `require_charisma_point`, `skill_cost`, `skill_upgrade_cost` |
+| `SKILL_SPEC.txt` | par compétence : `attribute` (reste après 40000, 20000, 10000, 1000, 200, 100, 40, puis 20 ou 10 : 8 production, 9 passive), `transform_target` (5 : « … of Evolution »), `auto_attack` (Normal Attack) |
+
+Onglets (`CtrlDisplay` des boutons, rangée y = 70) : `UI_Skill` Combat, Buff, Class, Passive (catégories 0 à 3,
+`SkillSetMastery0`–`3`), AL (`SkillSetMastery4`), Combo → `UI_SkillHighLevel` (`SkillSetMasteryHighLevel`,
+FUN_1405dc7c0 → FUN_1405dfc60), Heroic → `UI_HeroicSkill` ; l'instructeur `UI_SkillBuy` a Combat… Passive
+(`SkillSetBuyMastery0`–`3`), Combo → `UI_SkillHighLevelUp`, Heroic → `UI_HeroicSkill_Upgrade`. Dragon Scion (race 4,
+`Skill_ToggleUI` FUN_1405dceb0 → module du Scion) : `UI_SkillDragonScion_{Scion,Sla,Obiter,Sum,Pas,Heroic}`,
+`UI_ScionArchlordSkill` (AL), et chez l'instructeur `UI_SkillUpDragonScion_*`.
+
+Cases : grilles dont le nom finit par le numéro de case (`SkillHighLevelGrid0`…`10`, `SkillHeroicUserData_0`…`9`,
+`SkillScionUserData_0`…`17`…), remplies dans l'ordre du fichier pour le gabarit du joueur ; texte du niveau
+`SkillPointHighLevel<n>` / `Skill_<arbre>_Display_<n>` ; cadre `Skill_ActiveBox.png` si apprise, voile
+`Skill_DisableBox2.png` sinon. Points : `SkillPoint` (« dirt » 5) ou `HeroicSkillpoint` (« dirt » 7 des facteurs du
+personnage). Les cases du Scion sont relatives à la liste (18, 98) dont la texture est le dessin de l'arbre
+(`Skill_Tree_DragonScion_*.png`).
+
+Envoi (AgpmEventSkillMaster 0x3B, inchangé) : après la confirmation `Skill_ConfirmLearnSkill` /
+`Skill_ConfirmUpgradeSkill`, op 1 (TID au champ 4) pour une case non apprise, op 2 (identifiant au champ 3) sinon ;
+réponses op 6 et op 3 (messages `Skill_LearnSuccess`, `Skill_ErrorNotEnoughHeroicPoint`…).
+
+Dans ArchRust (`app_mastery.rs`, `hud_mastery.rs`, `app_skills.rs`) : « Reset Selected » (`Skill_Rollback`) et
+« Reset » (`UI_CharacterLoadouts`) sont dessinés inactifs (ajouts d'Archonia), le choix du second arbre héroïque du
+Berserker (`OP_BerserkMode`) n'est pas repris.
+
+Conditions (FUN_1402b8f40 ; la compétence est cherchée dans l'arbre du gabarit courant, sinon dans celui de la race,
+10000 + race ; race 0 : aucune condition). Niveau compté d'une compétence apprise (FUN_1402fd210, « dirt » 4) : borné
+à 30, à 100 pour une production. A, B : niveau compté de la compétence TID ≥ niveau. C « TID;N » (« 1722;30 » des
+arbres Slayer, Orbiter, Summoner) : race et classe du gabarit TID, puis FUN_1402fdc60 = somme des niveaux comptés
+des compétences apprises dont le `require_class_*` du niveau 1 de cette classe est rempli (FUN_1402fe170 ; races 1–3
+en classes 1, 2, 4, race 4 en 1 slayer, 2 obiter, 3 scion, 4 summoner), hors passives, évolutions et attaque normale,
+≥ N. D (arbre supérieur) : FUN_1402fdc60(-1, -1), niveaux comptés de toutes les compétences apprises, sans exclusion
+(pas des points dépensés). D (arbre héroïque, FUN_1402b9200) : points héroïques des niveaux appris (FUN_1402bb150).
+Infobulle (FUN_1408756f0), une ligne par condition dans l'ordre des colonnes, rouge si non remplie : A/B « %s %s : %s %d%s »
+(sysstr 678, 14, nom, niveau, 262), C `RequireSkillPoint` (`%s` = uimessage `Slayer`/`Obiter`/`Scion`/`Summerner`
+selon la classe du gabarit), D `RequireTotalSkillPoint` ou `RequireTotalHeroicSkillPoint`.
+
 ## Amis, ignorés et courrier
 
 **AgpmBuddy 0x2B** (drapeaux 4, champs fixes) : I8 op, I32 CID du propriétaire de la liste, CHAR[33] nom de
@@ -1136,9 +1245,54 @@ TID. Monter = porter l'objet de partie 14 (genre 32), son `SubType` étant le TI
 (`charactertemplateclient.ini`, `a%07x.ecl`) ; lance en partie 15. Octet d'état d'AGPMCHARACTER (champ 18) et
 de la vue optimisée (champ 15) : bit 0 métamorphosé, bit 1 monté, bit 2 évolution.
 
-Dans ArchRust (`app_ride.rs`) : monture tracée et animée sous le cavalier, posé sur la première piste animée
-de la monture (déduit) ; animations « à cheval » du cavalier (FUN_140756060) ; course sans plafond de 60 000 ;
-`RIDER_HEIGHT` ajouté au panneau du nom ; refus des compétences (`sysstr` 320, 527) et potions (346 à 348).
+Dans ArchRust (`app_ride.rs`) : monture tracée et animée sous le cavalier ; animations « à cheval » du
+cavalier (voir « Objets en main ») ; course sans plafond de 60 000 ; `RIDER_HEIGHT` ajouté au panneau du nom ;
+refus des compétences (`sysstr` 320, 527) et potions (346 à 348).
+
+**Attache du cavalier** (`FUN_140750660`, observé) : nœud de selle = ID HAnim **20** de la monture ;
+`monde_monture = T(pos) × Ry(turnY) × Rx(turnX) × S(SCALE)` ; `monde_cavalier = monde_monture ×
+nœud20(pose de la monture) × Ry(90°) × Rz(90°)`, et `× S(1/s)` si l'échelle `s = |right|` de la selle sort
+de [0,5 ; 2]. Le **cadre 0** d'un clump de personnage est remplacé par la matrice de l'entité : ArchRust
+calcule les mondes des personnages (corps, armures, têtes, montures) sans lui (`Clump::world_matrices_rooted`).
+Le cadre 0 du cheval `a0000237.ecl` porte 64° autour de Y et (32,1 ; 5,5 ; −5,2) ; 172 des 1081 `a*.ecl`, 5 des
+24 `b*.ecl` et 78 des 948 têtes `v*.ecl` ont un cadre 0 différent de l'identité. Les objets du décor (`h*`, `i*`,
+cadres 0 décalés de plusieurs milliers d'unités) et les effets gardent `world_matrices`. Animation de la
+monture (`FUN_1404be4f0`) : chaque type lancé sur le cavalier l'est sur la monture (clip `[type][0]`), sauf si
+elle joue déjà ce type d'attente, de marche ou de course ; sans clip, elle garde le sien (cheval 567 : pas de
+marche). Montures glTF : sans squelette, cavalier à 60 % de `HEIGHT` (nœud `RideNode` non relevé).
+
+## Objets en main
+
+AgcmItem (`FUN_1407553e0` → `FUN_140751260` → `FUN_1407518a0`, observé) : chaque atomic de `BASE_DFF`
+(`d%07x.ecl`) est cloné sur un cadre enfant du nœud HAnim de la main : arme (`Kind` 2) → **102** si
+`Part` = 9, sinon **101** (lance `Part` 15 comprise) ; bouclier (`Kind` 4) → 101 si `Part` = 10, sinon 102
+(101 = main droite). Matrice du cadre (mode « remplacer ») = `TRANSFORM_DATA[TID du porteur][0]`, identité
+si le TID manque ou si un axe est nul (pas de test pour un bouclier) ; les cadres de l'`.ecl` de l'objet
+sont ignorés. `monde = entité × monde_nœud(pose) × M`.
+
+`ItemTemplateAll.ini` : `TRANSFORM=<TID porteur>` suivi de `ATOMIC_COUNT` lignes `TRANSFORM_DATA=` en
+`"%f×12:%d"` (right, up, at, pos d'un `RwMatrix` ; l'entier final, −1 ou `0xCDCDCDCD`, ne sert pas). Les
+matrices contiennent l'échelle (≈ 1,19 pour le chevalier 96, 1,32 pour l'archer 1). `EQUIP_TWOHANDS` ≠ 0 :
+arme **doublée** dans l'autre main avec `[1]` (Karon 7820 pour 1722 : `[1]` = 180° autour de x). Xenon
+(`WeaponType` 26) en main droite : peau à 80 os liée au squelette du porteur par ID de nœud
+(`Clump::skin_matrices_on`).
+
+Non dessinés : lance et étendard à pied ; à cheval, armes des mains et bouclier (à la montée, mains 10 puis
+9 détachées et lance attachée ; l'inverse à la descente) ; objet du joueur à durabilité nulle (ArchRust :
+seulement s'il a une `MaxDurability`) ; Summoner (race 4, classe 4) : seuls les TID d'`avatarsetsummoner.ini`.
+
+**Ensemble d'animations** (`AgcdCharacter+0xfc`, `FUN_140754290` puis `FUN_140756060`, relus) : monté avec
+un objet en `Part` 15 → type 17 (l'étendard aussi) ; sans objet en 9 ni 10 → −1 ; Scion classe 1 ou 4 :
+Karon (24) en main gauche → Slayer 10, classes 2-4 8, sinon −1 ; dague (22) + rapière (21) d'un elfe
+guerrier → 4 ; sinon type de la main droite (de la gauche si seule). Puis : non joueur → 0 si
+`ANIMATION_TYPE2` ∈ {0, 4, 5}, sinon inchangé ; joueur monté hors race 4 → table à cheval (0/4 → 0,
+guerrier 7 / lance 8 / étendard 9, archer et mage 4 / 5 / 7, ArchLord 1 / 1 / 2, autre −1) ; sinon par
+classe : guerrier 0/21/22 → 1, 1-3 → 2, 4 → 3, 5-7/23 → 4, 8 → 5, 9 → 6, 24/26 → 10, 25/27 → 11 ; archer
+10 → 1, 11 → 2, 18 → 6, 24/26 → 8, 25/27 → 9 ; Scion 24-27 → 8 ; mage 14 → 1, 15/16 → 2, 19 → 6, 24/26 → 8,
+25/27 → 9 (Summoner : 8) ; −1 → 0 (monté 7 pour le guerrier, 4 sinon) ; tout autre cas : inchangé. Clip
+(`FUN_1404be330`) : `[type][ensemble]`, sinon pour un joueur qui marche `[2][ensemble]` puis `[2][0]`, sinon
+`[type][0]`, sinon rien (l'animation courante continue) ; ensemble −1 : aucune animation. Code :
+`crates/archrust-engine/src/worn.rs`.
 
 ## Maison des ventes
 
@@ -1366,7 +1520,7 @@ Relevés dans Archonia (`morph.rs`, `skills.rs` d'`archrust-netclient` ; `app_mo
   {0 = 4, 1 = soi}}`) au clic sur `UI_MainGrid_BtnRestoreEvolution.png`, seulement après l'op 4 (effet) d'une
   compétence de `transform_target` 5 (1189, 1192, 1195).
 - **AGPMITEM** : op 27 `{1 code, 4 CID}` (1 `UseItemFailedBySiegewar`, 2 `UseItemCannotTransformCreature`,
-  3 fenêtre inconnue, 4 `UseItemCannotTransformPotion`) ; op 19 (et 8) `{4 CID, 22 UINT64 restant en ms}` et op 20
+  3 `ReverseOrbError`, voir plus bas, 4 `UseItemCannotTransformPotion`) ; op 19 (et 8) `{4 CID, 22 UINT64 restant en ms}` et op 20
   `{4 CID}` : recharge commune des potions d'usage 7, 600 000 ms. Op 4 d'une potion d'usage 7 : compte à rebours
   `Transform_Remain_Notice` (`Polymorph Dur` / 60 000, puis chaque minute métamorphosé ou évolué),
   `Transform_Restore_Notice` à l'échéance.
@@ -1382,6 +1536,59 @@ Relevés dans Archonia (`morph.rs`, `skills.rs` d'`archrust-netclient` ; `app_mo
 - **Type de personnage** (`CharacterDataTable.txt` colonne `Type`, du gabarit courant) : forme `& 8` (animaux de la
   Mutation, potions 408 à 416) → le joueur n'attaque pas et n'est pas attaqué ; compétence de SKILL_SPEC `target` 1
   sur une forme sans `0x10000 | 0x20000` refusée. Race comparée (Shrines) : gabarit d'origine.
+
+## Consommables, résurrection par objet et oubli des compétences
+
+Relevés dans Archonia (`consumables.rs`, `skills.rs` d'`archrust-netclient` ; `app_consumables.rs`,
+`hud_consumables.rs`, `app_combat.rs` du moteur).
+
+- **AGPMITEM op 3** `{2 IID}` : orbe (usage 14, bouton « Use revival item » de `UI_Resurrection`) et Gem of origin
+  (usage 27, après la boîte `SkillInitConfirm`). Op 4 `{3 TID, 4 CID, 18 UINT64}` pour soi : orbe →
+  `Item_UseSuccessReverseOrb` ; usage 12 → `Item_UseAddMovementSkill` si `movement` (2ᵉ colonne de ce nom de
+  SKILL_CONST, au `Use skill level`) > 0, sinon `Item_UseAddAtkSpeedSkill` si `atk_speed` > 0 ; recharge de la barre
+  = `Use Interval` + `Apply Effect Count` × `Apply Effect Time` (objet à `Use Interval` ou d'usage 12, orbe exclu ; le
+  champ 18 n'est pas lu). Op 5 `{3 TID, 4 CID}` : orbe → `Item_UseFailReverseOrb`. Op 18 `{4 CID, 18 UINT64 restant
+  en ms}` : recharge de l'orbe, 900 000 ms constants (début = maintenant + restant − 900 000). Op 27 code 3 :
+  boîte `ReverseOrbError`.
+- **Orbe choisi** : premier convenable du statut 51 (Cash), sinon dernier convenable des statuts 2 puis 13, dans
+  l'ordre des cases ; convenable = `Level` vide, ou `min` ≤ niveau ≤ `max` (« 1;30 », `max` 0 : sans borne). Bouton
+  actif : mort, orbe trouvé, pas l'ArchLord, région (`Type` de RegionTemplate.ini) avec le bit 0x100 et, en sûreté 2
+  (bits 2-3), orbe `Cash` (valeur − 100 si ≥ 100, non nulle).
+- **AGPMCHARACTER** : op 9 `{1 CID}` « au village », précédée d'`UI_ResurrectTownConfirm` si niveau > 5 hors guerre
+  de siège de sa guilde (lignes de perte d'XP jamais montrées : `IsExpPenalty` = 0) ; champ 19 `CHAR[32]` « skill
+  init » lu à l'op 0 et à l'op 23 `{1 CID, 19}` (pas à l'op 1). L'op 10 (sur place) n'est jamais émise.
+- **AGPMSKILL op 1** `{1 identifiant}` : compétence retirée.
+- **AgpmEventSkillMaster (0x3B)** : op 8 `{2 CID}` (champ 1 nul) après `UI_SkillInitializeConfirm`, seulement si la
+  chaîne « skill init » est vide ; op 9 `{5 résultat i8}` : 0 boîte `Skill_SkillInitialize_Success`, 1 boîte
+  `Skill_SkillInitialize_Failed`, 2 boîte `sysstr` 748. Aucun contrôle d'`UI_1024X768.ini` n'appelle
+  `Skill_TreeInitialize` : ArchRust passe par `/oublier`.
+
+## Rappel de groupe, actions sociales et boutique des Shrines
+
+Relevés dans Archonia (`party.rs`, `social.rs`, `npc.rs` d'`archrust-netclient` ; `app_party.rs`, `app_social.rs`,
+`app_npc.rs`, `hud_social.rs`, `app_consumables.rs` du moteur).
+
+- **Rappel (AGPMPARTYMANAGEMENT 0x09)** `{0 op, 1 CID auteur, 2 CID cible, 3 nom}` : op 15 S → C, champ 1 = lanceur,
+  ignorée s'il n'est pas du groupe du joueur ; sinon `UI_ConfirmRecall` (`Party_Request_Recall`, son `U_WIN_SE2.wav`).
+  « Accept » : AgpmPrivateTrade 0x07 op 5 `{1 soi}` puis op 16 `{1 soi, 2 lanceur}`, fermeture de l'échange, de la
+  boutique, de la banque et des portails, ligne `PartyAcceptRecall` ; « Ignore » : op 17 `{1 soi, 2 lanceur}`,
+  `PartyRejectRecall`. Chez le lanceur, op 16 / 17 S → C `{1 membre}` : `PartyTargetAcceptRecall` /
+  `PartyTargetRejectRecall`. L'orbe (ItemType 1, Type 15) s'utilise par AGPMITEM op 3 ; l'op 4 pour soi affiche
+  `PartyUseRecallSuccess`.
+- **Actions sociales (AGPMCHARACTER op 16)** `{1 CID, 16 U8 type}` dans les deux sens, type 0-16 = ligne de
+  `Ini\SocialAction.txt` − 1. Rien n'est joué à l'envoi : l'op 16 reçue (soi compris) joue le clip et le son de
+  `INI\SOCIAL_PC.txt` — colonnes par paires ANIMATION / SOUND, TID du personnage en ligne 0, lignes 2-19 = types
+  0-17, lignes 21-40 = types 18 et suivants (écran de sélection) ; clips `character\animation\*.rws` (format des
+  `.ean`), sons `sound\effect\*.wav`. Fenêtre `UI_SocialAction` : menu Communauté « Emotes » (`CONTROL_10281`) et
+  touche Y (`Hotkey=0:21`).
+- **Boutique des Shrines (AgcmEventNPCTrade 0x32)** : achat inchangé (op 2, quantité n dans NPC_TRADE_DETAIL, aucun
+  prix envoyé) ; tout achat passe par `UI_SHRINEITEM_BUY_CONFIRM` (n = quantité de l'objet de boutique, 1 si nulle).
+  Prix d'itemdatatable.txt : `NPC Charisma Price` (col. 29, facteur PRICE sous-type 5) et `NPC Shrine Coin` (col. 35,
+  sous-type 6) × n ; or = prix du serveur taxé × n. Restes : charisme (facteur de statut 4) − prix, pièces (objets
+  `ItemType` 2 / `Type` 6 de l'inventaire, piles additionnées) − prix, or porté − prix non taxé ; en rouge si
+  négatifs. Résultat op 2 champ 6 : 10 `NPCTMSG_NotEnoughCharisma`, 11 `NPCTMSG_NotEnoughShrineCoin` (boîtes) ; 12-14
+  (Archonium, Siege Token, Bloodmark) sont des ajouts d'Archonia, ignorés. Infobulle de la boutique : `Buy_Price : `
+  puis « n `Money_Name` », « n `Shrine_Coin` », « n `Charisma_Point` » (prix non nuls).
 
 ## Niveau MJ, carte du monde et fenêtre du personnage
 
@@ -1423,6 +1630,138 @@ Relevés dans Archonia (`morph.rs`, `skills.rs` d'`archrust-netclient` ; `app_mo
     (Archonia) = 0. Colonnes d'itemoptiontable : `skill_rate` → taux critique si `skill_type` 1, « renvoi »
     probabilité si 3 ; `Critical` → dégâts critiques ; `damage_convert_hp` → « renvoi » quantité ;
     `Ignore_Physical_Defense_Rate`, `Ignore_Attribute_Defense_Rate`, `Critical_Defense_Rate`, `StunResistance`.
+
+## Touches personnalisables, sortie, aide et astuces
+
+Relevés dans Archonia (`return_login.rs` d'`archrust-netclient` ; `app_hotkey.rs`, `hud_hotkey.rs`, `app_help.rs`,
+`hud_help.rs` du moteur).
+
+- **Table des touches** : blocs `Hotkey=<modificateur>:<DIK>` de `[EventMap]` (`UI_1024X768.ini`), suivis de
+  `HotkeyFlag` (1 : modifiable), `HotkeyDesc`, `Action=…` ; un bloc redéfini remplace le premier (`1:16` repris en
+  `HotkeyFlag=0`). Modificateur 0 aucun, 1 Maj, 2 Ctrl, 3 Alt, 4 Ctrl+Maj ; libellé « Shift+ », « Ctrl+ », « Alt+ »,
+  « Ctrl+Shift+ » + nom de la table DIK d'Archonia (0x140f45a00 : `ESC`, `TAB`, `ENTER`, `SPACE`, `F1`…, `PADPLUS`,
+  `~` pour DIK 41…). Liste modifiable : les blocs `HotkeyFlag=1` triés par code puis modificateur (81 dans
+  l'EventMap du jeu) ; affichage : `0:17` échangé avec la ligne qui précède `0:30` (FUN_14054e900).
+- **`Ini/UI_Hotkey.ini`** (chiffré RC4, clé CryptoAPI « 1111 », CRLF) : `[CONFIG] VERSION=4`, puis
+  `[CustomHotkey<i>]` `DefaultType`, `DefaultCode`, `CustomType`, `CustomCode`, triés par code puis modificateur.
+  Archonia (FUN_14054e1e0 / FUN_14054ee70) supprime un fichier dont les sections ≠ N + 1 ou la version ≠ 4, ne
+  reprend une entrée que si son défaut est celui du même rang, et réécrit tout après suppression. Il ajoute par son
+  code deux touches hors EventMap (`0:67`, `4:50`) : 83 entrées pour les 81 de l'EventMap. Le dossier `Game` étant
+  partagé, ArchRust **ne supprime jamais** le fichier : il lit toutes ses entrées, applique celles qu'il connaît
+  (même défaut, quel que soit le rang) et, au « Confirm » seulement, réécrit le fichier lu dans son ordre avec ses
+  seules entrées connues changées (inconnues à l'identique : réécriture sans changement identique à l'octet près,
+  vérifié sur le fichier du jeu). Version ≠ 4 ou sections incohérentes : fichier ignoré (défauts), non écrasé avant
+  un « Confirm » ; sans fichier valide, l'écriture ajoute `0:67` et `4:50` (défaut = touche) pour faire 83 entrées.
+- **`UI_Hotkey`** : doublon refusé avec `Hotkey_EventDispOverwriteMsg` (« Duplicated shortcut key. ») ; Confirm
+  applique et écrit, Cancel revient aux touches appliquées, Reset aux défauts (non écrits).
+- **`UI_EXIT`** : « Select Character » : retour à la sélection des personnages (section suivante) ;
+  « Exit Game » : boîte `MainUI_Quit_Question`.
+- **`Ini\Help.txt`** : table à tabulations `Item`, `Depth` (0 catégorie, 1 page), `Content` (`___` = retour à la
+  ligne). **`Ini\TipText.txt`** : `Text` (couleurs `<HHRRGGBB>`), `Hour`, `Type` ; `Hour` ≠ 0 → type 2 ; tri par type
+  puis heure. En jeu : astuce de type 0 au hasard dès l'entrée puis 120 s après chaque fermeture, affichée 10 s ;
+  à chaque heure de jeu entière, dernière astuce de type 2 dont l'heure est atteinte. **`Ini\Tips.txt`** : colonne
+  `Texture` (images de l'écran de chargement, contrôle `TipControl` d'`UI_LG_Loading`).
+
+## Retour à la sélection des personnages (AgpmReturnToLogin 0x2F)
+
+Établi sur Archonia.exe (AgcmUILogin FUN_1405a65d0 et FUN_1405a6910, AgcmReturnToLogin FUN_140686d50,
+AgcmConnectManager FUN_1405eccd0 / FUN_1405ed0e0) et validé contre les paquets d'ArchCore ; implémenté dans
+`return_login.rs` (protocole), `WorldClient::run_until` (`SessionEnd::ReturnToLogin`),
+`LoginClient::return_to_selection`, `net.rs` et `app_return_login.rs`. Drapeaux 1 ; champs `{0 op i8, 1 CID i32,
+2 compte char[49], 3 groupe char[32], 4 adresse char[25], 5 clé i32}`.
+
+| Sens | Op | Champs | Effet |
+|---|---|---|---|
+| client → monde | 1 | 1 | demande, après les contrôles du client |
+| monde → client | 2 | 1 | refus (rappel 0 d'AgcmReturnToLogin, sans abonné : rien d'affiché) |
+| monde → client | 5 | 1, 4, 5 | clé à usage unique ; adresse « hôte:port » du serveur de connexion, absente : celle du départ |
+| client → connexion | 6 | 2, 5 | dès la connexion chiffrée, au lieu de `LOGIN` op 0 |
+| connexion → client | 7 | — | après `LOGIN` op 1 réussi : `LOGIN` op 3 du monde choisi, puis liste (op 6) |
+
+* **Contrôles** (FUN_1405a65d0) : moins de 5 s depuis la dernière demande ou le dernier combat (coup donné ou
+  reçu par le joueur, dans ArchRust) → `CannotUseByStatus` ; arène ou mode combat (AgpdCharacter+0xb38, 10 s après
+  le dernier coup) → `BattleNotUse` (messages système d'`uimessage.txt` ; l'arène n'est pas suivie). Sinon la demande est datée, les fenêtres se ferment et l'op 1 part.
+* **Op 5** (FUN_140686900) : fenêtres fermées, personnages, compétences et objets oubliés, connexion au monde
+  fermée (ArchCore la ferme aussi 2 s plus tard), clé gardée, connexion au serveur de connexion. Au serveur de
+  connexion : op 6 → `LOGIN` op 0 (clé de hachage) → `LOGIN` op 1 avec le compte et le mot de passe gardés →
+  op 7 ; clé inconnue ou échue : `LOGIN` op 15. La liste des mondes n'est pas redemandée.
+* **ArchRust** : l'op 5 remet le jeu à zéro comme une déconnexion (entités, joueur, objets, effets, fenêtres,
+  AddOns) sans couper la liaison ; la scène de sélection existante revient avec la nouvelle liste, sans relancer
+  le client. Une entrée directe `--connect …/Nom` ne vaut que pour la première entrée.
+
+## Inventaire Cash et sac du familier
+
+Relevés dans Archonia (`pet_bag.rs` d'`archrust-netclient` ; `app_petbag.rs`, `hud_petbag.rs` du moteur).
+
+- **Mini Cash** (AGPMITEM champ 23, `AGPMITEM_CASH`, drapeaux 1, FUN_1401a9540) : `{0 INT8 en cours d'utilisation
+  (0, 1, 2 en pause), 1 INT64 temps restant en ms, 2 UINT64 date d'expiration, 3 INT32, 4 INT64}`. Il arrive avec
+  l'op 0 du statut 51 (sans case : le client range la liste par ordre d'arrivée) et par l'**op 26** (champ 2 IID,
+  4 CID), qui rafraîchit l'inventaire Cash. Le bouton d'une ligne envoie l'op 3 (utiliser / arrêter).
+- **Ramassage automatique** : **op 30** `{2 IID de l'objet du familier, 4 CID, 20 = AGPMITEM_AUTOPICK {INT16 0/1}}`,
+  renvoyée en écho ; état aussi dans `Ini/AutoPickUp.xml` (clair, CRLF, `<AutoPickUp><World Name="…">` puis
+  `<Character Name="…" IsAuto="1" />`, 1 par défaut).
+- **Sac** (statut 13, 4 sacs × 2 × 4, case au champ 7) : op 2 statut 13 avec la case, ou `[sac, -1, -1]` (onglet
+  « Bag n »), ou sans case ; disponible quand un objet Cash utilisable est « en cours d'utilisation » et que sa
+  créature (`Use skill id` → SKILLTEMPLATE.ini → `summons_tid` de SKILL_CONST.txt) a `PetType` 1 dans
+  CharacterDataTable.txt. Sinon un objet du statut 13 reçu est ignoré, la fenêtre (touche V) ne s'ouvre pas ou se
+  ferme.
+- **Textes** (uimessage) : temps `CashInven_ItemDetailInfoDay/Hour/Minute/Second` (temps de jeu, `Cash` 2),
+  `…RealTime` « %y/%m/%d %H:%M » (temps réel, `Cash` 3), sysstr 740 pour un familier (`Cash` 6) ; quantité
+  `CashInven_ItemDetailInfo_Count` ; état `CashInven_ItemUsing` / `…Pause` ; bouton `CashInven_ItemUse`,
+  `…NoUseYet` (champ 3 nul), `…NoUse` (« Stoppable », `CanStopUsingItem`), `…ReUse` ; pas de bouton si
+  `CashItemUseType` = 0 ; bas de fenêtre `TextFormat_CashItemCount` (« %d / 500 »). Inconnu : colonne lue en
+  `+0x258` du modèle (« Can Toggle Off », « Usage Reserved »), sens du champ 3.
+
+## Titres (AgpmTitle 0x60)
+
+Code : `netclient/src/titles.rs` (paquets), `engine/src/app_titles.rs` (données, états, contrôles),
+`engine/src/hud_titles.rs` (fenêtres), plaque de nom dans `app_boards.rs`. Structure **brute** comme 0x62
+(`FUN_140304fc0` ne déclare aucun champ AuPacket ; réception `FUN_1403058b0`, envoi `FUN_1404a66a0`) :
+
+```text
+0x00 0xD6 | 0x01 u32 longueur = taille de la structure + 1 | 0x05 0x60 | 0x13 u8 1 | 0x14 u16 op
+0x16 CHAR[49] nom du personnage concerné | 0x48 i32 TID | 0x4C… champs | pied 0x6B
+op 0  ADD            0x4C  (inutilisé)
+op 1  ADD_RESULT     0x54  S→C  @4C résultat (1), @50 compétence
+op 2  USE            0x54  C→S  @4C 2 (constante), @50 1 équiper / 0 retirer
+op 3  USE_RESULT     0x64  S→C  @4C bUse, @50 résultat (1), @58 time_t, @60 code (3 : moins de 2 h)
+op 4  LIST           0x4C  C→S  (sans appelant)
+op 5  LIST_RESULT    0x68  S→C  un par titre : @50 dernier changement, @5C 1 valide, @60 0, @64 compétence
+op 6  QUEST, sous-op @4C : 0 ADD 0x50 C→S ; 1 ADD_RESULT 0x5C @50 i64 acceptation, @58 résultat ;
+      3 CHECK 0x68 @50 i32[5] compteurs, @64 progression ; 4 COMPLETE 0x54 C→S @50 compétence (0) ;
+      5 COMPLETE_RESULT 0x5C @50 i64 achèvement, @58 résultat ; 6 LIST 0x50 C→S ; 7 LIST_RESULT 0x84
+      @50 1 valide, @58 0 en cours / ≠0 acquis, @60 i64 acceptation, @68 i64 achèvement, @70 i32[5]
+op 7  DELETE         0x4C  C→S  supprimer un titre ou abandonner un objectif
+op 8  DELETE_RESULT  0x50  S→C  @4C résultat (≠0)
+op 9  USE_NEAR       0x50  S→C  @4C 1 afficher / 0 effacer le titre au-dessus du personnage nommé
+op 10 UI_OPEN        0x4C  S→C  UI_TitleAll + UI_TitleMini ; TID ≠ 0 : Schola 1-3 / Defender activés (ArchCore)
+op 11 SKILL_SELECT   0x50  @4C compétence (ajout d'Archonia, codé, ignoré par le moteur)
+```
+
+- **Données** : `ini/titledatatable.txt` (90 colonnes lues par leur en-tête), `<langue>/titlestringtable.txt`
+  (FirstCategory 200 Expert Collector, 500 Addict, 1500 Advanced, 2100 Researcher ; SecondCategory = ordre),
+  `ini/titlesetting.xml` (couleurs par état), `ini/charismatitletable.txt`. 674 titres de l'épisode 8 ; Defender of
+  Chantra (32) et Schola rangs 1-3 (10 titres) seulement si l'op 10 porte un TID ≠ 0 ou si le serveur en envoie un ;
+  Christmas Event, Schola 4 / 5, `TitleRelatedSkills.txt`, `UI_TitleSelectSkillRank`, op 11 : écartés.
+- **États** : 1 Ready, 2 Running, 3 Complete (chaque compteur ≥ la valeur de sa condition), 4 Enable (possédé),
+  6 Activate (équipé, un seul). Boutons d'`UI_TitleAll` (`FUN_1405f9e40`) : Ready « Set up goal. », Complete
+  « Complete », Enable « Delete Title » + « Equip », Activate « Unequip » seul.
+- **Fenêtres** : H (`Open Title Window`) → `UI_TitleCurrent` (titres possédés) ; op 10 → `UI_TitleAll` (15 titres par
+  page, `FUN_1405fad30`, pages par groupes de cinq, « n / total ») et `UI_TitleMini` (objectifs, « Title
+  Prerequisite », « Give Up » écrits en dur), fermées au-delà de 149 unités du point d'ouverture. Conditions :
+  `Necessary_Condition_Desc` + « </n>(n/m) » pour un objectif (premier compteur / première valeur).
+- **Contrôles du client** avant l'op 6.0 (`FUN_1405f6ea0`, boîte OK) : `TitleErrorMsg_RequireArchlord`,
+  `…GuildMaster`, `…ClassType` (101…901 race + classe, 1001-1301 race 4), `…Level`, `…Con/Str/Int/Dex/Wis/Charisma`,
+  `…Gheld`, `…Cash`, `…Item`, `…Title`, puis `CannotRunMoreTitle` (999 objectifs) et `CannotTryMoreTitle` (500).
+  « Complete » sans les compteurs : `TitleErrorMsg_NotCompletedYet`. Refus op 3 code 3 :
+  `TitleErrorMsg_CannotExChangeTitleIn2Hour` avec l'heure locale du dernier changement retenu (ops 5 / 3).
+- **Plaque de nom** : titre sur la ligne 1 (`ancre − 2h − 6`), couleur de l'état 6 (215, 203, 173) ; la guilde
+  descend à la ligne 2 (`ancre − 2h − 20`). Rang de charisme (première ligne dont CHA < Max) rangé avec la plaque
+  du joueur (`board+0x104`, `+0x108`) mais non dessiné : `FUN_1408270a0` ne lit pas ces champs.
+- **Serveur** (attendu d'ArchCore) : à l'entrée dans le monde op 5 (un par titre, ou un seul +0x5C = 0), 6.7 (un par
+  objectif) et op 9 du titre actif (au joueur et aux voisins, et à l'observateur quand un porteur entre en vue) ;
+  réponses 6.1 (+ 6.3), 6.3 à chaque compteur, 6.5 puis 1 à l'achèvement, 3 puis 9 au changement, 8 (et 9 bUse=0)
+  à la suppression ; op 10 à la demande de dialogue d'un « <Title Manager> ».
 
 ## Inconnues
 

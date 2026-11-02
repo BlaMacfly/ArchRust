@@ -106,9 +106,8 @@ pub(super) fn fill(text: &str, args: &[String]) -> String {
 /// Sûreté d'une région (bits 2-3 du champ `Type` de RegionTemplate.ini).
 fn region_safety(assets: &Assets, region: u32) -> Option<i64> {
     let table = assets.table("ini", "RegionTemplate.ini").ok()?;
-    let header = table.section("")?;
-    let column = header.entries.iter().find(|(_, v)| v.eq_ignore_ascii_case("Type")).map(|(k, _)| k.clone())?;
-    let ty = table.section(&region.to_string())?.get(&column)?.trim().parse::<i64>().ok()?;
+    // Pas de section d'en-tête : chaque région (`[n]`) porte sa clé `Type`.
+    let ty = table.section(&region.to_string())?.get("Type")?.trim().parse::<i64>().ok()?;
     Some((ty >> 2) & 3)
 }
 

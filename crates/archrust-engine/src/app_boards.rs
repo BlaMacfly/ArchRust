@@ -55,6 +55,13 @@ struct IdLine {
     guild: Option<(String, u32)>,
     /// Membre du groupe (option « Détails du groupe ») : nom sur un cadre.
     party: bool,
+    /// Titre équipé (`board+0x501`, couleur `board+0x57c`, voir `app_titles.rs`) : ligne entre le nom et la
+    /// guilde.
+    title: Option<(String, Color32)>,
+    /// Rang de charisme rangé à la création (`board+0x104` = rang − 1, `+0x108` = nom, `FUN_140563f90`) ;
+    /// `FUN_1408270a0` ne le dessine pas : gardé sans dessin, comme Archonia.
+    #[allow(dead_code)]
+    charisma: Option<(i32, String)>,
 }
 
 /// Ce que la fermeture egui dessine, calculé avant l'emprunt du GPU.
@@ -253,7 +260,10 @@ impl App {
                 let gv = GuildView { my_guild: my_guild.as_deref(), rank_in_mine: ranks.get(&name.to_lowercase()).copied(), allies: &[] };
                 (boards::guild_text(g), boards::guild_color(color, g, &gv))
             });
-            view.ids.push(IdLine { anchor, name, color, guild, party: party.contains(&cid) });
+            // Titre (op 9) des personnages joueurs ; rang de charisme connu pour le joueur seulement (CHA).
+            let title = if player { self.titles.over_head_title(&name) } else { None };
+            let charisma = if cid == me { self.titles.my_charisma_rank() } else { None };
+            view.ids.push(IdLine { anchor, name, color, guild, party: party.contains(&cid), title, charisma });
         }
         for (cid, board, born) in &self.boards.dmg {
             let Some((foot, height)) = feet.get(cid) else { continue };
@@ -326,14 +336,21 @@ pub fn panel(ctx: &egui::Context, glue: &mut BoardsGlue, view: &BoardsView, hud:
         let name = painter.layout_no_wrap(line.name.clone(), font.clone(), boards::font_color(line.color));
         let guild = line.guild.as_ref().map(|(text, color)| painter.layout_no_wrap(text.clone(), font.clone(), boards::font_color(*color)));
         let height = name.size().y;
-        let (at, guild_at) = boards::id_lines(line.anchor, name.size().x, guild.as_ref().map(|g| g.size().x), height, SCALE);
+        let (at, mut guild_at) = boards::id_lines(line.anchor, name.size().x, guild.as_ref().map(|g| g.size().x), height, SCALE);
+        // Titre sur la ligne 1 (haut à `ancre − 2h − 6`), la guilde passe à la ligne 2 (`ancre − 2h − 20`,
+        // `FUN_1408270a0` : lignes +0xF0…+0xFC).
+        let title = line.title.as_ref().map(|(text, color)| painter.layout_no_wrap(text.clone(), font.clone(), *color));
+        let title_at = title.as_ref().map(|t| Pos2::new((line.anchor.x - t.size().x * 0.5 * SCALE).trunc(), at.y - height - 6.0 * SCALE));
+        if title.is_some() {
+            guild_at = guild_at.map(|g| Pos2::new(g.x, at.y - height - 20.0 * SCALE));
+        }
         if line.party {
             // Cadre `0xBF8B3F3F` (`FUN_140825a20`) derrière le nom d'un membre du groupe.
             let c = boards::font_color(PARTY_FRAME);
             let fill = Color32::from_rgba_unmultiplied(c.r(), c.g(), c.b(), (PARTY_FRAME >> 24) as u8);
             painter.rect_filled(Rect::from_min_size(at, name.size()).expand(1.0), 0.0, fill);
         }
-        for (galley, pos) in [(Some(name), Some(at)), (guild, guild_at)] {
+        for (galley, pos) in [(Some(name), Some(at)), (title, title_at), (guild, guild_at)] {
             let (Some(galley), Some(pos)) = (galley, pos) else { continue };
             painter.galley_with_override_text_color(pos + egui::vec2(1.0, 1.0), galley.clone(), shadow);
             painter.galley(pos, galley, Color32::WHITE);

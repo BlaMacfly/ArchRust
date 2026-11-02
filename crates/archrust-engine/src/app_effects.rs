@@ -632,8 +632,8 @@ impl App {
                 }
                 let assets = self.assets.clone();
                 let Some(char_tid) = self.effects_tid_of(*caster) else { return };
-                let equipment = self.player.as_ref().filter(|p| p.cid == *caster).or_else(|| self.entities.iter().find(|e| e.cid == *caster)).map(|e| e.equipment.clone()).unwrap_or_default();
-                let equip = crate::animation::weapon_anim_equip(crate::scene::equipped_weapon_type(&assets, &equipment));
+                // Ensemble d'animations courant du lanceur (arme, monture : `worn::anim_equip`).
+                let equip = self.anim_equip_of(*caster).max(0) as u32;
                 let list = self.effects.skill_cache.entry((char_tid, *tid, equip)).or_insert_with(|| skill_effects(&assets, char_tid, *tid, equip)).clone();
                 self.effects_play_on(*caster, &list, Class::Skill);
             }

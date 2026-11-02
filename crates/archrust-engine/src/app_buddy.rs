@@ -466,7 +466,7 @@ impl App {
                 glue.detail.clear();
                 let region_name = u16::try_from(region).ok().and_then(|r| crate::zones::Zones::region_name(&assets, r));
                 if let Some(region_name) = region_name {
-                    let l = super::npc_glue::sysstr(&assets, SYS_REGION).unwrap_or_else(|| "L".into());
+                    let l = super::npc_glue::sysstr(&assets, SYS_REGION).unwrap_or_default();
                     glue.detail = format!("{name}\n{l} : {region_name}");
                 }
             }

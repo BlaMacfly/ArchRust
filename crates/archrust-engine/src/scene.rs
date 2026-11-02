@@ -110,7 +110,26 @@ pub fn build_clump_pieces(
     assets: &Assets,
     clump: &Arc<Clump>,
 ) -> Vec<(Arc<Mesh>, Mat4, Option<i64>)> {
-    let world = clump.world_matrices();
+    build_pieces(renderer, assets, clump, false)
+}
+
+/// Comme `build_clump_pieces` pour un personnage : cadre 0 du clump à l'identité (RenderWare le
+/// remplace par la matrice de l'entité, voir `Clump::world_matrices_rooted`).
+pub fn build_character_pieces(
+    renderer: &mut Renderer,
+    assets: &Assets,
+    clump: &Arc<Clump>,
+) -> Vec<(Arc<Mesh>, Mat4, Option<i64>)> {
+    build_pieces(renderer, assets, clump, true)
+}
+
+fn build_pieces(
+    renderer: &mut Renderer,
+    assets: &Assets,
+    clump: &Arc<Clump>,
+    rooted: bool,
+) -> Vec<(Arc<Mesh>, Mat4, Option<i64>)> {
+    let world = if rooted { clump.world_matrices_rooted() } else { clump.world_matrices() };
     let has_hierarchy = clump
         .frames
         .iter()
@@ -129,6 +148,7 @@ pub fn build_clump_pieces(
                 clump: clump.clone(),
                 geometry: atomic.geometry as usize,
                 base: geometry_vertices(geom),
+                wearer: None,
             }));
         }
         let model = world
@@ -140,14 +160,15 @@ pub fn build_clump_pieces(
     out
 }
 
-/// Pièces d'un modèle avec leur partie du corps ; un modèle remplacé par un patch glTF n'en a pas.
+/// Pièces d'un modèle de personnage avec leur partie du corps (cadre 0 à l'identité, voir
+/// `build_character_pieces`) ; un modèle remplacé par un patch glTF n'en a pas.
 fn model_pieces(renderer: &mut Renderer, assets: &Assets, rel_dir: &str, file: &str) -> Result<Vec<(Arc<Mesh>, Mat4, Option<i64>)>> {
     let key = format!("{rel_dir}/{file}");
     if let Some(meshes) = patched_model_meshes(renderer, assets, &key) {
         return Ok(meshes.into_iter().map(|(m, t)| (m, t, None)).collect());
     }
     let clump = assets.clump(rel_dir, file)?;
-    Ok(build_clump_pieces(renderer, assets, &clump))
+    Ok(build_character_pieces(renderer, assets, &clump))
 }
 
 /// Maillage d'une géométrie : les triangles sont regroupés par matériau.
@@ -517,16 +538,6 @@ pub fn item_weapon_type(assets: &Assets, tid: i32) -> Option<i64> {
     (num(column("Kind")) == Some(2)).then(|| num(column("WeaponType"))).flatten()
 }
 
-/// Arme portée parmi l'équipement : main droite (`Part` 10), sinon main gauche (9, les arcs).
-pub fn equipped_weapon_type(assets: &Assets, equipment: &[EquipmentView]) -> Option<i64> {
-    [10, 9].into_iter().find_map(|part| {
-        equipment
-            .iter()
-            .filter(|e| item_part_for_tid(assets, e.template_id) == Some(part))
-            .find_map(|e| item_weapon_type(assets, e.template_id))
-    })
-}
-
 pub fn item_model_for_tid(assets: &Assets, tid: i32) -> Option<String> {
     if tid <= 0 {
         return None;
@@ -646,6 +657,11 @@ pub fn entity_meshes_with_head(
     fallback: &Arc<Mesh>,
 ) -> Result<Vec<(Arc<Mesh>, Mat4)>> {
     let mut meshes = entity_pieces(renderer, assets, tid, head, fallback)?;
+    // Squelette du porteur (corps) : mains des armes, peau du Xenon.
+    let skeleton = meshes.iter().find_map(|(m, _, _)| m.skin.as_ref().map(|s| s.clump.clone()));
+    // Summoner (race 4, classe 4) : seuls les objets de ses ensembles d'avatar (`worn::summoner_items`).
+    let summoner = (template_race_class(assets, tid) == Some((4, 4))).then(|| crate::worn::summoner_items(assets));
+    let equipment: Vec<EquipmentView> = equipment.iter().filter(|e| summoner.as_ref().is_none_or(|set| set.contains(&e.template_id))).cloned().collect();
     // DragonScion : les objets portés prennent l'apparence de la forme courante (AgcmItem, rappels 0x79 / 0x7B
     // d'AgpmCharacter à l'évolution et à son retour ; classe du modèle courant).
     let equipment: Vec<EquipmentView> = match template_race_class(assets, tid) {
@@ -656,9 +672,20 @@ pub fn entity_meshes_with_head(
         _ => equipment.to_vec(),
     };
     for item in &equipment {
-        // Monture (partie 14) et arme montée (15) : pas des vêtements ; la monture est un personnage à
-        // part (voir `app_ride.rs`).
-        if matches!(item_part_for_tid(assets, item.template_id), Some(14 | 15)) {
+        // Monture (partie 14) : un personnage à part (voir `app_ride.rs`).
+        if item_part_for_tid(assets, item.template_id) == Some(14) {
+            continue;
+        }
+        // Armes, boucliers, lances : dans la main du squelette (voir `worn`) ; la lance n'est dessinée
+        // qu'à cheval, les mains qu'à pied (filtre au tracé, `worn::piece_model`).
+        let look = crate::worn::item_look(assets, item.template_id).filter(|l| matches!(l.kind, crate::worn::KIND_WEAPON | crate::worn::KIND_SHIELD));
+        if let Some(look) = look {
+            if let Some(skeleton) = &skeleton {
+                meshes.extend(crate::worn::worn_pieces(renderer, assets, &look, tid, skeleton).into_iter().map(|(m, t)| (m, t, None)));
+            }
+            continue;
+        }
+        if item_part_for_tid(assets, item.template_id) == Some(15) {
             continue;
         }
         // Anneau (genre 8) et collier (genre 0x10) : jamais dessinés sur le personnage. Leur `BASE_DFF`
@@ -877,8 +904,8 @@ fn entity_pieces(
     }
     if let (false, Some(head)) = (meshes.is_empty(), head) {
         for (dir, file) in default_head_files(assets, tid, head) {
-            match model_meshes(renderer, assets, dir, &file) {
-                Ok(part) => meshes.extend(part.into_iter().map(|(m, t)| (m, t, None))),
+            match model_pieces(renderer, assets, dir, &file) {
+                Ok(part) => meshes.extend(part.into_iter().map(|(m, t, _)| (m, t, None))),
                 Err(e) => log::warn!("TID {tid} : tête {dir}/{file} : {e:#}"),
             }
         }

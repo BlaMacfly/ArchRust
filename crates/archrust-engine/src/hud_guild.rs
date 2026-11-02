@@ -484,7 +484,7 @@ pub fn draw_guild_warehouse(ctx: &egui::Context, hud: &mut HudState, assets: &As
                                 out.push(GuildUi::GwareTake(item.iid));
                             }
                             if dragging.is_none() {
-                                let label = if item.count > 1 { format!("{} ×{}", item.name, item.count) } else { item.name.clone() };
+                                let label = item.name.clone();
                                 resp.clone().on_hover_text(label);
                             }
                         }

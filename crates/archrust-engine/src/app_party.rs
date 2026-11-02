@@ -5,6 +5,14 @@
 //! `/inviter [nom]` (`/invite`, sans nom : la cible), `/accepter` (`/accept`), `/refuser`
 //! (`/decline`), `/quittergroupe` (`/leave`), `/exclure nom` (`/kick`, `/uninvite`), `/chef nom`
 //! (`/promote`), `/groupe` (`/party`) pour afficher la fenêtre.
+//!
+//! Rappel de groupe (Summoning Orb, usage 15) : op 15 reçue d'un membre du groupe → `UI_ConfirmRecall`
+//! (`PartyOpenRequestRecallUI`, son `U_WIN_SE2.wav`, texte `Party_Request_Recall` d'uimessage avec le nom du
+//! lanceur, FUN_1405e3710). « Accept » (`CONTROL_24138`, FUN_1405e2db0) ferme l'échange, la boutique, la banque et
+//! les portails, envoie l'annulation d'échange (0x07 op 5) puis l'op 16, et affiche `PartyAcceptRecall` ;
+//! « Ignore » (`CONTROL_32003`, FUN_1405e4750) envoie l'op 17 et affiche `PartyRejectRecall`. Le lanceur reçoit
+//! l'op 16 ou 17 (champ 1 = membre) : `PartyTargetAcceptRecall` / `PartyTargetRejectRecall` ; l'op 4 d'AGPMITEM
+//! de l'orbe affiche `PartyUseRecallSuccess` (voir `app_consumables.rs`).
 
 use super::App;
 use crate::net::NetLink;
@@ -27,40 +35,31 @@ pub struct MemberStats {
 #[derive(Default)]
 pub struct PartyGlue {
     pub state: PartyState,
+    /// Boîte d'information (`Action=4:0` des événements `PartyRecv*`).
+    info: Option<String>,
+    /// Messages des événements d'interface (`[EventMap]`).
+    events: Option<HashMap<String, String>>,
     /// Menus et options des fenêtres de groupe d'Archonia.
     pub frames_ui: crate::hud::PartyUiState,
     /// Cadre cliqué à cibler (lu par le moteur après `panel`).
     pub pending_select: Option<i32>,
     /// Caractéristiques connues par CID (membres ou non : un joueur peut le devenir).
     pub stats: HashMap<i32, MemberStats>,
+    /// Rappel accepté : fenêtres d'échange, de boutique, de banque et de portail à fermer (lu par le moteur).
+    pub recall_close_windows: bool,
 }
 
 /// Envoie une demande de groupe et l'annonce dans la discussion. Fonction libre : appelée depuis la
 /// fermeture egui, qui n'emprunte que certains champs de l'application.
 fn send(net: Option<&NetLink>, glue: &mut PartyGlue, ui: &mut UiState, cmd: PartyCommand) {
+    let _ = ui;
     let Some(net) = net else {
-        ui.push_chat("[groupe] hors ligne".to_string());
+        log::info!("[groupe] hors ligne : {cmd:?} non envoyé");
         return;
     };
-    let line = match &cmd {
-        PartyCommand::Invite { cid, name } => {
-            let who = name
-                .clone()
-                .or_else(|| cid.map(|c| glue.state.name_of(c)))
-                .unwrap_or_default();
-            Some(format!("Invitation envoyée à {who}."))
-        }
-        PartyCommand::Accept(c) | PartyCommand::Reject(c) => {
-            glue.state.take_invitation(*c);
-            None
-        }
-        PartyCommand::Leave => Some("Vous quittez le groupe.".into()),
-        PartyCommand::Banish(c) => Some(format!("Exclusion de {} demandée.", glue.state.name_of(*c))),
-        PartyCommand::Delegate(c) => Some(format!("Vous passez la main à {}.", glue.state.name_of(*c))),
-        PartyCommand::SetExpType(_) | PartyCommand::SetItemDivision(_) => None,
-    };
-    if let Some(line) = line {
-        ui.push_chat(format!("[groupe] {line}"));
+    // Archonia n'annonce pas ses propres demandes.
+    if let PartyCommand::Accept(c) | PartyCommand::Reject(c) = &cmd {
+        glue.state.take_invitation(*c);
     }
     net.send(Command::Party(cmd));
 }
@@ -141,12 +140,47 @@ impl App {
                 return;
             }
         }
-        let line = match &notice {
-            PartyNotice::LeaderChanged(c) if *c == me => "Vous êtes maintenant le chef du groupe.".to_string(),
-            _ => notice.message(&self.party.state),
+        log::info!("[groupe] {}", notice.message(&self.party.state));
+        // Messages de l'[EventMap] d'Archonia : boîtes `PartyRecv*` (`Action=4:0`), lignes système
+        // `PartyChangeLeader`, `PartyOptionUI_RecvInviteNoLoginMember` (`Action=4:3`) ; `Option_Party_Off_User`
+        // d'uimessage. Arrivée, départ d'un membre et changements de répartition : rien (non relevé).
+        let assets = self.assets.clone();
+        let mut event = |key: &str| super::portal_glue::ui_event_cached(&mut self.party.events, &assets, key);
+        let (boxed, text) = match &notice {
+            PartyNotice::Left => (true, event("PartyRecvLeave")),
+            PartyNotice::Banished => (true, event("PartyRecvBanish")),
+            PartyNotice::Rejected(_) => (true, event("PartyRecvReject")),
+            PartyNotice::Accepted(_) => (true, event("PartyRecvInviteAccept")),
+            PartyNotice::LeaderChanged(c) => {
+                let name = self.party.state.name_of(*c);
+                (false, super::guild_glue::fill_braces(&event("PartyChangeLeader"), &name))
+            }
+            // Réponses au rappel, chez le lanceur (`Action=4:3`, %name = `PartyRecallTargetName`).
+            PartyNotice::RecallAccepted(c) | PartyNotice::RecallRejected(c) => {
+                let key = if matches!(notice, PartyNotice::RecallAccepted(_)) { "PartyTargetAcceptRecall" } else { "PartyTargetRejectRecall" };
+                let name = self.party.state.name_of(*c);
+                (false, super::guild_glue::fill_braces(&event(key), &name))
+            }
+            PartyNotice::Failed { code, name } => match *code {
+                archrust_netclient::party::mgmt::FAILED_OTHER_PARTY => (true, event("PartyRecvAlreadyOtherMember")),
+                archrust_netclient::party::mgmt::FAILED_ALREADY_MEMBER => (true, event("PartyRecvAlreadyPartyMember")),
+                archrust_netclient::party::mgmt::FAILED_FULL => (true, event("PartyRecvMemberFull")),
+                archrust_netclient::party::mgmt::FAILED_NOT_LEADER => (true, event("PartyRecvNotLeader")),
+                archrust_netclient::party::mgmt::FAILED_NO_LOGIN => (false, super::guild_glue::fill_braces(&event("PartyOptionUI_RecvInviteNoLoginMember"), name)),
+                archrust_netclient::party::mgmt::FAILED_REFUSE => (false, notice.message(&self.party.state)),
+                _ => (true, event("PartyRecvOperationFailed")),
+            },
+            _ => (false, String::new()),
         };
-        log::info!("[groupe] {line}");
-        self.ui.push_chat(format!("[groupe] {line}"));
+        if boxed {
+            self.party.info = Some(text).filter(|t| !t.is_empty());
+        } else {
+            self.hud.push_system(&text);
+        }
+        // `PartyOpenRequestRecallUI` : `UI_ConfirmRecall` (dessinée par `panel` tant que la demande attend) et son son.
+        if let PartyNotice::RecallRequested(_) = &notice {
+            self.audio.play_effect("sound/ui/U_WIN_SE2.wav");
+        }
         self.party_addons_sync();
         match &notice {
             PartyNotice::Joined => self.addons.fire_event("GROUP_JOINED", &[]),
@@ -177,6 +211,16 @@ impl App {
             .collect();
         let invitations = self.party.state.invitations.iter().map(|i| i.name.clone()).collect();
         self.addons.set_party(members, invitations);
+    }
+
+    /// Rappel accepté (`CONTROL_24138` d'`UI_ConfirmRecall`) : `UI_PrivateTrade`, `UI_PrivateTradeYesNo`,
+    /// `UI_NPCTrade`, `UI_Teleport` et `UI_Bank` fermées comme dans Archonia (l'échange se termine par l'op 5 du
+    /// serveur qui répond à l'annulation envoyée).
+    pub(super) fn party_recall_close(&mut self) {
+        if std::mem::take(&mut self.party.recall_close_windows) {
+            self.npc.close_windows();
+            self.portal_close_list();
+        }
     }
 
     /// Déconnexion : le serveur retire le joueur de son groupe.
@@ -342,8 +386,46 @@ pub fn panel(
     let mut commands = Vec::new();
     // Boîte d'Archonia : message de l'[EventMap] `{{PartyInviterName.PartyInviter}} invites you
     // to join their party.` (`Action=4:1:-1:`).
+    if let Some(text) = glue.info.clone() {
+        if crate::hud::info_box(ctx, hud, assets, &text) {
+            glue.info = None;
+        }
+    }
+    // Rappel d'un membre : `UI_ConfirmRecall`, texte `Party_Request_Recall` (« %s a active un orbe d'invocation… »).
+    if let Some(request) = glue.state.recall.clone() {
+        let text = crate::hud::ui_message(hud, assets, "Party_Request_Recall").replacen("%s", &request.name, 1);
+        let out = crate::hud::draw_dialog(ctx, hud, assets, "UI_ConfirmRecall", |_, _, painter, c, r, font| {
+            if c.name != "CONTROL_RecallEdit" {
+                return false;
+            }
+            let galley = painter.layout(text.clone(), egui::FontId::proportional(font), egui::Color32::WHITE, r.width());
+            painter.galley(egui::pos2(r.center().x - galley.size().x / 2.0, r.center().y - galley.size().y / 2.0), galley, egui::Color32::WHITE);
+            true
+        });
+        let answer = match out.as_ref().and_then(|o| o.clicked.as_deref()) {
+            Some("CONTROL_24138") => Some(true),
+            Some("CONTROL_32003") => Some(false),
+            _ => None,
+        };
+        if let Some(accept) = answer {
+            glue.state.recall = None;
+            let key = if accept { "PartyAcceptRecall" } else { "PartyRejectRecall" };
+            let message = super::guild_glue::fill_braces(&super::portal_glue::ui_event_cached(&mut glue.events, assets, key), &request.name);
+            hud.push_system(&message);
+            if accept {
+                // FUN_1405e2db0 : annulation d'échange (AgpmPrivateTrade op 5) avant l'op 16.
+                if let Some(net) = net {
+                    net.send(Command::Trade(archrust_netclient::trade::TradeCommand::Cancel));
+                }
+                glue.recall_close_windows = true;
+                commands.push(PartyCommand::AcceptRecall(request.cid));
+            } else {
+                commands.push(PartyCommand::RejectRecall(request.cid));
+            }
+        }
+    }
     for inv in glue.state.invitations.clone() {
-        let text = format!("{} invites you to join their party.", inv.name);
+        let text = super::guild_glue::fill_braces(&super::portal_glue::ui_event_cached(&mut glue.events, assets, "PartyRecvInvite"), &inv.name);
         match crate::hud::confirm_box(ctx, hud, assets, ("party-invitation", inv.cid), &text) {
             Some(true) => commands.push(PartyCommand::Accept(inv.cid)),
             Some(false) => commands.push(PartyCommand::Reject(inv.cid)),

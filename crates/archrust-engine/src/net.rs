@@ -1,13 +1,22 @@
 //! Liaison réseau : fait tourner `archrust-netclient` sur un fil tokio et échange avec la boucle
 //! de rendu par canaux.
+//!
+//! Ordre d'Archonia : serveur de connexion joint (liste des mondes, clé de hachage) → écran
+//! `UI_SelectServer` → « Connect » sur un monde (`LoginCommand::SelectWorld`) → compte, monde,
+//! personnages → sélection et création → entrée dans le monde.
+//! Retour à la sélection des personnages (« Select Character » d'`UI_EXIT`, AgpmReturnToLogin) : la boucle de
+//! jeu rend la clé de l'op 5, la liaison rejoint le serveur de connexion (`LoginClient::return_to_selection`)
+//! et reprend aux écrans de sélection et de création, sans relancer le client.
 
+use archrust_netclient::login::WorldInfo;
 use archrust_netclient::{
     CharacterSummary, Command, LoginClient, NetError, WorldClient, WorldEvent,
 };
+use archrust_netclient::world::SessionEnd;
 use std::sync::mpsc as std_mpsc;
 use tokio::sync::mpsc;
 
-/// Identifiants saisis à l'écran de connexion.
+/// Identifiants saisis à l'écran de connexion (`UI_LG_IDPASSWORD`).
 #[derive(Debug, Clone)]
 pub struct Credentials {
     pub host: String,
@@ -18,6 +27,9 @@ pub struct Credentials {
     /// sélection, après la liste des personnages du compte.
     pub character: Option<String>,
     pub create_if_missing: bool,
+    /// Monde choisi à l'écran `UI_SelectServer` : la liaison envoie la liste des mondes et attend
+    /// `LoginCommand::SelectWorld` avant d'authentifier le compte ; sinon (`--connect`), premier monde.
+    pub choose_world: bool,
     /// Langue des textes du serveur (Options), annoncée au `HELLO` des deux connexions.
     pub language: Option<String>,
 }
@@ -31,6 +43,9 @@ pub const LANGUAGE_REQUEST_ID: u32 = 0x4000_0001;
 /// `LG_CharacterCreateOK`).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum LoginCommand {
+    /// « Connect » sur un monde de `UI_SelectServer` (`LG_SelectServer`) : authentification du compte
+    /// puis choix du monde.
+    SelectWorld(String),
     /// Entrer dans le monde avec ce personnage du compte.
     Enter(String),
     /// Ouvrir l'écran de création : le serveur envoie ses modèles de base.
@@ -51,7 +66,10 @@ pub enum LoginCommand {
 pub enum NetEvent {
     Status(String),
     Error(String),
-    Worlds(Vec<String>),
+    /// Mondes annoncés par le serveur de connexion (`Login_Servers` d'`UI_SelectServer`).
+    Worlds(Vec<WorldInfo>),
+    /// Compte refusé par le serveur (`LG_IDPASSWORD_FAILD`) : la liaison s'arrête.
+    AuthRefused(String),
     Characters(Vec<CharacterSummary>),
     /// Modèles de base de l'écran de création.
     CreationTemplates(Vec<CharacterSummary>),
@@ -126,88 +144,127 @@ async fn session(
     };
     status(format!("connexion à {}:{}…", creds.host, creds.port));
     let mut login = LoginClient::connect_with(&creds.host, creds.port, creds.language.as_deref()).await?;
-    let _ = ev.send(NetEvent::Worlds(
-        login.worlds.iter().map(|w| w.name.clone()).collect(),
-    ));
+    let _ = ev.send(NetEvent::Worlds(login.worlds.clone()));
+    // Écran `UI_SelectServer` : rien n'est envoyé du compte avant « Connect » sur un monde.
+    let world = if creds.choose_world {
+        loop {
+            match choice_rx.recv().await.ok_or_else(|| anyhow::anyhow!("connexion annulée"))? {
+                LoginCommand::SelectWorld(name) => break name,
+                other => log::debug!("choix ignoré avant celui du monde : {other:?}"),
+            }
+        }
+    } else {
+        login.worlds.first().map(|w| w.name.clone()).unwrap_or_else(|| "ArchCore".into())
+    };
     status("authentification…".into());
-    login.authenticate(&creds.user, &creds.password).await?;
-    let world = login
-        .worlds
-        .first()
-        .map(|w| w.name.clone())
-        .unwrap_or_else(|| "ArchCore".into());
-    let names = login.select_world(&world).await?;
+    match login.authenticate(&creds.user, &creds.password).await {
+        Ok(()) => {}
+        Err(NetError::Server(msg)) => {
+            let _ = ev.send(NetEvent::AuthRefused(msg));
+            return Ok(());
+        }
+        Err(e) => return Err(e.into()),
+    }
+    login.select_world(&world).await?;
     let chars = login.list_characters().await?;
     let _ = ev.send(NetEvent::Characters(chars));
-    let known = |name: &str| names.iter().any(|n| n.eq_ignore_ascii_case(name));
-    let character = match &creds.character {
-        // Entrée directe (`--connect`) : création (humain, TID 96) si le personnage manque.
-        Some(name) if known(name) => name.clone(),
-        Some(name) if creds.create_if_missing => {
-            status(format!("création de {name}…"));
-            login.enter_creation().await?;
-            login.create_character(name, 96, 1, 2).await?;
-            name.clone()
-        }
-        Some(name) => anyhow::bail!("personnage {name} inconnu sur ce compte"),
-        // Écrans de sélection et de création : on suit les commandes jusqu'à l'entrée en jeu.
-        None => loop {
-            let cmd = choice_rx
-                .recv()
-                .await
-                .ok_or_else(|| anyhow::anyhow!("connexion annulée"))?;
-            match cmd {
-                LoginCommand::Enter(name) => break name,
-                LoginCommand::OpenCreation => {
-                    let bases = login.enter_creation().await?;
-                    let _ = ev.send(NetEvent::CreationTemplates(bases));
+    let mut cmd_rx = cmd_rx;
+    // Entrée directe (`--connect …/Nom`) la première fois seulement : après un retour à la sélection des
+    // personnages, le choix se fait à l'écran.
+    let mut direct = creds.character.clone();
+    loop {
+        let known = |login: &LoginClient, name: &str| login.names.iter().any(|n| n.eq_ignore_ascii_case(name));
+        let character = match direct.take() {
+            // Entrée directe (`--connect`) : création (humain, TID 96) si le personnage manque.
+            Some(name) if known(&login, &name) => name,
+            Some(name) if creds.create_if_missing => {
+                status(format!("création de {name}…"));
+                login.enter_creation().await?;
+                login.create_character(&name, 96, 1, 2).await?;
+                name
+            }
+            Some(name) => anyhow::bail!("personnage {name} inconnu sur ce compte"),
+            // Écrans de sélection et de création : on suit les commandes jusqu'à l'entrée en jeu.
+            None => loop {
+                let cmd = choice_rx
+                    .recv()
+                    .await
+                    .ok_or_else(|| anyhow::anyhow!("connexion annulée"))?;
+                match cmd {
+                    LoginCommand::Enter(name) => break name,
+                    LoginCommand::OpenCreation => {
+                        let bases = login.enter_creation().await?;
+                        let _ = ev.send(NetEvent::CreationTemplates(bases));
+                    }
+                    LoginCommand::Create {
+                        tid,
+                        name,
+                        face,
+                        hair,
+                    } => match login.create_character(&name, tid, hair, face).await {
+                        Ok(created) => {
+                            let _ = ev.send(NetEvent::CharacterCreated(created));
+                        }
+                        Err(NetError::LoginResult(code)) => {
+                            let _ = ev.send(NetEvent::CreateRefused { name, code });
+                        }
+                        Err(NetError::Server(msg)) => {
+                            let _ = ev.send(NetEvent::Refused(format!("{name} : {msg}")));
+                        }
+                        Err(e) => return Err(e.into()),
+                    },
+                    LoginCommand::Delete(name) => {
+                        login.delete_character(&name).await?;
+                        let _ = ev.send(NetEvent::CharacterDeleted(name));
+                    }
+                    LoginCommand::SelectWorld(_) => {}
                 }
-                LoginCommand::Create {
-                    tid,
-                    name,
-                    face,
-                    hair,
-                } => match login.create_character(&name, tid, hair, face).await {
-                    Ok(created) => {
-                        let _ = ev.send(NetEvent::CharacterCreated(created));
+            },
+        };
+        status("entrée dans le monde…".into());
+        let ticket = login.enter_world(&character, &world).await?;
+        login.close().await;
+        // Commandes laissées par la partie précédente (retour à la sélection) : sans objet dans la nouvelle.
+        while cmd_rx.try_recv().is_ok() {}
+        let mut wc = WorldClient::connect(ticket).await?;
+        // Identifiants renvoyés par une reconnexion automatique (AgcmReconnect).
+        wc.account = creds.user.clone();
+        wc.password = creds.password.clone();
+        for e in wc.enter().await? {
+            let _ = ev.send(NetEvent::World(e));
+        }
+        status("en jeu".into());
+        let (wtx, mut wrx) = mpsc::channel::<WorldEvent>(256);
+        let forward = {
+            let ev = ev.clone();
+            async move {
+                while let Some(e) = wrx.recv().await {
+                    if ev.send(NetEvent::World(e)).is_err() {
+                        break;
                     }
-                    Err(NetError::LoginResult(code)) => {
-                        let _ = ev.send(NetEvent::CreateRefused { name, code });
-                    }
-                    Err(NetError::Server(msg)) => {
-                        let _ = ev.send(NetEvent::Refused(format!("{name} : {msg}")));
-                    }
-                    Err(e) => return Err(e.into()),
-                },
-                LoginCommand::Delete(name) => {
-                    login.delete_character(&name).await?;
-                    let _ = ev.send(NetEvent::CharacterDeleted(name));
                 }
             }
-        },
-    };
-    status("entrée dans le monde…".into());
-    let ticket = login.enter_world(&character, &world).await?;
-    login.close().await;
-    let mut wc = WorldClient::connect(ticket).await?;
-    // Identifiants renvoyés par une reconnexion automatique (AgcmReconnect).
-    wc.account = creds.user.clone();
-    wc.password = creds.password.clone();
-    for e in wc.enter().await? {
-        let _ = ev.send(NetEvent::World(e));
+        };
+        let ((end, commands), ()) = tokio::join!(wc.run_until(wtx, cmd_rx), forward);
+        cmd_rx = commands;
+        // Retour à la sélection des personnages (AgpmReturnToLogin op 5) : serveur de connexion de l'op 5, ou
+        // celui du départ ; op 6, clé de hachage, compte, op 7, puis liste des personnages (`return_login`).
+        let SessionEnd::ReturnToLogin(back) = end else {
+            return Ok(());
+        };
+        status("retour à la sélection des personnages…".into());
+        let (host, port) = back.address.clone().unwrap_or_else(|| (creds.host.clone(), creds.port));
+        let (again, chars) = LoginClient::return_to_selection(
+            &host,
+            port,
+            creds.language.as_deref(),
+            &creds.user,
+            &creds.password,
+            back.key,
+            &world,
+        )
+        .await?;
+        login = again;
+        let _ = ev.send(NetEvent::Characters(chars));
     }
-    status("en jeu".into());
-    let (wtx, mut wrx) = mpsc::channel::<WorldEvent>(256);
-    let forward = {
-        let ev = ev.clone();
-        async move {
-            while let Some(e) = wrx.recv().await {
-                if ev.send(NetEvent::World(e)).is_err() {
-                    break;
-                }
-            }
-        }
-    };
-    tokio::join!(wc.run(wtx, cmd_rx), forward);
-    Ok(())
 }

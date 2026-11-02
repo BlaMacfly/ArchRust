@@ -162,7 +162,7 @@ impl RepairGlue {
     }
 
     /// Objet posé dans la case `cell` (FUN_140652660) ; message d'Archonia en cas de refus.
-    fn drop_item(&mut self, assets: &Assets, item: &ItemRecord, cell: usize, hud: &mut HudState, ui: &mut UiState) {
+    fn drop_item(&mut self, assets: &Assets, item: &ItemRecord, cell: usize, hud: &mut HudState, _ui: &mut UiState) {
         if !item.status.is_some_and(|s| BAG_STATUSES.contains(&s)) {
             return;
         }
@@ -189,13 +189,12 @@ impl RepairGlue {
             None => {
                 let text = self.data(assets).sys(321);
                 hud.push_system(&text);
-                ui.push_chat(format!("[réparation] {text}"));
             }
         }
     }
 
     /// Bouton « Repair » (FUN_140651670).
-    fn repair_button(&mut self, assets: &Assets, items: &HashMap<i32, ItemRecord>, net: Option<&NetLink>, hud: &mut HudState, ui: &mut UiState) {
+    fn repair_button(&mut self, assets: &Assets, items: &HashMap<i32, ItemRecord>, net: Option<&NetLink>, hud: &mut HudState, _ui: &mut UiState) {
         let Some(npc) = self.open.as_ref().map(|o| o.npc) else { return };
         if self.busy {
             return;
@@ -203,7 +202,6 @@ impl RepairGlue {
         if self.grid.iter().all(Option::is_none) {
             let text = self.data(assets).sys(322);
             hud.push_system(&text);
-            ui.push_chat(format!("[réparation] {text}"));
             return;
         }
         let cost = self.total_cost(assets, items);
@@ -353,7 +351,6 @@ impl App {
                     result::NOT_ENOUGH_MONEY | result::ALREADY_MAX => glue.info = Some(text.clone()),
                     _ => self.hud.push_system(&text),
                 }
-                self.ui.push_chat(format!("[réparation] {text}"));
             }
         }
     }

@@ -445,12 +445,87 @@ impl Clump {
         out
     }
 
+    /// Comme [`Clump::world_matrices`], le cadre 0 (cadre du clump) ramené à l'identité. RenderWare
+    /// remplace la matrice du cadre du clump par celle de l'entité (AgcmCharacter : échelle, rotations,
+    /// translation en mode « remplacer ») : c'est le repère de tout personnage. Le cadre 0 du cheval
+    /// `a0000237.ecl` porte une rotation de 64° et un décalage (32,1 ; 5,5 ; −5,2) que le client
+    /// n'applique jamais ; 172 corps `a*.ecl` du pack `character` sont dans ce cas. Les objets du décor
+    /// et les effets gardent `world_matrices`.
+    pub fn world_matrices_rooted(&self) -> Vec<Mat4> {
+        self.world_matrices_from(&[], true)
+    }
+
+    /// Comme [`Clump::world_matrices_with_pose`], le cadre 0 ramené à l'identité (voir
+    /// [`Clump::world_matrices_rooted`]) ; une pose du cadre 0, s'il est un nœud HAnim, est gardée.
+    pub fn world_matrices_with_pose_rooted(&self, pose: &[HAnimSample]) -> Vec<Mat4> {
+        self.world_matrices_from(pose, true)
+    }
+
     /// Matrices monde en appliquant les pistes `.ean` par indice HAnim.
     ///
     /// Les pistes candidates sont ordonnées par leur première clé racine. Le squelette fournit
     /// l'indice HAnim de chaque frame ; les indices sans piste gardent leur transformation locale
     /// de bind. Le couplage est fondé sur le format et reste à valider pour chaque famille de rigs.
     pub fn world_matrices_with_pose(&self, pose: &[HAnimSample]) -> Vec<Mat4> {
+        self.world_matrices_from(pose, false)
+    }
+
+    /// Matrices de skin d'une géométrie de ce clump portée par le squelette d'un autre clump
+    /// (`skeleton`, le porteur), associées **par ID de nœud** : `inverse(monde de la frame de
+    /// l'atomic) × monde animé du nœud du porteur × inverse de bind`, mondes sans cadre 0 (voir
+    /// [`Clump::world_matrices_rooted`]). C'est `RpSkinAtomicSetHAnimHierarchy` d'AgcmItem pour une
+    /// arme skinnée (Xenon `d0001e96.ecl`, peau à 80 os, sur le chevalier à 86 nœuds). Un os absent
+    /// du porteur garde la pose de bind de ce clump. `pose` suit la hiérarchie du porteur.
+    pub fn skin_matrices_on(
+        &self,
+        geometry_index: usize,
+        skeleton: &Clump,
+        pose: &[HAnimSample],
+    ) -> Result<Vec<Mat4>, RwError> {
+        let geometry = self
+            .geometries
+            .get(geometry_index)
+            .ok_or_else(|| RwError::Unsupported(format!("géométrie absente : {geometry_index}")))?;
+        let skin = geometry
+            .skin
+            .as_ref()
+            .ok_or_else(|| RwError::Unsupported("géométrie sans skin".into()))?;
+        let hierarchy = self
+            .frames
+            .iter()
+            .filter_map(|frame| frame.hanim.as_ref())
+            .find(|hierarchy| !hierarchy.nodes.is_empty())
+            .ok_or_else(|| RwError::Unsupported("palette HAnim absente".into()))?;
+        let own = self.world_matrices_rooted();
+        let theirs = skeleton.world_matrices_with_pose_rooted(pose);
+        let atomic_world_inv = self
+            .atomics
+            .iter()
+            .find(|a| a.geometry as usize == geometry_index)
+            .and_then(|a| own.get(a.frame as usize))
+            .map_or(Mat4::IDENTITY, |m| m.inverse());
+        let frame_of = |clump: &Clump, id: u32| clump.frames.iter().position(|f| f.hanim.as_ref().is_some_and(|h| h.node_id == id));
+        let mut id_by_index = vec![None; hierarchy.nodes.len()];
+        for node in &hierarchy.nodes {
+            if let Some(slot) = id_by_index.get_mut(node.index as usize) {
+                *slot = Some(node.id);
+            }
+        }
+        Ok(skin
+            .inverse_bind
+            .iter()
+            .enumerate()
+            .map(|(index, bind)| {
+                let Some(id) = id_by_index.get(index).copied().flatten() else { return Mat4::IDENTITY };
+                let world = frame_of(skeleton, id)
+                    .and_then(|f| theirs.get(f).copied())
+                    .or_else(|| frame_of(self, id).and_then(|f| own.get(f).copied()));
+                world.map_or(Mat4::IDENTITY, |w| atomic_world_inv * w * *bind)
+            })
+            .collect())
+    }
+
+    fn world_matrices_from(&self, pose: &[HAnimSample], rooted: bool) -> Vec<Mat4> {
         let mut sample_by_frame = vec![None; self.frames.len()];
         if let Some(hierarchy) = self
             .frames
@@ -474,7 +549,7 @@ impl Clump {
         let mut out = vec![Mat4::IDENTITY; self.frames.len()];
         for (index, frame) in self.frames.iter().enumerate() {
             let local = sample_by_frame[index].map_or_else(
-                || frame.local_matrix(),
+                || if rooted && index == 0 { Mat4::IDENTITY } else { frame.local_matrix() },
                 |sample| {
                     let q = Quat::from_xyzw(
                         sample.rotation[0],
@@ -1310,6 +1385,26 @@ fn decode_dxt(data: &[u8], w: usize, h: usize, variant: u8, out: &mut [u8]) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Cadre 0 tourné et décalé (comme celui du cheval `a0000237.ecl`) : `world_matrices` le garde, la
+    /// variante « rooted » le ramène à l'identité sans toucher aux enfants.
+    #[test]
+    fn cadre_zero_remplace_par_l_entite() {
+        let frame = |parent: i32, rotation: [[f32; 3]; 3], position: Vec3| Frame { rotation, position, parent, flags: 0, name: String::new(), hanim: None };
+        let id = [[1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]];
+        let turned = [[0.0, 0.0, -1.0], [0.0, 1.0, 0.0], [1.0, 0.0, 0.0]];
+        let clump = Clump {
+            frames: vec![frame(-1, turned, Vec3::new(32.1, 5.5, -5.2)), frame(0, id, Vec3::new(0.0, 131.8, -33.7))],
+            ..Default::default()
+        };
+        let plain = clump.world_matrices();
+        let rooted = clump.world_matrices_rooted();
+        assert_eq!(rooted[0], Mat4::IDENTITY);
+        assert!((rooted[1].w_axis.truncate() - Vec3::new(0.0, 131.8, -33.7)).length() < 1e-4);
+        assert!((plain[1].w_axis.truncate() - Vec3::new(0.0, 131.8, -33.7)).length() > 10.0);
+        assert_eq!(clump.world_matrices_with_pose_rooted(&[]), rooted);
+        assert_eq!(clump.world_matrices_with_pose(&[]), plain);
+    }
 
     #[test]
     fn version_decode() {

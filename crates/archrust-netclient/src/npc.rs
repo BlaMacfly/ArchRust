@@ -43,6 +43,11 @@ pub mod trade_result {
     pub const BUY_OK: i32 = 2;
     pub const NOT_ENOUGH_MONEY: i32 = 3;
     pub const INVENTORY_FULL: i32 = 4;
+    /// Boutique des Shrines (Archonia FUN_14073a6c0, rappels 10 et 11 d'AgcmEventNPCTrade) : charisme
+    /// (`NPCTMSG_NotEnoughCharisma`) ou Shrine Coins (`NPCTMSG_NotEnoughShrineCoin`) insuffisants. Les codes 12 à 14
+    /// (Archonium, Siege Token, Bloodmark) sont des ajouts d'Archonia, non repris.
+    pub const NOT_ENOUGH_CHARISMA: i32 = 10;
+    pub const NOT_ENOUGH_SHRINE_COIN: i32 = 11;
     pub const SELL_OK: i32 = 0;
     pub const TOO_MUCH_MONEY: i32 = 1;
 }
@@ -352,6 +357,11 @@ mod tests {
             translate(0x32, &shop),
             Some(NpcEvent::ShopItem { npc: 7, iid: 42, tid: 190, price: 25, count: 1, grid: [0, 2, 0] })
         );
+        // Refus de la boutique des Shrines : champ 6 = 10 (charisme) ou 11 (Shrine Coins).
+        for code in [trade_result::NOT_ENOUGH_CHARISMA, trade_result::NOT_ENOUGH_SHRINE_COIN] {
+            let refused = sparse(main::EVENT_NPC_TRADE, &[(0, event_base(7, 9)), (1, Value::I8(2)), (6, Value::I32(code))]);
+            assert_eq!(translate(0x32, &refused), Some(NpcEvent::Bought { result: code }));
+        }
         let mut bits = vec![0u8; 0x800];
         bits[4632 / 8] |= 1 << (4632 % 8);
         let done = sparse(main::QUEST, &[(0, Value::I8(5)), (8, Value::Block(bits))]);

@@ -146,8 +146,6 @@ pub fn confirm_box(ctx: &egui::Context, hud: &mut HudState, assets: &Assets, id:
                 textures: ["A", "B", "C", "D"].iter().enumerate().map(|(i, x)| (i as u32 + 1, format!("Common_Button_Small_{x}.png"))).collect(),
                 ..Default::default()
             };
-            let ok = if ok.is_empty() { "OK".to_string() } else { ok };
-            let cancel = if cancel.is_empty() { "Cancel".to_string() } else { cancel };
             for (x, label, value) in [(135.0, ok.as_str(), true), (213.0, cancel.as_str(), false)] {
                 let r = Rect::from_min_size(rect.min + Vec2::new(x, 140.0) * s, Vec2::new(64.0, 17.0) * s);
                 if button(ctx, ui, hud, assets, &painter, r, &small, label, font * 0.95, true, ("archonia-confirm-btn", value, ui.id())).clicked() {

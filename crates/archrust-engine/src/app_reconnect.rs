@@ -54,12 +54,10 @@ impl App {
         if reconnecting {
             log::warn!("reconnexion au serveur de jeu…");
             self.reconnect = ReconnectGlue { since: Some(Instant::now()), window: true, last_notice: None };
-            self.ui.push_chat("[système] connexion perdue : reconnexion au serveur de jeu…");
         } else {
             let waited = self.reconnect.since.map(|t| t.elapsed().as_secs_f32()).unwrap_or(0.0);
             log::info!("reconnecté au serveur de jeu après {waited:.1} s");
             self.reconnect = ReconnectGlue::default();
-            self.ui.push_chat("[système] reconnecté au serveur de jeu.");
         }
     }
 

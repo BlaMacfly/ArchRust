@@ -6,7 +6,9 @@
 //!   gauche sur la cible déjà choisie : attaque ; `F` : attaque la cible ; `/attaquer` (`/attack`) ;
 //! * clic (gauche ou droit) sur un objet au sol, `Espace` (« Collect item » d'Archonia, DIK 57,
 //!   `ItemAutoPickup`) pour l'objet le plus proche, `/ramasser` (`/loot`, `/pickup`) ;
-//! * mort : fenêtre `UI_Resurrection` (« Ressusciter au village »), ou `/ressusciter` (`/release`).
+//! * mort : fenêtre `UI_Resurrection` (« Ressusciter au village », confirmé par `UI_ResurrectTownConfirm` au-delà du
+//!   niveau 5 hors guerre de siège, `FUN_1404f86a0`), ou `/ressusciter` (`/release`) sans confirmation ; orbe de
+//!   résurrection : voir `app_consumables.rs`.
 //!
 //! Le serveur porte les coups : le client n'envoie qu'une demande d'attaque, et un déplacement
 //! demandé par le joueur l'interrompt. Les animations suivent `charactertemplateanimation.ini`
@@ -72,6 +74,11 @@ pub struct CombatGlue {
     /// Bouton « Wanted » de la fenêtre de mort : `Some(actif)` (voir `app_wanted.rs`), clic de la dernière image.
     pub wanted_button: Option<bool>,
     pub wanted_clicked: bool,
+    /// « Revive in town » demande `UI_ResurrectTownConfirm` (`FUN_1404f86a0` : niveau > 5, hors guerre de siège de
+    /// sa guilde), relevé à chaque image par `consumables_frame` (voir `app_consumables.rs`).
+    pub town_confirm: bool,
+    /// `UI_ResurrectTownConfirm` ouverte.
+    confirm_town: bool,
 }
 
 /// Ce que la fenêtre egui dessine : textes projetés à l'écran (points egui).
@@ -134,39 +141,18 @@ fn field_meshes(renderer: &mut crate::render::Renderer, assets: &Assets, file: &
     Ok(build_clump_meshes(renderer, assets, &Arc::new(lit)))
 }
 
-/// Libellé d'un objet au sol.
+/// Libellé d'un objet au sol : nom de l'objet ; or : « %d %s » avec `Money_Name` (comme le prix des
+/// fenêtres, FUN_1405d9cc0). Choix d'ArchRust : pas de nombre après le nom d'une pile.
 fn loot_name(assets: &Assets, item: &GroundItem) -> String {
     if item.is_gold() {
-        return format!("{} Or", item.count);
+        let text = super::npc_glue::client_text(assets, "uimessage.txt");
+        let money = text.lines().filter_map(|l| l.split_once('\t')).find(|(k, _)| k.trim() == "Money_Name").map(|(_, v)| v.trim().to_string()).unwrap_or_default();
+        return format!("{} {money}", item.count);
     }
-    let name = item_name_for_tid(assets, item.tid).unwrap_or_else(|| format!("Objet {}", item.tid));
-    if item.count > 1 {
-        format!("{name} × {}", item.count)
-    } else {
-        name
-    }
+    item_name_for_tid(assets, item.tid).unwrap_or_default()
 }
 
-/// Message de discussion d'un coup qui concerne le joueur, sinon `None`.
-fn hit_line(by_me: bool, on_me: bool, actor: &str, target: &str, result: Option<i8>, damage: Option<i32>, hp: Option<i32>) -> Option<String> {
-    let rest = hp.map(|h| format!(" (reste {h} PV)")).unwrap_or_default();
-    let d = damage.unwrap_or(0);
-    let text = match (by_me, on_me, result) {
-        (true, _, Some(outcome::SUCCESS)) => format!("Vous frappez {target} : {d} dégât(s){rest}."),
-        (true, _, Some(outcome::CRITICAL)) => format!("Coup critique sur {target} : {d} dégât(s){rest} !"),
-        (true, _, Some(outcome::MISS)) => format!("Vous manquez {target}."),
-        (true, _, Some(outcome::EVADE)) => format!("{target} esquive votre coup."),
-        (true, _, Some(outcome::BLOCK)) => format!("{target} bloque votre coup."),
-        (_, true, Some(outcome::SUCCESS)) => format!("{actor} vous frappe : {d} dégât(s){rest}."),
-        (_, true, Some(outcome::CRITICAL)) => format!("{actor} vous porte un coup critique : {d} dégât(s){rest} !"),
-        (_, true, Some(outcome::MISS)) => format!("{actor} vous manque."),
-        (_, true, Some(outcome::EVADE)) => format!("Vous esquivez le coup de {actor}."),
-        (_, true, Some(outcome::BLOCK)) => format!("Vous bloquez le coup de {actor}."),
-        (true, _, other) | (_, true, other) => format!("{actor} → {target} : résultat {other:?}{rest}."),
-        _ => return None,
-    };
-    Some(format!("[combat] {text}"))
-}
+
 
 
 impl App {
@@ -296,13 +282,10 @@ impl App {
                     p.destination = p.position;
                 }
                 self.hud.stats.hp = Some(0);
-                self.ui.push_chat("[combat] Vous êtes mort. Ressuscitez au village.");
-                self.hud.push_system("Vous êtes mort.");
                 self.addons.fire_event("PLAYER_DEAD", &[]);
             } else if !dead && self.combat.player_dead {
                 self.combat.player_dead = false;
                 self.combat.resurrect_sent = None;
-                self.ui.push_chat("[combat] Vous revenez à la vie au village.");
                 self.addons.fire_event("PLAYER_ALIVE", &[]);
                 self.addons.fire_event("PLAYER_UNGHOST", &[]);
             }
@@ -310,10 +293,7 @@ impl App {
         }
         if dead {
             if self.combat.dead.insert(cid) {
-                let name = self.combat_name(cid);
-                if self.combat.attacking == Some(cid) || self.addons.target_cid() == Some(cid) {
-                    self.ui.push_chat(format!("[combat] {name} est vaincu."));
-                }
+                log::debug!("{} ({cid}) vaincu", self.combat_name(cid));
                 if self.combat.attacking == Some(cid) {
                     self.combat.attacking = None;
                     self.addons.fire_event("PLAYER_REGEN_ENABLED", &[]);
@@ -392,10 +372,7 @@ impl App {
         }
         // Chiffres et mentions d'Archonia au-dessus de la cible (voir `app_boards.rs`).
         self.boards_on_hit(cid, target_cid, result, factors.as_ref(), damage);
-        let (actor, target) = (self.combat_name(cid), self.combat_name(target_cid));
-        if let Some(line) = hit_line(by_me, on_me, &actor, &target, result, damage, hp) {
-            self.ui.push_chat(line);
-        }
+        // Archonia n'écrit pas les coups dans la discussion : chiffres au-dessus de la cible seulement.
         // Riposte : sans cible, le joueur prend pour cible le monstre qui l'attaque.
         if on_me && self.addons.target_cid().is_none() && !self.combat.player_dead {
             self.addons.set_target(Some(cid));
@@ -405,7 +382,7 @@ impl App {
                 self.addons.combat(cid, target_cid, -(d as i64), hp.map(i64::from));
             }
         }
-        log::debug!("action 0x41 : {actor} ({cid}) → {target} ({target_cid}), résultat {result:?}, {damage:?} dégât(s), PV {hp:?}");
+        log::debug!("action 0x41 : {} ({cid}) → {} ({target_cid}), résultat {result:?}, {damage:?} dégât(s), PV {hp:?}", self.combat_name(cid), self.combat_name(target_cid));
     }
 
     /// Objets au sol, résultats de ramassage, montées de niveau.
@@ -433,9 +410,7 @@ impl App {
                     }
                     None => Vec::new(),
                 };
-                if item.owner_cid == Some(me) {
-                    self.ui.push_chat(format!("[butin] {name} tombe au sol."));
-                }
+
                 self.addons.fire("ARCHRUST_LOOT_SPAWNED", (item.iid, item.tid, item.count));
                 self.combat.ground.insert(item.iid, Loot { item, name, meshes, ground_y });
             }
@@ -449,29 +424,26 @@ impl App {
                     .map(|l| l.name.clone())
                     .or_else(|| tid.and_then(|t| item_name_for_tid(&self.assets, t)))
                     .unwrap_or_else(|| "l'objet".into());
+                // Messages de l'[EventMap] d'Archonia : Item_SuccessPickupItem / …Money (« Gained {{…ItemPickupName}} »),
+                // Item_FailPickupItem / …Money.
                 if success {
                     let n = count.unwrap_or(1);
-                    let line = if gold {
-                        format!("Vous ramassez {n} pièce(s) d'or.")
-                    } else {
-                        format!("Vous ramassez {}.", item_name_for_tid(&self.assets, tid.unwrap_or(0)).map_or(name, |t| if n > 1 { format!("{t} × {n}") } else { t }))
-                    };
-                    self.ui.push_chat(format!("[butin] {line}"));
+                    let picked = if gold { n.to_string() } else { item_name_for_tid(&self.assets, tid.unwrap_or(0)).unwrap_or(name) };
+                    let template = super::portal_glue::ui_event_text(&self.assets, if gold { "Item_SuccessPickupMoney" } else { "Item_SuccessPickupItem" });
+                    let line = super::guild_glue::fill_braces(&template, &picked);
+                    self.hud.push_system(&line);
                     let event = if gold { "CHAT_MSG_MONEY" } else { "CHAT_MSG_LOOT" };
                     self.addons.fire_event_str(event, &[&line]);
                 } else {
-                    self.ui.push_chat(format!("[butin] Impossible de ramasser {name} (réservé à un autre joueur ou trop loin)."));
+                    let text = super::portal_glue::ui_event_text(&self.assets, if gold { "Item_FailPickupMoney" } else { "Item_FailPickupItem" });
+                    self.hud.push_system(&text);
                 }
             }
             WorldEvent::LevelUp { cid } => {
                 if cid == me {
                     let level = self.hud.stats.level.unwrap_or(0);
-                    self.ui.push_chat(format!("[système] Vous passez au niveau {level} !"));
-                    self.hud.push_system(&format!("Niveau {level} atteint !"));
+                    log::info!("niveau {level} atteint");
                     self.addons.fire("PLAYER_LEVEL_UP", level);
-                } else {
-                    let name = self.combat_name(cid);
-                    self.ui.push_chat(format!("[système] {name} passe au niveau supérieur."));
                 }
             }
             _ => {}
@@ -481,20 +453,17 @@ impl App {
     /// Demande d'attaque de `cid` (clic, touche, commande).
     pub(super) fn combat_attack(&mut self, cid: i32) -> bool {
         if self.combat.player_dead {
-            self.ui.push_chat("[combat] Vous êtes mort.");
             return false;
         }
         let Some((tid, name, hp)) = self.entities.iter().find(|e| e.cid == cid).map(|e| (e.tid, e.name.clone(), e.hp)) else {
-            self.ui.push_chat("[combat] Pas de cible à attaquer.");
             return false;
         };
         if self.combat.dead.contains(&cid) || hp == Some(0) {
-            self.ui.push_chat(format!("[combat] {name} est déjà mort."));
             return false;
         }
         // Joueur de la guilde adverse, pendant un combat de guildes.
         if !self.combat_can_attack(cid, Some(tid)) {
-            self.ui.push_chat(format!("[combat] {name} ne peut pas être attaqué."));
+            log::debug!("{name} ne peut pas être attaqué");
             return false;
         }
         let Some(net) = &self.net else { return false };
@@ -504,7 +473,7 @@ impl App {
         net.send(Command::Combat(CombatCommand::Attack { target: cid, forced }));
         self.addons.set_target(Some(cid));
         if self.combat.attacking != Some(cid) {
-            self.ui.push_chat(format!("[combat] Vous attaquez {name}."));
+            log::debug!("attaque de {name}");
             if self.combat.attacking.is_none() {
                 self.addons.fire_event("PLAYER_REGEN_DISABLED", &[]);
             }
@@ -678,7 +647,7 @@ impl App {
                     Some(cid) => {
                         self.combat_attack(cid);
                     }
-                    None => self.ui.push_chat("[combat] Pas de cible (Tab ou clic sur un monstre)."),
+                    None => {}
                 }
                 true
             }
@@ -687,7 +656,7 @@ impl App {
                     Some(iid) => {
                         self.combat_pick_up(iid);
                     }
-                    None => self.ui.push_chat("[butin] Aucun objet au sol à proximité."),
+                    None => {}
                 }
                 true
             }
@@ -834,13 +803,13 @@ impl App {
     }
 }
 
-fn send_resurrect(net: &NetLink, glue: &mut CombatGlue, ui: &mut UiState) {
+fn send_resurrect(net: &NetLink, glue: &mut CombatGlue, _ui: &mut UiState) {
     if glue.resurrect_sent.is_some_and(|t| t.elapsed() < RETRY) {
         return;
     }
     net.send(Command::Combat(CombatCommand::ResurrectTown));
     glue.resurrect_sent = Some(Instant::now());
-    ui.push_chat("[combat] Résurrection au village demandée.");
+    log::info!("résurrection au village demandée");
 }
 
 /// Dessin egui : noms des objets au sol, fenêtre de résurrection. Fonction libre :
@@ -863,12 +832,29 @@ pub fn panel(
     if view.dead {
         let (town, wanted) = crate::hud::draw_resurrection_with(ctx, hud, assets, view.can_resurrect, glue.wanted_button);
         glue.wanted_clicked |= wanted;
-        if town {
+        // `CharCheckResurrectionToTown` : confirmation au-delà du niveau 5, sinon envoi direct (op 9).
+        let confirmed = match town {
+            true if glue.town_confirm => {
+                glue.confirm_town = true;
+                false
+            }
+            _ if glue.confirm_town => match crate::hud::draw_resurrect_town_confirm(ctx, hud, assets) {
+                Some(answer) => {
+                    glue.confirm_town = false;
+                    answer
+                }
+                None => false,
+            },
+            town => town,
+        };
+        if confirmed {
             match net {
                 Some(net) => send_resurrect(net, glue, ui),
                 None => ui.push_chat("[combat] hors ligne"),
             }
         }
+    } else {
+        glue.confirm_town = false;
     }
 }
 
@@ -876,15 +862,7 @@ pub fn panel(
 mod tests {
     use super::*;
 
-    #[test]
-    fn messages_des_coups() {
-        assert_eq!(
-            hit_line(true, false, "Moi", "Ver vert", Some(outcome::SUCCESS), Some(12), Some(80)).as_deref(),
-            Some("[combat] Vous frappez Ver vert : 12 dégât(s) (reste 80 PV).")
-        );
-        assert_eq!(hit_line(false, true, "Ver vert", "Moi", Some(outcome::MISS), None, None).as_deref(), Some("[combat] Ver vert vous manque."));
-        assert_eq!(hit_line(false, false, "A", "B", Some(outcome::SUCCESS), Some(3), Some(1)), None);
-    }
+
 
     /// Avec les données du client (`ARCHRUST_GAME_DIR`) : un PNJ (Quig, 426) ne s'attaque pas, un
     /// monstre (Green Worm, 450) si, un joueur (Archer, 1) seulement en combat de guildes.

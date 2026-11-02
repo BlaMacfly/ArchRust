@@ -514,7 +514,7 @@ impl ConvertGlue {
     fn name_line(&mut self, assets: &Assets, item: &ItemRecord) -> String {
         let st = self.state_of(assets, item);
         let info = self.data(assets).info(item.template_id);
-        let mut name = item.template_id.and_then(|t| item_name_for_tid(assets, t)).unwrap_or_else(|| "Objet".into());
+        let mut name = item.template_id.and_then(|t| item_name_for_tid(assets, t)).unwrap_or_default();
         if st.level > 0 {
             name.push_str(&format!(" + {}", st.level));
         }
@@ -622,7 +622,7 @@ impl ConvertGlue {
             lines.push((fill(&d.msg("Item_Convert_Socket_Status"), &[st.sockets.to_string(), st.filled.len().to_string()]), normal));
             for tid in st.filled.iter().filter(|t| !d.is_rune(Some(**t))) {
                 let stone = d.info(Some(*tid));
-                let stone_name = item_name_for_tid(assets, *tid).unwrap_or_else(|| format!("Objet TID {tid}"));
+                let stone_name = item_name_for_tid(assets, *tid).unwrap_or_default();
                 let (weapon_value, armor_value) = d.stones.get(stone.rank.clamp(0, 5) as usize).copied().unwrap_or_default();
                 let text = if info.kind == KIND_WEAPON { format!("{stone_name} + {weapon_value}") } else { format!("{stone_name} + {armor_value}%") };
                 let color = match stone.spirit {
@@ -910,14 +910,12 @@ impl App {
                         if glue.npc.is_some() && glue.tab == ConvertTab::Physical {
                             glue.edit = text.clone();
                         }
-                        self.ui.push_chat(format!("[forgeron] {}", strip_codes(&text)));
                     }
                     op::RESPONSE_SOCKET => {
                         let text = glue.socket_text(&assets, code, after.sockets);
                         if glue.npc.is_some() && glue.tab == ConvertTab::Socket {
                             glue.edit = text.clone();
                         }
-                        self.ui.push_chat(format!("[forgeron] {}", strip_codes(&text)));
                     }
                     op::RESPONSE_RUNE => {
                         let rune = added_tid.and_then(|t| item_name_for_tid(&assets, t)).unwrap_or_default();
@@ -925,7 +923,6 @@ impl App {
                         if glue.npc.is_some() && glue.tab == ConvertTab::Rune {
                             glue.edit = text.clone();
                         }
-                        self.ui.push_chat(format!("[forgeron] {}", strip_codes(&text)));
                     }
                     _ => {
                         let event = match code {
@@ -941,7 +938,6 @@ impl App {
                             glue.edit = format!("<C{color}>{text}");
                         }
                         self.hud.push_system(&text);
-                        self.ui.push_chat(format!("[forgeron] {text}"));
                     }
                 }
             }
@@ -1076,11 +1072,6 @@ impl App {
         }
         true
     }
-}
-
-/// Texte sans les codes de couleur `<C…>`, pour la discussion.
-fn strip_codes(text: &str) -> String {
-    crate::hud::colored_text(text).trim().replace('\n', " — ")
 }
 
 #[cfg(test)]
