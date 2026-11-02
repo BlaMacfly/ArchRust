@@ -59,6 +59,9 @@ pub(super) struct NatureGlue {
     /// Textures déjà demandées au moteur de rendu (présentes ou introuvables).
     textures_tried: HashSet<String>,
     in_world: bool,
+    /// Lumières des repères du décor éteintes : bit 0x10 de `WeatherEffect1` du ciel courant
+    /// (rappel d'AgcmEventNature `FUN_14065dd80`, voir `decor.rs`).
+    pub(super) decor_lights_off: bool,
 }
 
 /// Brouillard ramené à la distance de tracé (`FUN_14057e3a0` : si la distance de l'option est plus
@@ -186,6 +189,27 @@ impl App {
         }
     }
 
+    /// Jeux d'effets d'ambiance pour `update_audio` : les `EffectIndex` non nuls de la tranche
+    /// composée (région, ciel local des événements Nature, météo ; `sky::compose`, bit 8 des
+    /// gabarits), dont Archonia joue tous les flux à la fois (`FUN_140581fd0`). Archonia choisit
+    /// cette composante séparément des autres (`FUN_14057ed30`, canal 8) : une zone d'ambiance
+    /// locale (gabarits « 엠비언스 », « Water_* » sans couleurs) change le son sans toucher au ciel.
+    /// `None` hors du monde ou avant la première image du ciel.
+    pub(super) fn nature_ambience_sets(&mut self) -> Option<Vec<u32>> {
+        if !self.nature.in_world {
+            return None;
+        }
+        let (region, local, weather) = self.nature.templates_now;
+        if region < 0 {
+            return None;
+        }
+        let data = self.nature.data(&self.assets);
+        let slot = sky_slot(hour_of_ms(self.game_clock.now_ms()));
+        let get = |tid: i32| data.templates.get(tid).map(|t| &t.slots[slot]);
+        let s = sky::compose(get(region), get(local), get(weather));
+        Some(s.effects.iter().filter(|(id, _)| *id > 0).map(|(id, _)| *id as u32).collect())
+    }
+
     /// Musique du gabarit pour `update_audio` : `None` = pas de liste (CVar `worldMusic`),
     /// `Some(None)` = silence entre deux morceaux, `Some(Some((morceau, tirage)))`.
     pub(super) fn nature_music(&mut self) -> Option<Option<(String, u32)>> {
@@ -234,6 +258,7 @@ impl App {
     /// Hors du monde : rendu par défaut, horloge et météo oubliées.
     fn leave_nature(&mut self) {
         self.nature.in_world = false;
+        self.nature.decor_lights_off = false;
         self.game_clock.clear();
         self.nature.sky.reset();
         self.nature.weather = Weather::default();
@@ -286,6 +311,7 @@ impl App {
         self.nature.sky.set_target(SkyKey { region, local, weather, slot }, &target, game_ms);
         self.nature.sky.advance(game_ms);
         let frame = self.nature.sky.frame(game_ms);
+        self.nature.decor_lights_off = !crate::decor::lights_on(frame.weather1);
         // Météo : fondu en temps réel, particules autour de la caméra.
         self.nature.weather.update(dt * 1000.0);
         let eye = self.camera.eye();

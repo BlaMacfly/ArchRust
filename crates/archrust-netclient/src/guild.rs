@@ -14,6 +14,14 @@
 //!            (2 nom cherché, 21 GUILD_LIST : total, page, nombre, 19 GUILD_LIST_ITEM)
 //!   op 48 (second, passation) : seule l'op est un champ, la suite est brute (sous-op en +0x18) ;
 //!            voir `society`.
+//!   combattants (types 3 et 4, `UI_GuildBattleMember`) : envoyé 14 (1 CID, 2 guilde, 18 GUILD_BATTLE_PERSON
+//!            {I16 effectif, bloc de (U16 longueur, nom sans NUL)}, FUN_1408c59a0 / 0x140604e70) juste avant la
+//!            demande (15) ou l'acceptation (16) ; reçu 26 (2 guilde, 19 GUILD_BATTLE_MEMBER {guilde, nom,
+//!            3 × U32}) : une ligne de `UI_GuildBattleResult`, 27 (2 guilde, 20 GUILD_BATTLE_MEMBER_LIST : deux
+//!            tableaux d'enregistrements de 0x48 octets, nom à +0, U32 à +0x38, +0x3c, +0x40, I32 à +0x44 avec
+//!            -1 = inchangé, FUN_1404dee40) : tous les combattants, 46 (2 guilde, manche au champ 14 du mini
+//!            GUILD_BATTLE du champ 17, sinon au premier entier du champ 4) ; 42 : trêve refusée
+//!            (`Guild_Hostile_Leave_Reject`)
 //! AGPMEVENTGUILD (drapeaux 1) : op 0 (1 EVENT_BASE du gestionnaire, fonction 23 ; 2 CID) → op 1 accord
 //! ```
 //!
@@ -47,6 +55,8 @@ pub mod op {
     pub const UPDATE_STATUS: i8 = 11;
     pub const UPDATE_RECORD: i8 = 12;
     pub const BATTLE_INFO: i8 = 13;
+    /// Combattants choisis (C → S), avant la demande ou l'acceptation d'un combat des types 3 et 4.
+    pub const BATTLE_PERSON: i8 = 14;
     pub const BATTLE_REQUEST: i8 = 15;
     pub const BATTLE_ACCEPT: i8 = 16;
     pub const BATTLE_REJECT: i8 = 17;
@@ -58,6 +68,14 @@ pub mod op {
     pub const BATTLE_UPDATE_SCORE: i8 = 23;
     pub const BATTLE_WITHDRAW: i8 = 24;
     pub const BATTLE_RESULT: i8 = 25;
+    /// Un combattant et ses points (S → C, rappel 0x26).
+    pub const BATTLE_MEMBER: i8 = 26;
+    /// Tous les combattants des deux guildes (S → C, rappel 0x27).
+    pub const BATTLE_MEMBER_LIST: i8 = 27;
+    /// Manche du combat (S → C, rappel 0x28).
+    pub const BATTLE_ROUND: i8 = 46;
+    /// Trêve refusée par le chef adverse (S → C, rappel 0x3c).
+    pub const HOSTILE_LEAVE_REJECT: i8 = 42;
     pub const GUILD_LIST: i8 = 28;
     pub const BUY_GUILDMARK: i8 = 32;
     pub const BUY_GUILDMARK_FORCE: i8 = 33;
@@ -316,6 +334,71 @@ pub struct GuildBattle {
     pub up_score: i32,
     pub enemy_up_score: i32,
     pub result: i32,
+    /// Manche (champ 14, combats en manches ; op 46).
+    pub round: u32,
+}
+
+/// Combattant d'un combat de guildes (ops 26 et 27) : nom et ses entiers (points, puis deux autres, le
+/// quatrième n'existe qu'à l'op 27 : -1 = inchangé).
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct BattleFighter {
+    pub name: String,
+    pub points: u32,
+    pub b: u32,
+    pub c: u32,
+    pub d: i32,
+}
+
+/// Taille d'un enregistrement de l'op 27 (FUN_1404dee40) et décalage de ses entiers.
+pub const FIGHTER_RECORD: usize = 0x48;
+const FIGHTER_NUMBERS: usize = 0x38;
+
+impl BattleFighter {
+    /// Enregistrement de 0x48 octets (nom zéro-terminé, puis U32, U32, U32, I32 à +0x38).
+    pub fn encode(&self) -> [u8; FIGHTER_RECORD] {
+        let mut out = [0u8; FIGHTER_RECORD];
+        let n = to_cp1252(&self.name);
+        let len = n.len().min(FIGHTER_NUMBERS - 1);
+        out[..len].copy_from_slice(&n[..len]);
+        for (k, v) in [self.points, self.b, self.c, self.d as u32].into_iter().enumerate() {
+            out[FIGHTER_NUMBERS + 4 * k..FIGHTER_NUMBERS + 4 * k + 4].copy_from_slice(&v.to_le_bytes());
+        }
+        out
+    }
+
+    fn decode(rec: &[u8]) -> Self {
+        let u = |o: usize| rec.get(o..o + 4).map_or(0, |b| u32::from_le_bytes(b.try_into().unwrap()));
+        BattleFighter { name: cp1252(&rec[..FIGHTER_NUMBERS.min(rec.len())]).trim().to_string(), points: u(0x38), b: u(0x3c), c: u(0x40), d: u(0x44) as i32 }
+    }
+}
+
+/// `count` enregistrements de 0x48 octets d'un bloc (moins si le bloc est court).
+fn fighters(block: Option<&[u8]>, count: i64) -> Vec<BattleFighter> {
+    let Some(b) = block else { return Vec::new() };
+    b.chunks_exact(FIGHTER_RECORD).take(count.max(0) as usize).map(BattleFighter::decode).collect()
+}
+
+/// Bloc des combattants choisis (op 14) : (U16 longueur, nom sans NUL) mis bout à bout.
+pub fn encode_person_block(names: &[String]) -> Vec<u8> {
+    let mut out = Vec::new();
+    for n in names {
+        let b = to_cp1252(n);
+        out.extend_from_slice(&(b.len() as u16).to_le_bytes());
+        out.extend_from_slice(&b);
+    }
+    out
+}
+
+/// Noms d'un bloc de l'op 14.
+pub fn decode_person_block(mut b: &[u8]) -> Vec<String> {
+    let mut out = Vec::new();
+    while b.len() >= 2 {
+        let len = u16::from_le_bytes([b[0], b[1]]) as usize;
+        let Some(name) = b.get(2..2 + len) else { break };
+        out.push(cp1252(name));
+        b = &b[2 + len..];
+    }
+    out
 }
 
 impl GuildBattle {
@@ -361,6 +444,7 @@ fn decode_battle(values: &[Option<Value>]) -> Option<GuildBattle> {
         up_score: n(11) as i32,
         enemy_up_score: n(12) as i32,
         result: n(13) as i32,
+        round: n(14) as u32,
     })
 }
 
@@ -413,6 +497,14 @@ pub enum GuildEvent {
     Notice { guild: String, text: String },
     /// Message système : code, textes, nombre.
     System { code: i32, text: String, text2: String, number: i64, number2: i64 },
+    /// Combattant mis à jour (op 26) : sa guilde (celle du mini), lui et ses points.
+    BattleFighter { guild: String, fighter: BattleFighter },
+    /// Tous les combattants (op 27) : guilde du champ 2 et les siens, puis ceux de la guilde adverse.
+    BattleFighters { guild: String, mine: Vec<BattleFighter>, enemy: Vec<BattleFighter> },
+    /// Manche (op 46).
+    BattleRound { guild: String, round: u32 },
+    /// Trêve refusée (op 42).
+    HostileLeaveRejected { guild: String },
     /// Accord d'un gestionnaire de guilde (AGPMEVENTGUILD op 1) : CID du PNJ.
     ManagerGranted { npc: i32 },
     /// Accord d'un gardien pour l'entrepôt de guilde (op 3) : CID du PNJ.
@@ -517,6 +609,27 @@ pub fn translate(packet_type: u8, values: &[Option<Value>], raw: &[u8]) -> Optio
             GuildEvent::Battle { op: o, guild, master: text(values, 3), battle: decode_battle(values).unwrap_or_default() }
         }
         op::GUILD_LIST => GuildEvent::List(decode_list(values)?),
+        op::BATTLE_MEMBER => {
+            let (_, m) = decode_mini(mini::GUILD_BATTLE_MEMBER, values.get(19).and_then(Option::as_ref).and_then(Value::as_bytes)?).ok()?;
+            let n = |k: usize| int(&m, k).unwrap_or(0) as u32;
+            let mini_guild = text(&m, 0);
+            GuildEvent::BattleFighter { guild: if mini_guild.is_empty() { guild } else { mini_guild }, fighter: BattleFighter { name: text(&m, 1), points: n(2), b: n(3), c: n(4), d: -1 } }
+        }
+        op::BATTLE_MEMBER_LIST => {
+            let (_, l) = decode_mini(mini::GUILD_BATTLE_MEMBER_LIST, values.get(20).and_then(Option::as_ref).and_then(Value::as_bytes)?).ok()?;
+            let block = |k: usize| l.get(k).and_then(Option::as_ref).and_then(Value::as_bytes);
+            GuildEvent::BattleFighters { guild, mine: fighters(block(1), int(&l, 0).unwrap_or(0)), enemy: fighters(block(3), int(&l, 2).unwrap_or(0)) }
+        }
+        op::BATTLE_ROUND => {
+            let first = match values.get(4).and_then(Option::as_ref) {
+                Some(Value::Ints(v)) => v.first().copied(),
+                Some(v) => v.as_i64(),
+                None => None,
+            };
+            let round = decode_battle(values).map(|b| b.round).filter(|r| *r != 0).or(first.map(|v| v as u32)).unwrap_or(0);
+            GuildEvent::BattleRound { guild, round }
+        }
+        op::HOSTILE_LEAVE_REJECT => GuildEvent::HostileLeaveRejected { guild },
         o @ (op::JOINT_REQUEST | op::HOSTILE_REQUEST | op::HOSTILE_LEAVE_REQUEST) => {
             let kind = match o {
                 op::JOINT_REQUEST => Relation::Joint,
@@ -621,6 +734,8 @@ pub enum GuildCommand {
     Succession { name: String },
     /// Réponse à une passation (op 48, sous-op 7).
     SuccessionAnswer { guild: String, yes: bool },
+    /// Combattants choisis (op 14) : effectif exigé et les noms (les premiers `count` partent).
+    BattlePerson { guild: String, count: i16, names: Vec<String> },
 }
 
 /// Paquet de l'op 48 de `size` octets (pied exclu) : en-tête, drapeaux 1, op, sous-op, puis ce que `fill`
@@ -760,6 +875,12 @@ pub fn command_packet(cmd: &GuildCommand, me: i32) -> (&'static Schema, Vec<Opti
             let b = mini::GUILD_BATTLE;
             let v = sparse(b, &[(0, Value::str(enemy.as_bytes()))]);
             packet(if *yes { op::BATTLE_ACCEPT } else { op::BATTLE_REJECT }, guild, vec![(17, Value::Packet(build_mini(b, &v).unwrap_or_default()))])
+        }
+        GuildCommand::BattlePerson { guild, count, names } => {
+            let p = mini::GUILD_BATTLE_PERSON;
+            let take: Vec<String> = names.iter().take((*count).max(0) as usize).cloned().collect();
+            let v = sparse(p, &[(0, Value::I16(*count)), (1, Value::Block(encode_person_block(&take)))]);
+            packet(op::BATTLE_PERSON, guild, vec![(18, Value::Packet(build_mini(p, &v).unwrap_or_default()))])
         }
         GuildCommand::BattleCancel { guild } => packet(op::BATTLE_CANCEL_REQUEST, guild, vec![]),
         GuildCommand::BattleCancelAnswer { guild, yes } => packet(if *yes { op::BATTLE_CANCEL_ACCEPT } else { op::BATTLE_CANCEL_REJECT }, guild, vec![]),
@@ -1084,7 +1205,16 @@ impl GuildState {
                 }
                 Some(GuildNotice::Roster)
             }
+            // Manche : gardée avec le combat (guilde+0x234, FUN_14084f580).
+            GuildEvent::BattleRound { guild, round } => {
+                if !mine(guild, self) {
+                    return None;
+                }
+                self.battle.as_mut()?.round = *round;
+                Some(GuildNotice::Battle)
+            }
             GuildEvent::System { .. } | GuildEvent::RelationAsk { .. } | GuildEvent::ManagerGranted { .. } | GuildEvent::WarehouseGranted { .. } | GuildEvent::Warehouse { .. } | GuildEvent::AppointAsk { .. } | GuildEvent::SuccessionAsk { .. } | GuildEvent::SocietyText(_) => None,
+            GuildEvent::BattleFighter { .. } | GuildEvent::BattleFighters { .. } | GuildEvent::HostileLeaveRejected { .. } => None,
         }
     }
 
@@ -1113,6 +1243,43 @@ mod tests {
 
     fn guild(pairs: &[(usize, Value)]) -> GuildEvent {
         translate(0x15, &sparse(main::GUILD, pairs), &[]).unwrap()
+    }
+
+    #[test]
+    fn combattants_et_manches() {
+        // Op 14 : effectif 2, les deux premiers noms seulement, (U16 longueur, nom).
+        let cmd = GuildCommand::BattlePerson { guild: "Lames".into(), count: 2, names: vec!["Alice".into(), "Bo".into(), "Zed".into()] };
+        let (s, v) = command_packet(&cmd, 7);
+        let raw = archrust_protocol::packet::build_packet(s, &v).unwrap();
+        let p = archrust_protocol::packet::decode_packet(main::GUILD, &raw).unwrap();
+        assert_eq!((int(&p.values, 0), int(&p.values, 1), text(&p.values, 2).as_str()), (Some(14), Some(7), "Lames"));
+        let (_, m) = decode_mini(mini::GUILD_BATTLE_PERSON, p.values[18].as_ref().and_then(Value::as_bytes).unwrap()).unwrap();
+        let block = m[1].as_ref().and_then(Value::as_bytes).unwrap();
+        assert_eq!(int(&m, 0), Some(2));
+        assert_eq!(block, b"\x05\x00Alice\x02\x00Bo");
+        assert_eq!(decode_person_block(block), vec!["Alice".to_string(), "Bo".to_string()]);
+        // Op 26 : une ligne, guilde du mini.
+        let bm = mini::GUILD_BATTLE_MEMBER;
+        let one = Value::Packet(build_mini(bm, &sparse(bm, &[(0, Value::str("Corbeaux")), (1, Value::str("Zed")), (2, Value::U32(30)), (3, Value::U32(2)), (4, Value::U32(1))])).unwrap());
+        assert_eq!(
+            guild(&[(0, Value::I8(26)), (2, Value::str("Lames")), (19, one)]),
+            GuildEvent::BattleFighter { guild: "Corbeaux".into(), fighter: BattleFighter { name: "Zed".into(), points: 30, b: 2, c: 1, d: -1 } }
+        );
+        // Op 27 : deux tableaux de 0x48 octets.
+        let a = BattleFighter { name: "Alice".into(), points: 10, b: 1, c: 0, d: -1 };
+        let z = BattleFighter { name: "Zed".into(), points: 30, b: 2, c: 1, d: 4 };
+        let bl = mini::GUILD_BATTLE_MEMBER_LIST;
+        let list = Value::Packet(build_mini(bl, &[Some(Value::U32(1)), Some(Value::Block(a.encode().to_vec())), Some(Value::U32(1)), Some(Value::Block(z.encode().to_vec()))]).unwrap());
+        assert_eq!(guild(&[(0, Value::I8(27)), (2, Value::str("Lames")), (20, list)]), GuildEvent::BattleFighters { guild: "Lames".into(), mine: vec![a], enemy: vec![z] });
+        // Op 46 : manche du mini GUILD_BATTLE, sinon champ 4 ; gardée avec le combat.
+        let b = mini::GUILD_BATTLE;
+        let round = Value::Packet(build_mini(b, &sparse(b, &[(14, Value::U32(3))])).unwrap());
+        let ev = guild(&[(0, Value::I8(46)), (2, Value::str("Lames")), (17, round)]);
+        assert_eq!(ev, GuildEvent::BattleRound { guild: "Lames".into(), round: 3 });
+        let mut s = GuildState { info: Some(GuildInfo { name: "Lames".into(), ..Default::default() }), battle: Some(GuildBattle::default()), ..Default::default() };
+        assert_eq!(s.apply(&ev, "Alice", 7), Some(GuildNotice::Battle));
+        assert_eq!(s.battle.as_ref().map(|b| b.round), Some(3));
+        assert_eq!(guild(&[(0, Value::I8(42)), (2, Value::str("Lames"))]), GuildEvent::HostileLeaveRejected { guild: "Lames".into() });
     }
 
     #[test]

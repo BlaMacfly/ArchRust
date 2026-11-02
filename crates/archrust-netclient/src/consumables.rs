@@ -7,6 +7,9 @@
 //! AGPMITEM op 4 (3 TID, 4 CID, 18 recharge)     objet utilisé (rappel 0x1c → FUN_14053f540) ; voir `world::ItemUsed`
 //! AGPMITEM op 5 (3 TID, 4 CID)                  échec (rappel 0x1d → FUN_14053f740 : orbe → « Regeneration has failed »)
 //! AGPMITEM op 18 (4 CID, 18 restant en ms)      recharge de l'orbe : début = maintenant + restant − 900 000 (rappel 0x46)
+//! AGPMITEM op 28 (3 TID, 4 CID, 5 entier, 18 restant en ms) recharge partagée par modèle (FUN_1401c5b90)
+//! AGPMITEM op 7 (4 CID)                         parchemin de retour refusé (rappel 0x21, sans abonné d'interface relevé)
+//! AGPMITEM op 16 (2 IID, 4 CID)                 objet utilisé (rappel 0x1e, objet cherché par IID ; rien d'affiché relevé)
 //! AGPMITEM op 27 code 3 (1 code, 4 CID)         `ReverseOrbError` (décodé par `morph`)
 //! AGPMCHARACTER op 0 champ 19 (CHAR[32])        chaîne « skill init » du personnage (`+0xd0`, FUN_140175bb0)
 //! AGPMCHARACTER op 23 (1 CID, 19 chaîne)        chaîne « skill init » mise à jour (strncpy dans `+0xd0`)
@@ -30,7 +33,10 @@ use archrust_protocol::schema::{main, mini, packet_type, Schema};
 /// Opérations d'AgpmItem propres à ce module.
 pub mod item_op {
     pub const USE_ITEM_FAILED_BY_TID: i64 = 5;
+    pub const USE_RETURN_SCROLL_FAILED: i64 = 7;
+    pub const USE_ITEM_SUCCESS: i64 = 16;
     pub const UPDATE_REUSE_TIME_FOR_REVERSE_ORB: i64 = 18;
+    pub const UPDATE_COOLDOWN: i64 = 28;
 }
 
 /// Opérations d'AgpmCharacter propres à ce module.
@@ -80,6 +86,11 @@ pub enum ConsumableEvent {
     SkillInitResult { result: i32 },
     /// Signature d'un personnage (AgpmCharacter op 0 ou 1, champ 27) ; vide : aucune.
     Signature { cid: i32, text: String },
+    /// Recharge d'un modèle d'objet (AgpmItem op 28) : temps restant en ms.
+    Cooldown { tid: i32, cid: i32, remain_ms: u64 },
+    /// Parchemin de retour refusé (op 7) ou objet utilisé (op 16, IID) : sans effet visible relevé.
+    ReturnScrollFailed { cid: i32 },
+    UseSucceeded { iid: i32, cid: i32 },
 }
 
 /// Demandes du client.
@@ -124,14 +135,19 @@ pub fn translate(ptype: u8, values: &[Option<Value>]) -> Option<ConsumableEvent>
             let cid = int(values, 4).unwrap_or(0) as i32;
             match int(values, 0)? {
                 item_op::USE_ITEM_FAILED_BY_TID => Some(ConsumableEvent::UseFailed { tid: int(values, 3)? as i32, cid }),
-                item_op::UPDATE_REUSE_TIME_FOR_REVERSE_ORB => {
+                o @ (item_op::UPDATE_REUSE_TIME_FOR_REVERSE_ORB | item_op::UPDATE_COOLDOWN) => {
                     let remain_ms = match values.get(18).and_then(Option::as_ref) {
                         Some(Value::U64(v)) => *v,
                         Some(v) => v.as_i64().unwrap_or(0).max(0) as u64,
                         None => 0,
                     };
+                    if o == item_op::UPDATE_COOLDOWN {
+                        return Some(ConsumableEvent::Cooldown { tid: int(values, 3)? as i32, cid, remain_ms });
+                    }
                     Some(ConsumableEvent::ReverseOrbReuse { cid, remain_ms })
                 }
+                item_op::USE_RETURN_SCROLL_FAILED => Some(ConsumableEvent::ReturnScrollFailed { cid }),
+                item_op::USE_ITEM_SUCCESS => Some(ConsumableEvent::UseSucceeded { iid: int(values, 2).unwrap_or(0) as i32, cid }),
                 _ => None,
             }
         }
@@ -172,6 +188,14 @@ mod tests {
     fn roundtrip(schema: &'static Schema, pairs: &[(usize, Value)]) -> Vec<Option<Value>> {
         let bytes = build_packet(schema, &sparse(schema, pairs)).unwrap();
         decode_packet(schema, &bytes).unwrap().values
+    }
+
+    #[test]
+    fn recharge_par_modele() {
+        let v = roundtrip(main::ITEM, &[(0, Value::U8(28)), (3, Value::I32(190)), (4, Value::I32(42)), (5, Value::I32(1)), (18, Value::U64(4500))]);
+        assert_eq!(translate(packet_type::ITEM, &v), Some(ConsumableEvent::Cooldown { tid: 190, cid: 42, remain_ms: 4500 }));
+        let v = roundtrip(main::ITEM, &[(0, Value::U8(16)), (2, Value::I32(9)), (4, Value::I32(42))]);
+        assert_eq!(translate(packet_type::ITEM, &v), Some(ConsumableEvent::UseSucceeded { iid: 9, cid: 42 }));
     }
 
     #[test]

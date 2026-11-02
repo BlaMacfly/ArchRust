@@ -9,7 +9,13 @@
 //!   format (`FUN_1407a2b30`), voir [`class_of`] ;
 //! * cri de zone (`FUN_1402b4be0`) : seule l'op 0 compte ; le champ 4 donne le type AgpmChatting du message,
 //!   affiché comme une discussion ordinaire (ici en `WorldEvent::Chat`) ; le client n'en envoie jamais ;
-//! * salons (`FUN_1402afaf0`, AgcmUIChannel) : ops 1 à 11 et codes de résultat, voir [`channel`].
+//! * salons (`FUN_1402afaf0`, AgcmUIChannel) : ops 1 à 11 et codes de résultat, voir [`channel`] ;
+//! * chuchotements (réception `FUN_1402e21e0`) : AGPMCHATTING op 1 / 2 (1 CID) blocage de tous les chuchotements
+//!   du personnage mis / levé (attache+4) ; op 3 (5 nom) « `<nom> is blocking whispering.` »
+//!   (`Chat_Block_Whisper_Msg`, `0x140512bf0`) ; op 4 (1 CID de l'émetteur, 5 destinataire) « `<nom> is not
+//!   connected.` » (`Chat_Offline_Whisper_Target_Msg`, `0x140512d80`), dans l'onglet système. Les envoyeurs des
+//!   ops 1 et 2 n'ont pas d'appelant dans Archonia (aucune commande de `chatcmd.xml`) : ArchRust les envoie par
+//!   `/chuchotementsoff` et `/chuchotementson`.
 
 use crate::world::WorldEvent;
 use archrust_protocol::packet::{sparse, Value};
@@ -238,6 +244,16 @@ pub enum ChannelCommand {
     Message { name: String, me: String, text: String },
     /// Recherche d'un joueur (`FindUser_Click`).
     Find { target: String },
+    /// Blocage de tous les chuchotements reçus (AGPMCHATTING op 1) ou sa levée (op 2).
+    BlockWhisper(bool),
+}
+
+/// Opérations d'AGPMCHATTING autres que la discussion (op 0).
+pub mod chatting_op {
+    pub const SET_BLOCK_WHISPER: i8 = 1;
+    pub const RELEASE_BLOCK_WHISPER: i8 = 2;
+    pub const REPLY_BLOCK_WHISPER: i8 = 3;
+    pub const REPLY_OFFLINE_WHISPER: i8 = 4;
 }
 
 /// Réponses du serveur sur les salons.
@@ -259,6 +275,27 @@ pub enum ChannelEvent {
     Found { target: String },
     /// Code de résultat (op 11).
     Result(i32),
+    /// Blocage des chuchotements du personnage `cid` mis ou levé (AGPMCHATTING op 1 / 2).
+    WhisperBlocking { cid: i32, on: bool },
+    /// `name` bloque les chuchotements (op 3).
+    WhisperBlocked { name: String },
+    /// `name` n'est pas en jeu (op 4) ; `from` = CID de l'émetteur du chuchotement.
+    WhisperOffline { from: i32, name: String },
+}
+
+/// AGPMCHATTING ops 1 à 4 (chuchotements) en événement ; la discussion (op 0) reste un `WorldEvent::Chat`.
+pub fn translate_whisper(ptype: u8, values: &[Option<Value>]) -> Option<ChannelEvent> {
+    if ptype != packet_type::CHATTING {
+        return None;
+    }
+    let int = |i: usize| values.get(i).and_then(Option::as_ref).and_then(Value::as_i64);
+    let name = || values.get(5).and_then(Option::as_ref).and_then(Value::as_text).unwrap_or_default().trim().to_string();
+    Some(match int(0)? as i8 {
+        o @ (chatting_op::SET_BLOCK_WHISPER | chatting_op::RELEASE_BLOCK_WHISPER) => ChannelEvent::WhisperBlocking { cid: int(1).unwrap_or(0) as i32, on: o == chatting_op::SET_BLOCK_WHISPER },
+        chatting_op::REPLY_BLOCK_WHISPER => ChannelEvent::WhisperBlocked { name: name() },
+        chatting_op::REPLY_OFFLINE_WHISPER => ChannelEvent::WhisperOffline { from: int(1).unwrap_or(0) as i32, name: name() },
+        _ => return None,
+    })
 }
 
 /// Membres d'un salon : `nom1;nom2;…;` ; un nom n'est pris que s'il est suivi de `;` (`FUN_1406e6d00`). Une
@@ -283,6 +320,10 @@ fn cut(s: &str, max: usize) -> Vec<u8> {
 /// passe ainsi).
 pub fn command_packet(cmd: &ChannelCommand, me: i32) -> (&'static Schema, Vec<Option<Value>>) {
     use channel::op;
+    if let ChannelCommand::BlockWhisper(on) = cmd {
+        let o = if *on { chatting_op::SET_BLOCK_WHISPER } else { chatting_op::RELEASE_BLOCK_WHISPER };
+        return (main::CHATTING, sparse(main::CHATTING, &[(0, Value::I8(o)), (1, Value::I32(me))]));
+    }
     let s = main::CHANNEL;
     let name = |n: &str| Value::Str(cut(n, 40));
     let who = |n: &str| Value::Str(cut(n, 32));
@@ -312,6 +353,7 @@ pub fn command_packet(cmd: &ChannelCommand, me: i32) -> (&'static Schema, Vec<Op
             (7, Value::Str(cut(text, channel::MESSAGE_MAX))),
         ],
         ChannelCommand::Find { target } => vec![(0, Value::I8(op::FIND)), (1, Value::I32(me)), (4, who(target)), (5, Value::I32(0)), (6, Value::I32(0))],
+        ChannelCommand::BlockWhisper(_) => unreachable!("traité plus haut"),
     };
     (s, sparse(s, &values))
 }
@@ -344,6 +386,18 @@ pub fn translate(ptype: u8, values: &[Option<Value>]) -> Option<ChannelEvent> {
 mod tests {
     use super::*;
     use archrust_protocol::packet::{build_packet, decode_packet};
+
+    #[test]
+    fn chuchotements_bloques_et_absents() {
+        let c = main::CHATTING;
+        let p = |pairs: &[(usize, Value)]| decode_packet(c, &build_packet(c, &sparse(c, pairs)).unwrap()).unwrap().values;
+        assert_eq!(translate_whisper(packet_type::CHATTING, &p(&[(0, Value::I8(4)), (1, Value::I32(7)), (5, Value::str("Bob"))])), Some(ChannelEvent::WhisperOffline { from: 7, name: "Bob".into() }));
+        assert_eq!(translate_whisper(packet_type::CHATTING, &p(&[(0, Value::I8(3)), (1, Value::I32(7)), (5, Value::str("Bob"))])), Some(ChannelEvent::WhisperBlocked { name: "Bob".into() }));
+        assert_eq!(translate_whisper(packet_type::CHATTING, &p(&[(0, Value::I8(1)), (1, Value::I32(7))])), Some(ChannelEvent::WhisperBlocking { cid: 7, on: true }));
+        assert_eq!(translate_whisper(packet_type::CHATTING, &p(&[(0, Value::I8(0)), (2, Value::I8(5))])), None);
+        let (s, v) = command_packet(&ChannelCommand::BlockWhisper(false), 7);
+        assert_eq!((s.id, v[0].as_ref().and_then(Value::as_i64), v[1].as_ref().and_then(Value::as_i64)), (packet_type::CHATTING, Some(2), Some(7)));
+    }
 
     #[test]
     fn prefixes_d_archonia() {

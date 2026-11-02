@@ -10,7 +10,13 @@
 //! Capacité `language/1` : `SET_LANGUAGE` change la langue en cours de connexion (`LANGUAGE_ACK`),
 //! `TEXT_REQUEST` demande des textes localisés par sorte et identifiants (`TEXT_REPLY`).
 //!
-//! Le schéma et les constantes viennent de la crate `archcore-net` du serveur (source unique).
+//! Capacité `client-tables/1` (proposée pour la v1.2) : le `HELLO_ACK` porte au champ 21
+//! (`MEMORY_BLOCK`, ASCII, 128 octets au plus) l'empreinte des tables que le serveur écrit avec
+//! `archcore export-client-tables`, la même que `fingerprint` de son `tables.toml`. Le client la compare
+//! à celle de son dossier `server-data/` (`archrust_engine::server_data`).
+//!
+//! Le schéma et les constantes viennent de la crate `archcore-net` du serveur (source unique). Tant que
+//! son schéma n'a pas le champ 21, le `HELLO_ACK` est relu avec ce seul champ ajouté ([`ext_schema`]).
 
 use archcore_net::ext_text::{decode_language_list, decode_texts, encode_ids};
 use archcore_net::schema::{self, ext_channel, ext_op, ext_result};
@@ -29,11 +35,35 @@ pub const PACKET_TYPE: u8 = schema::ptype::ARCHCORE_EXT;
 pub const VERSION_MAJOR: u16 = 1;
 pub const VERSION_MINOR: u16 = 1;
 /// Capacités demandées au serveur.
-pub const REQUESTED: &str = "addon-msg/1;language/1";
+pub const REQUESTED: &str = "addon-msg/1;language/1;client-tables/1";
 /// Capacité du canal de messages d'AddOn.
 pub const ADDON_MSG: &str = "addon-msg";
 /// Capacité de la langue et des textes localisés.
 pub const LANGUAGE: &str = "language";
+/// Capacité de l'empreinte des tables du client (`server-data/`).
+pub const CLIENT_TABLES: &str = "client-tables";
+/// Champ du `HELLO_ACK` qui porte l'empreinte des tables (capacité `client-tables`).
+pub const FIELD_TABLES_FINGERPRINT: usize = 21;
+/// Longueur maximale de l'empreinte.
+pub const MAX_FINGERPRINT: usize = 128;
+
+/// Schéma de lecture d'`ARCHCORE_EXT` : celui du serveur, complété du champ 21 (empreinte des tables)
+/// s'il ne l'a pas encore. Les autres champs restent ceux d'`archcore-net`.
+pub fn ext_schema() -> &'static archcore_net::Schema {
+    static EXTENDED: std::sync::OnceLock<archcore_net::Schema> = std::sync::OnceLock::new();
+    let base = &schema::ARCHCORE_EXT;
+    if base.fields.len() > FIELD_TABLES_FINGERPRINT {
+        return base;
+    }
+    EXTENDED.get_or_init(|| {
+        let mut fields = base.fields.to_vec();
+        while fields.len() < FIELD_TABLES_FINGERPRINT {
+            fields.push(archcore_net::Field(archcore_net::Ty::MemBlock, 1));
+        }
+        fields.push(archcore_net::Field(archcore_net::Ty::MemBlock, 1));
+        archcore_net::Schema { name: base.name, id: base.id, flag_len: base.flag_len, fields: Box::leak(fields.into_boxed_slice()) }
+    })
+}
 /// Délai au-delà duquel un `HELLO_ACK` n'est plus accepté.
 pub const HELLO_TIMEOUT: Duration = Duration::from_secs(3);
 
@@ -60,6 +90,9 @@ pub struct Extensions {
     pub language: Option<String>,
     /// Langues proposées par le serveur, dans son ordre.
     pub languages: Vec<String>,
+    /// Empreinte des tables du client annoncée par le serveur (capacité `client-tables`, champ 21),
+    /// `None` si le serveur n'en annonce pas.
+    pub tables_fingerprint: Option<String>,
 }
 
 impl Extensions {
@@ -144,7 +177,7 @@ pub enum ExtMessage {
 
 /// Décode un paquet `0xAC` en clair.
 pub fn decode(raw: &[u8]) -> Option<ExtMessage> {
-    let p = match decode_packet(&schema::ARCHCORE_EXT, raw) {
+    let p = match decode_packet(ext_schema(), raw) {
         Ok(p) => p,
         Err(e) => {
             log::warn!("extension 0xAC illisible : {e}");
@@ -169,6 +202,11 @@ pub fn decode(raw: &[u8]) -> Option<ExtMessage> {
             rate_per_sec: p.int(8).unwrap_or(0) as u16,
             language: p.bytes(16).and_then(|b| ext_text::normalize_language(&String::from_utf8_lossy(b))),
             languages: decode_language_list(&text(17)),
+            tables_fingerprint: p
+                .bytes(FIELD_TABLES_FINGERPRINT)
+                .filter(|b| b.len() <= MAX_FINGERPRINT && b.iter().all(|c| (0x21..=0x7e).contains(c)))
+                .map(|b| String::from_utf8_lossy(b).into_owned())
+                .filter(|f| !f.is_empty()),
         }),
         ext_op::ADDON_RECV => ExtMessage::AddonRecv {
             prefix: text(9),
@@ -290,7 +328,7 @@ mod tests {
         assert_eq!(p.int(2), Some(1));
         assert_eq!(p.int(3), Some(1));
         assert!(p.text(4).unwrap().starts_with("ArchRust "));
-        assert_eq!(p.text(5).as_deref(), Some("addon-msg/1;language/1"));
+        assert_eq!(p.text(5).as_deref(), Some("addon-msg/1;language/1;client-tables/1"));
         // Champs non prévus pour HELLO absents.
         assert!(p.get(1).is_none() && p.get(9).is_none() && p.get(14).is_none() && p.get(16).is_none());
         // Langue souhaitée, normalisée ; un code mal formé n'est pas envoyé.
@@ -323,6 +361,7 @@ mod tests {
         assert_eq!(e.capabilities.len(), 1);
         assert_eq!((e.max_payload, e.rate_burst, e.rate_per_sec), (255, 20, 10));
         assert!(e.language.is_none() && e.languages.is_empty(), "serveur 1.0 : pas de langue");
+        assert!(e.tables_fingerprint.is_none(), "serveur 1.0 : pas d'empreinte des tables");
 
         let recv = build_packet(
             s,
@@ -439,6 +478,37 @@ mod tests {
                 texts: vec![(100, "Premiers pas".into()), (101, String::new())]
             })
         );
+    }
+
+    /// Capacité `client-tables/1` : empreinte des tables au champ 21 du `HELLO_ACK`, lue même si le
+    /// schéma d'`archcore-net` s'arrête au champ 20.
+    #[test]
+    fn empreinte_des_tables() {
+        let s = ext_schema();
+        assert!(s.fields.len() > FIELD_TABLES_FINGERPRINT);
+        assert_eq!(s.fields.len(), schema::ARCHCORE_EXT.fields.len().max(FIELD_TABLES_FINGERPRINT + 1));
+        let ack = |fp: &[u8]| {
+            build_packet(
+                s,
+                &Fields::new(s)
+                    .with(0, ext_op::HELLO_ACK)
+                    .with(2, 1)
+                    .with(3, 2)
+                    .with(4, b"ArchCore 0.3.0".to_vec())
+                    .with(5, b"addon-msg/1;language/1;client-tables/1".to_vec())
+                    .with(16, b"fr".to_vec())
+                    .with(FIELD_TABLES_FINGERPRINT, fp.to_vec()),
+            )
+        };
+        let Some(ExtMessage::HelloAck(e)) = decode(&ack(b"sha256:0f1e2d")) else { panic!("HELLO_ACK attendu") };
+        assert!(e.has(CLIENT_TABLES));
+        assert_eq!(e.tables_fingerprint.as_deref(), Some("sha256:0f1e2d"));
+        assert_eq!(e.language.as_deref(), Some("fr"), "champs précédents intacts");
+        // Empreinte invalide (espace, trop longue) ou vide : ignorée.
+        for bad in [&b"avec espace"[..], &[b'a'; MAX_FINGERPRINT + 1][..], b""] {
+            let Some(ExtMessage::HelloAck(e)) = decode(&ack(bad)) else { panic!("HELLO_ACK attendu") };
+            assert!(e.tables_fingerprint.is_none());
+        }
     }
 
     #[test]

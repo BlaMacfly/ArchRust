@@ -127,6 +127,28 @@ impl ListSpec {
         status: None,
         pages: "CONTROL_31900",
     };
+    /// Choix des combattants (`UI_GuildBattleMember`, `GuildBattleMemberList`) : numéro, nom, niveau ; coché
+    /// (`DisplayGuildBattleMemberSelect`, `Status2` On / Off de `CONTROL_931`). 10 lignes de 20.
+    pub const BATTLE_MEMBERS: ListSpec = ListSpec {
+        list: "CONTROL_2812",
+        item: "CONTROL_30360",
+        bar: "CONTROL_2152",
+        button: "CONTROL_2152",
+        columns: &["CONTROL_16123", "CONTROL_14308", "CONTROL_5762"],
+        status: Some("CONTROL_931"),
+        pages: "",
+    };
+    /// Résultat d'un combat (`UI_GuildBattleResult`, `GuildBattleResultList`) : nom et points à gauche (sa
+    /// guilde), à droite (l'adverse). 10 lignes de 16.
+    pub const BATTLE_RESULT: ListSpec = ListSpec {
+        list: "CONTROL_12844",
+        item: "CONTROL_2848",
+        bar: "",
+        button: "",
+        columns: &["CONTROL_1065", "CONTROL_4056", "CONTROL_16647", "CONTROL_18739"],
+        status: None,
+        pages: "",
+    };
 
     fn owns(&self, control: &str) -> bool {
         [self.item, self.bar, self.button].contains(&control) || self.columns.contains(&control) || self.status == Some(control)

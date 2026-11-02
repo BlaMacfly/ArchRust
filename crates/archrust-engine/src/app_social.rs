@@ -146,7 +146,8 @@ impl App {
         let played = !anim.is_empty() && animator.is_some_and(|a| a.play_file_once(&assets, &anim));
         log::debug!("action sociale {} de CID {} : {anim} ({played}), {sound}", ev.kind, ev.cid);
         if !sound.is_empty() {
-            self.audio.play_effect(&format!("sound/effect/{sound}"));
+            // 2D pour le joueur, 3D sur le personnage sinon (`FUN_14056da90`, voir `app_sounds.rs`).
+            self.sounds_play_char(ev.cid, &sound);
         }
     }
 

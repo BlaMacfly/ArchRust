@@ -16,6 +16,8 @@
 //! AGPMITEM op 21 (champ 2 = IID)                                 détruire ← op 1
 //! AGPMITEM op 9 (champ 4 = CID) / op 10                          retour d'aller-retour possible / fini
 //! AGPMITEM op 6                                                  revenir au point mémorisé
+//! AGPMITEM op 15 (4 CID, 5 montant)                              jeter de l'or (`Inventory_DropMoneyYes`,
+//!                                                                0x1407bc3a0 → 0x1401b9c10) ; pas de réponse
 //! ```
 
 use archrust_protocol::packet::{build_mini, sparse, Value};
@@ -29,6 +31,8 @@ pub mod op {
     pub const USE_RESULT: u8 = 4;
     /// Retour au point mémorisé par un parchemin aller-retour (client → serveur).
     pub const USE_RETURN: u8 = 6;
+    /// Or jeté au sol (client → serveur).
+    pub const DROP_MONEY: u8 = 15;
     /// Point de retour mémorisé (serveur → client).
     pub const RETURN_ENABLED: u8 = 9;
     /// Retour désactivé (serveur → client).
@@ -63,6 +67,8 @@ pub enum ItemCommand {
     Destroy(i32),
     /// Revenir au point mémorisé par un parchemin aller-retour.
     Return,
+    /// Jeter `amount` pièces d'or au sol (montant > 0, borné à l'or porté par le moteur).
+    DropMoney(i32),
 }
 
 fn grid_value(grid: Grid) -> Value {
@@ -108,6 +114,7 @@ pub fn command_packet(cmd: &ItemCommand, me: i32) -> (&'static Schema, Vec<Optio
         ),
         ItemCommand::Destroy(iid) => sparse(s, &[(0, Value::U8(op::DESTROY)), (2, Value::I32(*iid)), (4, Value::I32(me))]),
         ItemCommand::Return => sparse(s, &[(0, Value::U8(op::USE_RETURN)), (4, Value::I32(me))]),
+        ItemCommand::DropMoney(amount) => sparse(s, &[(0, Value::U8(op::DROP_MONEY)), (4, Value::I32(me)), (5, Value::I32(*amount))]),
     };
     (s, values)
 }
@@ -138,6 +145,8 @@ mod tests {
         let (_, v) = command_packet(&ItemCommand::Split { iid: 42, count: 5, grid: [0, 4, 4] }, 7);
         assert_eq!((int(&v, 0), int(&v, 5)), (Some(17), Some(5)));
         assert_eq!(int(&command_packet(&ItemCommand::Use(42), 7).1, 0), Some(3));
+        let (_, v) = command_packet(&ItemCommand::DropMoney(1500), 7);
+        assert_eq!((int(&v, 0), int(&v, 4), int(&v, 5), int(&v, 2)), (Some(15), Some(7), Some(1500), None));
         assert_eq!(int(&command_packet(&ItemCommand::Destroy(42), 7).1, 0), Some(21));
         assert_eq!(int(&command_packet(&ItemCommand::Return, 7).1, 0), Some(6));
     }

@@ -21,3 +21,6 @@
 
 # Assets déposés par le développeur (packs d'essai, catalogue des IDs extrait du client) : jamais publiés.
 /assets/
+
+# Données du serveur (tables écrites par `archcore export-client-tables`) : propres à chaque serveur, jamais publiées.
+/server-data/

@@ -644,6 +644,9 @@ impl App {
     pub(super) fn addon_world_event(&mut self, ev: WorldEvent) {
         match ev {
             WorldEvent::ExtensionsReady(e) => {
+                // Empreinte des tables du serveur (capacité `client-tables`) contre `server-data/` :
+                // un écart est écrit dans le journal seulement.
+                crate::server_data::check(self.assets.server_data(), e.tables_fingerprint.as_deref());
                 if let Some(l) = &e.language {
                     self.ui.server_language = Some((l.clone(), e.languages.clone()));
                 }

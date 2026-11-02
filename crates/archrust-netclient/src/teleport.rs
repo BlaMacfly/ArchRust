@@ -10,6 +10,8 @@
 //!     → op 1 (2 CID, 4 position d'arrivée), déplacement, op 8 (chargement fini) ; op 2 : départ annulé
 //! op 7 (1 EVENT_BASE, 2 CID) : « Retour » depuis un point de zone de combat entre joueurs
 //!     (Archonia FUN_1402e7f90) → op 1, op 8 : retour au point de départ du dernier trajet (`sim pvp`)
+//! op 3 (2 CID, 4 position) : téléport vers une position libre (rappel de groupe, MJ) : comme l'op 1
+//! op 6 (1 EVENT_BASE, 2 CID) : demande ignorée, même rappel que l'op 5 avec « accordé » = 0 (pas de fenêtre)
 //! ```
 
 use archrust_protocol::packet::{build_mini, decode_mini, sparse, Value};
@@ -24,6 +26,8 @@ pub mod op {
     pub const TELEPORT_POINT: i8 = 0;
     pub const TELEPORT_START: i8 = 1;
     pub const TELEPORT_CANCELED: i8 = 2;
+    pub const TELEPORT_CUSTOM_POS: i8 = 3;
+    pub const REQUEST_IGNORED: i8 = 6;
     pub const TELEPORT_RETURN: i8 = 7;
     pub const REQUEST: i8 = 4;
     pub const GRANTED: i8 = 5;
@@ -73,6 +77,8 @@ pub enum TeleportEvent {
     Loaded { cid: i32 },
     /// Départ annulé (op 2) : l'écran de chargement se ferme (FUN_1406e9df0).
     Canceled { cid: i32 },
+    /// Demande ignorée par le serveur (op 6) : la liste ne s'ouvre pas.
+    Ignored { cid: i32 },
 }
 
 fn int(values: &[Option<Value>], i: usize) -> Option<i64> {
@@ -90,7 +96,9 @@ pub fn translate(packet_type: u8, values: &[Option<Value>]) -> Option<TeleportEv
             let base = values.get(1).and_then(Option::as_ref).and_then(Value::as_bytes).and_then(|b| decode_mini(mini::EVENT_BASE, b).ok());
             TeleportEvent::Granted { object: base.and_then(|(_, v)| int(&v, 1)).unwrap_or(0) as u32 }
         }
-        op::TELEPORT_START => TeleportEvent::Start { cid, position: values.get(4).and_then(Option::as_ref).and_then(Value::as_vec3) },
+        // Op 3 : rappels 1, 8 et 9 comme un départ (arrêt du déplacement, chargement).
+        op::TELEPORT_START | op::TELEPORT_CUSTOM_POS => TeleportEvent::Start { cid, position: values.get(4).and_then(Option::as_ref).and_then(Value::as_vec3) },
+        op::REQUEST_IGNORED => TeleportEvent::Ignored { cid },
         op::LOADING => TeleportEvent::Loaded { cid },
         op::TELEPORT_CANCELED => TeleportEvent::Canceled { cid },
         _ => return None,
@@ -117,5 +125,11 @@ mod tests {
         assert_eq!(translate(0x31, &ok), Some(TeleportEvent::Granted { object: 132_646_586 }));
         let start = sparse(main::EVENT_TELEPORT, &[(0, Value::I8(1)), (2, Value::I32(7)), (4, Value::Vec3([1.0, 2.0, 3.0]))]);
         assert_eq!(translate(0x31, &start), Some(TeleportEvent::Start { cid: 7, position: Some([1.0, 2.0, 3.0]) }));
+        let custom = sparse(main::EVENT_TELEPORT, &[(0, Value::I8(3)), (2, Value::I32(7)), (4, Value::Vec3([4.0, 5.0, 6.0]))]);
+        assert_eq!(translate(0x31, &custom), Some(TeleportEvent::Start { cid: 7, position: Some([4.0, 5.0, 6.0]) }));
+        let ignored = sparse(main::EVENT_TELEPORT, &[(0, Value::I8(6)), (1, event_base(9)), (2, Value::I32(7))]);
+        assert_eq!(translate(0x31, &ignored), Some(TeleportEvent::Ignored { cid: 7 }));
+        let canceled = sparse(main::EVENT_TELEPORT, &[(0, Value::I8(2)), (2, Value::I32(7))]);
+        assert_eq!(translate(0x31, &canceled), Some(TeleportEvent::Canceled { cid: 7 }));
     }
 }

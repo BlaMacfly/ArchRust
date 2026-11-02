@@ -430,6 +430,9 @@ pub enum WorldEvent {
     /// Retour à la sélection des personnages (AgpmReturnToLogin 0x2F) : refus (op 2) ou départ du monde (op 5),
     /// voir `return_login`.
     ReturnToLogin(crate::return_login::ReturnLoginEvent),
+    /// Le compte s'est connecté ailleurs (AGPMCHARACTER op 8, rappel 0x43 → AgcmUILogin `0x1405a6350`) : la boîte
+    /// `LG_DUPLICATE_ACCOUNT`, puis `Disconnected` sans reconnexion.
+    DisconnectedByAnotherUser,
     Disconnected(String),
 }
 
@@ -801,6 +804,14 @@ pub fn extra_events(p: &Incoming) -> Vec<WorldEvent> {
     out
 }
 
+/// Opération d'AGPMCHARACTER : le compte s'est connecté ailleurs (`DISCONNECT_BY_ANOTHER_USER`, champ 1 non lu).
+pub const CHARACTER_DISCONNECT_BY_ANOTHER_USER: i64 = 8;
+
+/// AGPMCHARACTER op 8 reçu.
+pub fn is_disconnect_by_another_user(p: &Incoming) -> bool {
+    p.packet_type == packet_type::CHARACTER && p.op() == Some(CHARACTER_DISCONNECT_BY_ANOTHER_USER)
+}
+
 /// Traduit un paquet reçu en événement.
 pub fn translate(p: &Incoming) -> WorldEvent {
     // Métamorphose et évolution (AGPMCHARACTER ops 11, 12, 26, 27 ; AGPMITEM ops 8, 19, 20, 27), voir `morph`.
@@ -840,6 +851,10 @@ pub fn translate(p: &Incoming) -> WorldEvent {
     }
     if let Some(ev) = p.packet.as_ref().and_then(|packet| crate::remission::translate(p.packet_type, &packet.values)) {
         return WorldEvent::Remission(ev);
+    }
+    // Chuchotements bloqués ou destinataire absent (AGPMCHATTING ops 1 à 4), voir `chat`.
+    if let Some(ev) = p.packet.as_ref().and_then(|packet| crate::chat::translate_whisper(p.packet_type, &packet.values)) {
+        return WorldEvent::Channel(ev);
     }
     // Cris de zone (0x4C, en discussion), salons (0x2C), coiffeur (0x43), avis de recherche (0x46).
     if let Some(ev) = p.packet.as_ref().and_then(|packet| crate::chat::translate_area(p.packet_type, &packet.values)) {
@@ -1802,6 +1817,14 @@ impl WorldClient {
                             if let Some((key, _)) = crate::reconnect::result_of(&p) {
                                 if key != 0 { self.reconnect_key = key; }
                                 continue;
+                            }
+                            // Connecté ailleurs (AGPMCHARACTER op 8) : boîte, puis fin de la session, sans reconnexion.
+                            if is_disconnect_by_another_user(&p) {
+                                log::info!("[world] compte connecté ailleurs (0x02 op 8)");
+                                let _ = events.send(WorldEvent::DisconnectedByAnotherUser).await;
+                                self.conn.close().await;
+                                let _ = events.send(WorldEvent::Disconnected("compte connecté ailleurs".into())).await;
+                                return (SessionEnd::Disconnected, commands);
                             }
                             let ev = translate(&p);
                             Self::track_view_event(&mut self.seen, &ev);

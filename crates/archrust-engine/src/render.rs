@@ -1,4 +1,6 @@
-//! Contexte wgpu : surface, pipeline éclairé, maillages, textures, instances.
+//! Contexte wgpu : surface, pipeline éclairé, maillages, textures, instances ; ombres projetées des
+//! objets sur le sol (`shadow_render`, groupe 2 du terrain) et lueur des armures serties
+//! ([`ArmorGlow`], groupe 3 du pipeline éclairé).
 
 use anyhow::{anyhow, Result};
 use bytemuck::{Pod, Zeroable};
@@ -85,10 +87,15 @@ struct Globals {
     point_pos: [[f32; 4]; MAX_POINT_LIGHTS],
     point_color: [[f32; 4]; MAX_POINT_LIGHTS],
     point_count: [f32; 4],
+    /// Ombres projetées (`shadow`, lues par `terrain.wgsl`) : monde → (u, v) de la texture d'ombre,
+    /// et x = 1 si elles sont allumées.
+    shadow_uv: [[f32; 4]; 4],
+    shadow_params: [f32; 4],
 }
 
-/// Lumières ponctuelles d'effet appliquées au plus (tableaux `point_*` des shaders).
-pub const MAX_POINT_LIGHTS: usize = 8;
+/// Lumières ponctuelles appliquées au plus (tableaux `point_*` des shaders) : celles des effets
+/// (au plus 8, `app_effects.rs`) puis celles des repères du décor (`decor.rs`) les plus proches.
+pub const MAX_POINT_LIGHTS: usize = 16;
 
 /// Lumière ponctuelle d'un effet d'Archonia (`AgcdEffLight`) : éclaire terrain, objets et
 /// personnages dans sa sphère, en plus du soleil et de l'ambiante (voir `shader.wgsl`).
@@ -121,6 +128,54 @@ pub const DEFAULT_FOG_RANGE: [f32; 4] = [30_000.0, 90_000.0, 0.85, 0.0];
 struct InstanceUniform {
     model: [[f32; 4]; 4],
     color: [f32; 4],
+    /// Lueur d'armure ([`ArmorGlow`], `shader.wgsl`) : échelle UV, translation UV ; sélection U et
+    /// rotation ; sélection V et poids (0 : sans lueur) ; spéculaire et temps ; ambiante et diffuse
+    /// du matériau.
+    glow: [[f32; 4]; 6],
+}
+
+impl InstanceUniform {
+    fn new(item: &DrawItem, time: f32) -> Self {
+        let glow = item.mesh.glow.lock().unwrap().as_ref().map_or([[0.0; 4]; 6], |g| g.uniform(time));
+        InstanceUniform { model: item.model.to_cols_array_2d(), color: item.tint, glow }
+    }
+}
+
+/// Lueur de l'armure de corps sertie (`ee_ss_fx.txt`, matériau `uvAnim.fx` d'Archonia, voir
+/// `app_stones.rs`) : second étage de texture animé posé sur les pièces de l'armure.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ArmorGlow {
+    /// Texture animée (`SOUL_*`).
+    pub texture: String,
+    /// `UV Scale`, `Uv Translation` (vitesse par seconde), `UV Rotation` (degrés par seconde).
+    pub scale: [f32; 2],
+    pub velocity: [f32; 2],
+    pub rotation: f32,
+    /// `UV Anim weight`.
+    pub weight: f32,
+    /// `U Selection vector`, `V Selection vector` (trois premières composantes, `float3` du shader).
+    pub u_select: [f32; 3],
+    pub v_select: [f32; 3],
+    /// `AMBIENT`, `DIFFUSE`, `SPECULAR` du matériau (0–1).
+    pub ambient: [f32; 3],
+    pub diffuse: [f32; 3],
+    pub specular: [f32; 3],
+}
+
+impl ArmorGlow {
+    /// Paramètres du shader (voir `InstanceUniform::glow`) au temps `time` (secondes).
+    pub fn uniform(&self, time: f32) -> [[f32; 4]; 6] {
+        let v3 = |v: [f32; 3], w: f32| [v[0], v[1], v[2], w];
+        [
+            [self.scale[0], self.scale[1], self.velocity[0], self.velocity[1]],
+            v3(self.u_select, self.rotation),
+            // Poids nul = pas de lueur pour le shader : un poids de 0 lu dans la table reste « allumé ».
+            v3(self.v_select, self.weight.max(1e-6)),
+            v3(self.specular, time),
+            v3(self.ambient, 0.0),
+            v3(self.diffuse, 0.0),
+        ]
+    }
 }
 
 /// Sous-maillage : plage d'indices + texture.
@@ -143,6 +198,10 @@ pub struct Mesh {
     /// Pièce d'un objet porté (arme, bouclier, lance) : nœud de la main et matrice d'attache, voir
     /// `worn`. `None` pour les autres maillages.
     pub worn: Option<crate::worn::Worn>,
+    /// TID de l'objet d'équipement dont vient la pièce (armures, voir `scene`), `None` sinon.
+    pub item_tid: Option<i32>,
+    /// Lueur d'armure sertie posée par `app_stones.rs` (`None` : aucune).
+    pub glow: std::sync::Mutex<Option<Arc<ArmorGlow>>>,
 }
 
 pub struct GpuTexture {
@@ -220,12 +279,23 @@ pub struct Renderer {
     /// Effets d'Archonia de l'image (`app_effects.rs`) : lots (texture, mélange, sommets en
     /// coordonnées du monde), dessinés après les particules dans l'ordre de la liste.
     pub effects: Vec<EffectDraw>,
-    /// Lumières des effets de l'image (`app_effects.rs`), au plus [`MAX_POINT_LIGHTS`].
+    /// Lumières de l'image : effets (`app_effects.rs`) puis repères du décor (`decor.rs`), au plus
+    /// [`MAX_POINT_LIGHTS`].
     pub point_lights: Vec<PointLight>,
+    /// Eau et herbe du monde de l'image (remplies par `world.rs`, voir `world_render`).
+    pub world: crate::world_render::WorldDraw,
+    world_renderer: crate::world_render::WorldRenderer,
     sky: crate::sky_render::SkyRenderer,
     /// Demande de capture de la prochaine image (lue dans `take_capture`).
     pub capture_next: bool,
     captured: Option<(u32, u32, Vec<u8>)>,
+    /// Ombres projetées des objets (`shadow_render`) : prise à refaire avant la prochaine image, et
+    /// matrice monde → texture de la dernière prise (`None` : ombres éteintes).
+    shadow: crate::shadow_render::ShadowRenderer,
+    pub shadow_request: Option<crate::shadow_render::ShadowRequest>,
+    pub shadow_uv: Option<Mat4>,
+    /// Horloge des lueurs d'armure (`Time` d'`uvAnim.fx`, en secondes).
+    started: std::time::Instant,
 }
 
 impl Renderer {
@@ -317,7 +387,8 @@ impl Renderer {
             label: Some("instance"),
             entries: &[wgpu::BindGroupLayoutEntry {
                 binding: 0,
-                visibility: wgpu::ShaderStages::VERTEX,
+                // Lu aussi par le fragment (lueur d'armure).
+                visibility: wgpu::ShaderStages::VERTEX_FRAGMENT,
                 ty: wgpu::BindingType::Buffer {
                     ty: wgpu::BufferBindingType::Uniform,
                     has_dynamic_offset: false,
@@ -328,7 +399,8 @@ impl Renderer {
         });
         let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
             label: Some("lit"),
-            bind_group_layouts: &[&globals_layout, &texture_layout, &instance_layout],
+            // Groupe 3 : texture animée de la lueur d'armure (blanc sans lueur).
+            bind_group_layouts: &[&globals_layout, &texture_layout, &instance_layout, &texture_layout],
             push_constant_ranges: &[],
         });
         let lit = |cull_mode: Option<wgpu::Face>| device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
@@ -370,6 +442,7 @@ impl Renderer {
         });
         let pipeline = lit(None);
         let pipeline_culled = lit(Some(wgpu::Face::Back));
+        let shadow = crate::shadow_render::ShadowRenderer::new(&device, &texture_layout);
         let terrain_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("terrain"),
             source: wgpu::ShaderSource::Wgsl(include_str!("terrain.wgsl").into()),
@@ -399,7 +472,7 @@ impl Renderer {
         let terrain_pipeline_layout =
             device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
                 label: Some("terrain"),
-                bind_group_layouts: &[&globals_layout, &terrain_layout],
+                bind_group_layouts: &[&globals_layout, &terrain_layout, &shadow.sample_layout],
                 push_constant_ranges: &[],
             });
         let terrain_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
@@ -484,6 +557,7 @@ impl Renderer {
         let mut textures = HashMap::new();
         textures.insert("__white".to_string(), white.clone());
         let sky = crate::sky_render::SkyRenderer::new(&device, format, &globals_layout, &texture_layout, Vertex::layout());
+        let world_renderer = crate::world_render::WorldRenderer::new(&device, format, &globals_layout, &texture_layout);
         Ok(Renderer {
             device,
             queue,
@@ -519,9 +593,15 @@ impl Renderer {
             flares: Vec::new(),
             effects: Vec::new(),
             point_lights: Vec::new(),
+            world: Default::default(),
+            world_renderer,
             sky,
             capture_next: false,
             captured: None,
+            shadow,
+            shadow_request: None,
+            shadow_uv: None,
+            started: std::time::Instant::now(),
         })
     }
 
@@ -627,6 +707,11 @@ impl Renderer {
         self.textures.get(&name.to_ascii_lowercase()).cloned()
     }
 
+    /// Texture animée de la lueur d'un maillage (blanc sans lueur ou texture absente).
+    fn glow_texture(&self, mesh: &Mesh) -> Arc<GpuTexture> {
+        mesh.glow.lock().unwrap().as_ref().and_then(|g| self.textures.get(&g.texture.to_ascii_lowercase()).cloned()).unwrap_or_else(|| self.white.clone())
+    }
+
     pub fn create_mesh(&self, vertices: &[Vertex], indices: &[u32], parts: Vec<SubMesh>) -> Mesh {
         let (center, radius) = bounds(vertices);
         Mesh {
@@ -650,6 +735,8 @@ impl Renderer {
             bounds_radius: radius,
             skin: None,
             worn: None,
+            item_tid: None,
+            glow: Default::default(),
         }
     }
 
@@ -794,11 +881,14 @@ impl Renderer {
             point_pos,
             point_color,
             point_count,
+            shadow_uv: Mat4::IDENTITY.to_cols_array_2d(),
+            shadow_params: [0.0; 4],
         };
         self.queue.write_buffer(&self.globals_buf, 0, bytemuck::bytes_of(&globals));
         self.ensure_instances(items.len());
+        let time = self.started.elapsed().as_secs_f32();
         for (i, item) in items.iter().enumerate() {
-            let data = InstanceUniform { model: item.model.to_cols_array_2d(), color: item.tint };
+            let data = InstanceUniform::new(item, time);
             self.queue.write_buffer(&self.instance_pool[i].0, 0, bytemuck::bytes_of(&data));
         }
         let mut encoder = self.device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: Some("offscreen") });
@@ -822,6 +912,8 @@ impl Renderer {
             pass.set_pipeline(&self.pipeline_culled);
             for (i, item) in items.iter().enumerate() {
                 pass.set_bind_group(2, &self.instance_pool[i].1, &[]);
+                let glow = self.glow_texture(&item.mesh);
+                pass.set_bind_group(3, &glow.bind_group, &[]);
                 pass.set_vertex_buffer(0, item.mesh.vertices.slice(..));
                 pass.set_index_buffer(item.mesh.indices.slice(..), wgpu::IndexFormat::Uint32);
                 for part in &item.mesh.parts {
@@ -864,6 +956,8 @@ impl Renderer {
             point_pos,
             point_color,
             point_count,
+            shadow_uv: self.shadow_uv.unwrap_or(Mat4::IDENTITY).to_cols_array_2d(),
+            shadow_params: [if self.shadow_uv.is_some() { 1.0 } else { 0.0 }, 0.0, 0.0, 0.0],
         };
         self.queue
             .write_buffer(&self.globals_buf, 0, bytemuck::bytes_of(&globals));
@@ -909,12 +1003,11 @@ impl Renderer {
             }
             self.sky.prepare_flares(&self.device, &self.queue, &vertices);
         }
+        let world_prepared = self.world_renderer.prepare(&self.device, &self.queue, &self.world, &self.textures, &self.white, &self.clear);
         self.ensure_instances(items.len());
+        let time = self.started.elapsed().as_secs_f32();
         for (i, item) in items.iter().enumerate() {
-            let data = InstanceUniform {
-                model: item.model.to_cols_array_2d(),
-                color: item.tint,
-            };
+            let data = InstanceUniform::new(item, time);
             let (buf, _) = &self.instance_pool[i];
             self.queue.write_buffer(buf, 0, bytemuck::bytes_of(&data));
         }
@@ -923,6 +1016,10 @@ impl Renderer {
             .create_command_encoder(&wgpu::CommandEncoderDescriptor {
                 label: Some("frame"),
             });
+        // Ombres projetées : prise refaite avant la scène quand elle est demandée (voir `shadow`).
+        if let Some(request) = self.shadow_request.take() {
+            self.shadow.encode(&self.device, &self.queue, &mut encoder, &request, &self.textures, &self.white);
+        }
         {
             let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                 label: Some("scene"),
@@ -952,6 +1049,7 @@ impl Renderer {
             pass.set_bind_group(0, &self.globals_bg, &[]);
             if !terrain.is_empty() {
                 pass.set_pipeline(&self.terrain_pipeline);
+                pass.set_bind_group(2, &self.shadow.sample_bg, &[]);
                 for mesh in terrain {
                     pass.set_vertex_buffer(0, mesh.vertices.slice(..));
                     pass.set_index_buffer(mesh.indices.slice(..), wgpu::IndexFormat::Uint32);
@@ -967,6 +1065,8 @@ impl Renderer {
             }
             let mut culled = false;
             pass.set_pipeline(&self.pipeline);
+            pass.set_bind_group(3, &self.white.bind_group, &[]);
+            let mut glowing = false;
             for (i, item) in items.iter().enumerate() {
                 // Personnages et créatures (pièces skinnées ou rigides) : faces arrière cachées ; le décor
                 // reste recto-verso. Les pièces rigides accrochées aux os (chapeau, manteau, ailes)
@@ -978,6 +1078,13 @@ impl Renderer {
                 }
                 let (_, bg) = &self.instance_pool[i];
                 pass.set_bind_group(2, bg, &[]);
+                // Lueur d'armure : texture animée en groupe 3 (blanc remis après).
+                let glow = item.mesh.glow.lock().unwrap().is_some();
+                if glow || glowing {
+                    let tex = self.glow_texture(&item.mesh);
+                    pass.set_bind_group(3, &tex.bind_group, &[]);
+                    glowing = glow;
+                }
                 pass.set_vertex_buffer(0, item.mesh.vertices.slice(..));
                 pass.set_index_buffer(item.mesh.indices.slice(..), wgpu::IndexFormat::Uint32);
                 for part in &item.mesh.parts {
@@ -994,6 +1101,9 @@ impl Renderer {
                     );
                 }
             }
+            // Herbe puis eau (transparente) du monde, après les objets opaques.
+            self.world_renderer.draw_grass(&mut pass, &self.globals_bg, &world_prepared);
+            self.world_renderer.draw_water(&mut pass, &self.globals_bg, &world_prepared);
             // Particules de météo, après les objets opaques.
             if let Some(tex) = &particle_tex {
                 self.sky.draw_particles(&mut pass, &self.globals_bg, &tex.bind_group, particle_count);
@@ -1185,11 +1295,11 @@ fn bounds(vertices: &[Vertex]) -> (Vec3, f32) {
 mod tests {
     use super::*;
 
-    /// Lumières d'effet : au plus huit dans les tableaux des shaders, taille de `Globals` multiple de 16.
+    /// Lumières ponctuelles : au plus seize dans les tableaux des shaders, taille de `Globals` multiple de 16.
     #[test]
     fn point_lights_pack() {
         let l = PointLight { position: Vec3::new(1.0, 2.0, 3.0), radius: 600.0, color: [0.6, 0.57, 1.0] };
-        let (pos, color, count) = pack_point_lights(&[l; 10]);
+        let (pos, color, count) = pack_point_lights(&[l; 20]);
         assert_eq!(count[0], MAX_POINT_LIGHTS as f32);
         assert_eq!(pos[7], [1.0, 2.0, 3.0, 600.0]);
         assert_eq!(color[0], [0.6, 0.57, 1.0, 1.0]);

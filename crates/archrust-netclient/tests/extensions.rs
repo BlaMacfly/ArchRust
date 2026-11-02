@@ -117,7 +117,7 @@ async fn langue_annoncee_et_appliquee() {
     let hello = server.recv().await;
     let p = decode_packet(&ARCHCORE_EXT, &hello).unwrap();
     assert_eq!(p.int(0), Some(ext_op::HELLO));
-    assert_eq!(p.text(5).as_deref(), Some("addon-msg/1;language/1"));
+    assert_eq!(p.text(5).as_deref(), Some(archrust_netclient::ext::REQUESTED));
     assert_eq!(p.text(16).as_deref(), Some("fr"), "langue souhaitée au HELLO");
     let s = &ARCHCORE_EXT;
     let ack = build_packet(
@@ -151,7 +151,7 @@ async fn serveur_avec_extensions() {
     assert_eq!(parse_header(&hello).unwrap().ptype, 0xac);
     let p = decode_packet(&ARCHCORE_EXT, &hello).unwrap();
     assert_eq!(p.int(0), Some(ext_op::HELLO));
-    assert_eq!(p.text(5).as_deref(), Some("addon-msg/1;language/1"));
+    assert_eq!(p.text(5).as_deref(), Some(archrust_netclient::ext::REQUESTED));
     assert!(p.get(16).is_none(), "pas de langue choisie : champ 16 absent");
     // Un paquet de jeu avant l'accord, puis l'accord, puis un autre paquet de jeu.
     server.send(&game_packet()).await;

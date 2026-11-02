@@ -741,7 +741,19 @@ impl App {
                     self.consumables.signatures.insert(cid, text);
                 }
             }
-            ConsumableEvent::UseFailed { .. } | ConsumableEvent::ReverseOrbReuse { .. } | ConsumableEvent::SkillInit { .. } => {}
+            // Op 28 (FUN_1401c5b90) : recharge du modèle, montrée sur ses cases comme celle de l'op 4.
+            ConsumableEvent::Cooldown { tid, cid, remain_ms } if cid == me || cid == 0 => {
+                let left = Duration::from_millis(remain_ms);
+                if left.is_zero() {
+                    self.consumables.reuse.remove(&tid);
+                } else {
+                    let total = self.consumables.reuse.get(&tid).map(|(_, t)| *t).filter(|t| *t >= left).unwrap_or(left);
+                    self.consumables.reuse.insert(tid, (Instant::now() + left, total));
+                }
+            }
+            ConsumableEvent::ReturnScrollFailed { cid } => log::debug!("parchemin de retour refusé ({cid})"),
+            ConsumableEvent::UseSucceeded { iid, cid } => log::debug!("objet {iid} utilisé par {cid}"),
+            ConsumableEvent::UseFailed { .. } | ConsumableEvent::ReverseOrbReuse { .. } | ConsumableEvent::SkillInit { .. } | ConsumableEvent::Cooldown { .. } => {}
         }
     }
 

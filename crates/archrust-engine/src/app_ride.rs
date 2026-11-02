@@ -334,6 +334,11 @@ impl RideGlue {
         self.mounts.contains_key(&cid)
     }
 
+    /// TID du modèle de la monture du personnage `cid` (pas de la monture, voir `app_sounds.rs`).
+    pub fn mount_tid(&self, cid: i32) -> Option<i32> {
+        self.mounts.get(&cid).map(|m| m.tid)
+    }
+
     /// Matrice du cavalier `cid` (`base` : sa position et son orientation) : posé sur la selle de sa
     /// monture (voir [`rider_on_saddle`]).
     pub fn rider_matrix(&self, cid: i32, base: Mat4) -> Mat4 {

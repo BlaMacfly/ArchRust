@@ -699,6 +699,14 @@ impl HotkeyGlue {
         self.table.as_mut().unwrap()
     }
 
+    /// Couple (modificateur, code) appliqué aujourd'hui à l'entrée de défaut `default` (touches de caméra
+    /// d'Archonia, que FUN_14085ee60 retrouve par leur défaut avec FUN_14054d990) ; le défaut lui-même
+    /// si l'EventMap n'a pas l'entrée.
+    pub fn current_key(&mut self, assets: &Assets, default: Key) -> Key {
+        let t = self.ensure(assets);
+        t.entries.iter().position(|e| e.default == default).and_then(|i| t.applied.get(i).copied()).unwrap_or(default)
+    }
+
     /// Lecture du fichier (FUN_14054e1e0) : toutes ses entrées gardées ; illisible ou d'une autre version : ignoré,
     /// jamais supprimé (le dossier `Game` est partagé avec Archonia).
     fn read_file(&mut self) {

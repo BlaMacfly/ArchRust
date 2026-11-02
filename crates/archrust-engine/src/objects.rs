@@ -186,6 +186,16 @@ pub fn template_model(assets: &Assets, tid: u32) -> Option<String> {
     Some(dff)
 }
 
+/// Drapeaux AgcmObject d'un modèle d'objet (seconde colonne 2 `ObjectType` d'`objecttemplate.ini`,
+/// 0 si absents) : `0x10000` repère d'éditeur, `0x100000` objet qui projette une ombre (voir `shadow`).
+pub fn template_flags(assets: &Assets, tid: u32) -> u32 {
+    let Ok(table) = assets.table("ini", "objecttemplate.ini") else { return 0 };
+    table
+        .section(&tid.to_string())
+        .and_then(|t| t.get_all("2").nth(1).and_then(|v| v.trim().parse::<u32>().ok()))
+        .unwrap_or(0)
+}
+
 /// Inverse de la frame racine d'un clump d'objet du client (identité pour un glTF de patch, posé
 /// tel quel) : la matrice de l'objet prend la place de cette frame.
 pub fn root_inverse(assets: &Assets, file: &str) -> Mat4 {
@@ -256,6 +266,56 @@ pub struct WorldObjects {
     models: HashMap<u32, Option<Arc<Vec<(Arc<Mesh>, Mat4)>>>>,
     pub radius: i32,
     pub sectors_per_frame: usize,
+    /// Modèles à plusieurs niveaux de détail (`DFF` = `niveau:fichier` au-delà de 0), par TID.
+    lod_models: HashMap<u32, Option<Arc<LodModel>>>,
+    /// Objets placés de ces modèles, par secteur : niveau choisi à chaque image.
+    lod_placed: HashMap<(i32, i32), Vec<(Arc<LodModel>, Mat4)>>,
+    /// `loddistancetype.txt` (lu au premier passage) et facteur `MapView` (0,5 / 0,8 / 1,3 / 1,8).
+    lod: Option<archrust_data::lod::LodDistances>,
+    pub lod_factor: f32,
+    /// Objets animés (colonne 26 `ANIMATION`) et lumières des repères (fonction 30) : voir `decor`.
+    pub decor: crate::decor::Decor,
+    /// Drapeaux AgcmObject par TID (`template_flags`), pour les ombres projetées.
+    agcm_flags: Mutex<HashMap<u32, u32>>,
+}
+
+/// Niveaux de détail d'un modèle d'objet (`objecttemplate.ini`) : maillages par niveau (`None` :
+/// pas de fichier pour ce niveau), colonne 12 `LOD_LEVEL` (`0:n`) et 23 `LOD_TYPE_DISTANCE`.
+pub struct LodModel {
+    pub levels: Vec<Option<Arc<Vec<(Arc<Mesh>, Mat4)>>>>,
+    pub count: usize,
+    pub kind: usize,
+}
+
+impl LodModel {
+    /// Maillages du niveau choisi par `FUN_140556460` : premier niveau dont la distance
+    /// `loddistancetype × facteur` dépasse `distance`, puis le plus haut niveau disponible en dessous.
+    pub fn meshes(&self, lod: &archrust_data::lod::LodDistances, distance: f32, factor: f32) -> Option<&Arc<Vec<(Arc<Mesh>, Mat4)>>> {
+        let level = lod.level(self.kind, self.count.max(1), distance, factor);
+        (0..=level.min(self.levels.len().saturating_sub(1))).rev().find_map(|l| self.levels[l].as_ref())
+    }
+}
+
+/// Fichiers de modèle par niveau (`DFF` = `niveau:fichier`), nombre de niveaux et type de distance
+/// d'un modèle d'objet, s'il a un niveau au-delà de 0.
+pub fn template_lod(assets: &Assets, tid: u32) -> Option<(Vec<(usize, String)>, usize, usize)> {
+    template_model(assets, tid)?;
+    let table = assets.table("ini", "objecttemplate.ini").ok()?;
+    let t = table.section(&tid.to_string())?;
+    let files: Vec<(usize, String)> = t
+        .get_all("10")
+        .filter_map(|v| {
+            let (lod, file) = v.split_once(':')?;
+            Some((lod.trim().parse().ok()?, file.trim().to_ascii_lowercase()))
+        })
+        .filter(|(_, f): &(usize, String)| !f.is_empty())
+        .collect();
+    if !files.iter().any(|(l, _)| *l > 0) {
+        return None;
+    }
+    let count = t.get("12").and_then(|v| v.split(':').nth(1)).and_then(|n| n.trim().parse().ok()).unwrap_or(archrust_data::lod::LOD_LEVELS);
+    let kind = t.get("23").and_then(|v| v.trim().parse().ok()).unwrap_or(0);
+    Some((files, count, kind))
 }
 
 impl WorldObjects {
@@ -263,6 +323,7 @@ impl WorldObjects {
         Self {
             radius,
             sectors_per_frame: 1,
+            lod_factor: 0.8,
             ..Default::default()
         }
     }
@@ -334,6 +395,26 @@ impl WorldObjects {
         best
     }
 
+    /// Niveaux de détail d'un modèle (cache), `None` s'il n'en a qu'un.
+    fn lod_model(&mut self, renderer: &mut Renderer, assets: &Assets, tid: u32) -> Option<Arc<LodModel>> {
+        if let Some(m) = self.lod_models.get(&tid) {
+            return m.clone();
+        }
+        let model = template_lod(assets, tid).map(|(files, count, kind)| {
+            let top = files.iter().map(|(l, _)| *l).max().unwrap_or(0);
+            let mut levels: Vec<Option<Arc<Vec<(Arc<Mesh>, Mat4)>>>> = vec![None; top + 1];
+            for (l, file) in files {
+                if let Ok(m) = model_meshes(renderer, assets, "object", &file) {
+                    let root = root_inverse(assets, &file);
+                    levels[l] = (!m.is_empty()).then(|| Arc::new(m.into_iter().map(|(mesh, local)| (mesh, root * local)).collect()));
+                }
+            }
+            Arc::new(LodModel { levels, count, kind })
+        });
+        self.lod_models.insert(tid, model.clone());
+        model
+    }
+
     fn model(
         &mut self,
         renderer: &mut Renderer,
@@ -378,6 +459,7 @@ impl WorldObjects {
                         let key = sector_of(p.position.x, p.position.z);
                         self.placements.entry(key).or_default().push(p);
                     }
+                    self.decor.add_tile_lights(crate::decor::tile_lights(assets, tile));
                     // Des objets d'une tuile voisine peuvent couvrir des secteurs déjà construits.
                     self.floors.lock().unwrap().clear();
                 }
@@ -513,6 +595,9 @@ impl WorldObjects {
         let keep = r + 2;
         self.sectors
             .retain(|&(sx, sy), _| (sx - cx).abs() <= keep && (sy - cy).abs() <= keep);
+        self.lod_placed.retain(|&(sx, sy), _| (sx - cx).abs() <= keep && (sy - cy).abs() <= keep);
+        self.decor.retain_sectors(|&(sx, sy)| (sx - cx).abs() <= keep && (sy - cy).abs() <= keep);
+        self.decor.animate(renderer);
         let mut wanted: Vec<(i32, i32)> = self
             .placements
             .keys()
@@ -525,14 +610,27 @@ impl WorldObjects {
             let Some(placements) = self.placements.get(&key).cloned() else {
                 continue;
             };
+            if self.lod.is_none() {
+                let text = assets.read_file("ini/loddistancetype.txt").map(|raw| archrust_data::ini::decrypt_ini(&raw)).unwrap_or_default();
+                self.lod = Some(archrust_data::lod::LodDistances::parse(&text));
+            }
             let mut meshes = Vec::new();
+            let mut lods = Vec::new();
+            let mut animated = Vec::new();
             for p in &placements {
-                if let Some(model) = self.model(renderer, assets, p.tid) {
+                // Modèle animé (tous ses groupes, voir `decor`) : posé à chaque image.
+                if let Some(model) = self.decor.model(renderer, assets, p.tid) {
+                    animated.push((model, p.matrix()));
+                } else if let Some(lod) = self.lod_model(renderer, assets, p.tid) {
+                    lods.push((lod, p.matrix()));
+                } else if let Some(model) = self.model(renderer, assets, p.tid) {
                     let world = p.matrix();
                     meshes.extend(model.iter().map(|(m, local)| (m.clone(), world * *local)));
                 }
             }
             self.sectors.insert(key, meshes);
+            self.lod_placed.insert(key, lods);
+            self.decor.set_sector(key, animated);
         }
     }
 
@@ -618,9 +716,115 @@ impl WorldObjects {
         false
     }
 
+    /// Distance (depuis `from`) du premier triangle de collision d'un objet bloquant
+    /// (`ApmObject` 0x100, modèle `COLLISION_DFF` sinon le modèle dessiné) coupé par le segment
+    /// `from` → `to` : contrainte de caméra aux objets d'Archonia (AgcdCamConstrain_Obj,
+    /// FUN_1408cf7f0). Sphère englobante d'abord (objets déjà chargés seulement).
+    pub fn segment_hit(&self, assets: &Assets, from: Vec3, to: Vec3) -> Option<f32> {
+        let seg = to - from;
+        let len = seg.length();
+        if len < 1.0 {
+            return None;
+        }
+        let dir = seg / len;
+        let (a, b) = (sector_of(from.x, from.z), sector_of(to.x, to.z));
+        let mut best: Option<f32> = None;
+        for sx in a.0.min(b.0) - 1..=a.0.max(b.0) + 1 {
+            for sy in a.1.min(b.1) - 1..=a.1.max(b.1) + 1 {
+                let Some(list) = self.placements.get(&(sx, sy)) else { continue };
+                for p in list.iter().filter(|p| p.apm_flags & APM_OBJECT_BLOCKING != 0) {
+                    let Some((center, radius)) = self.placed_bounds(p) else { continue };
+                    let t = (center - from).dot(dir).clamp(0.0, len);
+                    if (from + dir * t).distance(center) > radius {
+                        continue;
+                    }
+                    let Some(local) = self.collision_triangles(assets, p.tid) else { continue };
+                    let m = p.matrix();
+                    for tri in local.iter() {
+                        let [v0, v1, v2] = tri.map(|v| m.transform_point3(v));
+                        let (e1, e2) = (v1 - v0, v2 - v0);
+                        let h = dir.cross(e2);
+                        let det = e1.dot(h);
+                        if det.abs() < 1e-6 {
+                            continue;
+                        }
+                        let inv = 1.0 / det;
+                        let s = from - v0;
+                        let u = inv * s.dot(h);
+                        let q = s.cross(e1);
+                        let v = inv * dir.dot(q);
+                        if !(0.0..=1.0).contains(&u) || v < 0.0 || u + v > 1.0 {
+                            continue;
+                        }
+                        let d = inv * e2.dot(q);
+                        if d > 1.0 && d < len && best.is_none_or(|b| d < b) {
+                            best = Some(d);
+                        }
+                    }
+                }
+            }
+        }
+        best
+    }
+
+    /// Secteurs d'objets chargés à ±`range` secteurs de `center` (indices de secteur).
+    pub fn loaded_sectors_near(&self, center: (i32, i32), range: i32) -> usize {
+        self.sectors.keys().filter(|(sx, sy)| (sx - center.0).abs() <= range && (sy - center.1).abs() <= range).count()
+    }
+
+    /// Objets qui projettent une ombre sur le sol (AgcmShadow2, `FUN_140621fe0`, voir `shadow`) :
+    /// objets placés des secteurs chargés à ±`range` secteurs de `center` dont le modèle porte le bit
+    /// [`crate::shadow::CASTER_FLAG`] et dont la sphère englobante dépasse
+    /// [`crate::shadow::MIN_RADIUS`]. Modèle à niveaux de détail : son niveau le plus fin. Objets
+    /// animés (`decor`) : non pris (CHOIX d'ArchRust, leur pose change à chaque image).
+    pub fn shadow_casters(&self, assets: &Assets, center: (i32, i32), range: i32) -> Vec<(Arc<Mesh>, Mat4)> {
+        let mut out = Vec::new();
+        let mut flags = self.agcm_flags.lock().unwrap();
+        for (key, list) in &self.placements {
+            if (key.0 - center.0).abs() > range || (key.1 - center.1).abs() > range || !self.sectors.contains_key(key) {
+                continue;
+            }
+            for p in list {
+                let f = *flags.entry(p.tid).or_insert_with(|| template_flags(assets, p.tid));
+                if f & crate::shadow::CASTER_FLAG == 0 {
+                    continue;
+                }
+                let meshes = match (self.models.get(&p.tid), self.lod_models.get(&p.tid)) {
+                    (Some(Some(m)), _) => m.clone(),
+                    (_, Some(Some(l))) => match l.levels.iter().find_map(|m| m.clone()) {
+                        Some(m) => m,
+                        None => continue,
+                    },
+                    _ => continue,
+                };
+                let world = p.matrix();
+                let scale = p.scale.max_element();
+                let spheres: Vec<(Vec3, f32)> = meshes.iter().map(|(m, local)| (world.transform_point3(local.transform_point3(m.bounds_center)), m.bounds_radius * scale)).collect();
+                let c = spheres.iter().map(|s| s.0).sum::<Vec3>() / spheres.len().max(1) as f32;
+                let radius = spheres.iter().map(|(s, r)| s.distance(c) + r).fold(0.0, f32::max);
+                if !crate::shadow::casts_shadow(f, radius) {
+                    continue;
+                }
+                out.extend(meshes.iter().map(|(m, local)| (m.clone(), world * *local)));
+            }
+        }
+        out
+    }
+
     /// Objets à dessiner à moins de `max_distance` de `eye`.
     pub fn draw_items(&self, eye: Vec3, max_distance: f32) -> Vec<DrawItem> {
         let mut out = Vec::new();
+        if let Some(lod) = &self.lod {
+            for (model, world) in self.lod_placed.values().flatten() {
+                let distance = world.w_axis.truncate().distance(eye);
+                if distance > max_distance {
+                    continue;
+                }
+                let Some(meshes) = model.meshes(lod, distance, self.lod_factor) else { continue };
+                out.extend(meshes.iter().map(|(mesh, local)| DrawItem { mesh: mesh.clone(), model: *world * *local, tint: [1.0; 4], character: false }));
+            }
+        }
+        self.decor.draw_items(eye, max_distance, &mut out);
         for meshes in self.sectors.values() {
             for (mesh, model) in meshes {
                 let center = model.transform_point3(mesh.bounds_center);
@@ -662,6 +866,19 @@ mod tests {
         );
         assert_eq!(vec3_of("1.5, -2,3"), Some(Vec3::new(1.5, -2.0, 3.0)));
         assert_eq!(vec3_of("1,2"), None);
+    }
+
+    /// Avec les données du client (`ARCHRUST_GAME_DIR`) : drapeaux AgcmObject des modèles ; 2 168
+    /// des 5 508 modèles portent le bit des ombres projetées (`0x100000`), dont le TID 1 (0x902100).
+    #[test]
+    fn modeles_qui_projettent_une_ombre() {
+        let Some(dir) = std::env::var_os("ARCHRUST_GAME_DIR") else { return };
+        let assets = Assets::new(Some(dir.into()), &[]);
+        assert_eq!(template_flags(&assets, 1), 0x90_2100);
+        let table = assets.table("ini", "objecttemplate.ini").unwrap();
+        let tids: Vec<u32> = table.sections.iter().filter_map(|s| s.name.trim().parse().ok()).collect();
+        let casters = tids.iter().filter(|&&t| template_flags(&assets, t) & crate::shadow::CASTER_FLAG != 0).count();
+        assert_eq!((tids.len(), casters), (5508, 2168));
     }
 
     /// Avec les données du client (`ARCHRUST_GAME_DIR`) : l'escalier `튤란계단a` de Tullan (TID 462,

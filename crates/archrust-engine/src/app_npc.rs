@@ -14,7 +14,12 @@
 //!   agrandi. » : même sens que les codes d'ArchCore, correspondance non retrouvée dans l'exe).
 //! * Quêtes : celles du groupe du PNJ (`questgroup.ini`), texte de `questtemplate.ini` (le client
 //!   français n'en décrit qu'une soixantaine) ; journal par `L` ou `/quetes`.
-//! * Commandes : `/parler [nom]`, `/quetes`, `/prendrequete TID`, `/abandonner TID`.
+//! * Commandes : `/parler [nom]`, `/quetes`, `/prendrequete TID`, `/abandonner TID`, `/suivrequete TID`.
+//! * Journal de suivi (AgcmQuestJournal) : une quête prise s'y inscrit d'elle-même (op 1 réussie,
+//!   FUN_14065c3d0 → AGPMQUEST op 14, drapeau 1) ; « Ajouter au journal » (`CONTROL_QUEST_SHARE`) l'inscrit ou
+//!   l'en retire (drapeau 0) ; 10 quêtes au plus (`JournalMaxCount` dans la discussion). Le serveur rend le drapeau
+//!   au 5ᵉ entier du QUEST_INFO de l'op 4. Refus faute de place : op 8 (sysstr 447) et op 9 (« [quête] » puis
+//!   sysstr 440, en rouge), dans l'onglet système.
 //! * Achats (boutique des Shrines, EP8) : comme Archonia (`NPCT_BuyItemDirect`, FUN_1407b9b90), tout achat passe
 //!   par `UI_SHRINEITEM_BUY_CONFIRM` (voir `hud_social.rs`) : quantité n = celle de l'objet de boutique (1 si
 //!   nulle) ou celle choisie (Maj + clic droit), prix de l'itemdatatable.txt du client en facteur PRICE — sous-type
@@ -32,8 +37,7 @@ use crate::hud::{BankView, BuyBankView, DialogView, HudState, ItemUi, NpcUi, Por
 use crate::net::NetLink;
 use crate::scene::item_name_for_tid;
 use crate::ui::UiState;
-use archrust_data::ini::CodePage;
-use archrust_netclient::npc::{function, trade_result, NpcCommand, NpcEvent, NpcFunction, QuestProgress, STATUS_BANK};
+use archrust_netclient::npc::{function, op_quest, trade_result, NpcCommand, NpcEvent, NpcFunction, QuestProgress, STATUS_BANK, TRACK_MAX};
 use archrust_netclient::world::ItemRecord;
 use archrust_netclient::{Command, WorldEvent};
 use glam::Vec3;
@@ -236,21 +240,20 @@ pub struct NpcViews {
     quests: Option<(bool, String, Vec<QuestEntry>, String)>,
 }
 
-/// Texte d'un fichier du client, version française d'abord (`ini_fr/`), déchiffré.
+/// Texte d'un fichier du client, version française d'abord (`ini_fr/`), déchiffré. Les données du
+/// serveur passent avant, dans tous les dossiers : une table de valeurs exportée seulement dans `ini/`
+/// l'emporte sur la copie d'Archonia du dossier de langue (`ini_fr/itemoptiontable.txt`…).
 pub(super) fn client_text(assets: &Assets, file: &str) -> String {
-    crate::assets::text_dirs().iter().map(|d| client_text_in(assets, d, file)).find(|t| !t.is_empty()).unwrap_or_default()
+    let dirs = crate::assets::text_dirs();
+    if let Some(t) = dirs.iter().find_map(|d| assets.server_text(d, file)).filter(|t| !t.is_empty()) {
+        return t;
+    }
+    dirs.iter().map(|d| client_text_in(assets, d, file)).find(|t| !t.is_empty()).unwrap_or_default()
 }
 
 /// Texte d'un fichier d'un dossier de tables (`ini`, `ini_fr`…), déchiffré s'il le faut.
 pub(super) fn client_text_in(assets: &Assets, dir: &str, file: &str) -> String {
-    let Ok(raw) = assets.read_file(&format!("{dir}/{file}")) else { return String::new() };
-    let cp = CodePage::for_dir(dir);
-    let plain = raw.iter().take(256).filter(|&&b| b < 0x20 && b != b'\r' && b != b'\n' && b != b'\t').count() * 20 < raw.len().min(256);
-    if plain {
-        archrust_data::ini::decode_text(&raw, cp)
-    } else {
-        archrust_data::ini::decrypt_ini_with(&raw, cp)
-    }
+    assets.read_text(dir, file).unwrap_or_default()
 }
 
 /// Prix des pages de banque en plus : `bankslotprice.txt` (`Slot<TAB>Price`, la page 1 achetée en
@@ -508,6 +511,29 @@ impl NpcGlue {
 
     fn function_data(&self, npc: i32, f: i32) -> Option<i32> {
         self.functions.get(&npc)?.iter().find(|x| x.function == f)?.data
+    }
+
+    /// Quêtes inscrites au journal de suivi.
+    fn tracked_count(&self) -> usize {
+        self.journal.values().filter(|p| p.tracked).count()
+    }
+
+    /// Inscrit (`track`) une quête du journal au suivi ou l'en retire (AGPMQUEST op 14) ; au-delà de 10,
+    /// `JournalMaxCount` (rend le texte du refus à afficher).
+    fn set_tracked(&mut self, assets: &Assets, net: Option<&NetLink>, tid: i32, track: bool) -> Option<String> {
+        let full = self.tracked_count() >= TRACK_MAX;
+        let p = self.journal.get_mut(&tid)?;
+        if p.tracked == track {
+            return None;
+        }
+        if track && full {
+            let messages = client_text(assets, "uimessage.txt");
+            let text = messages.lines().find_map(|l| l.strip_prefix("JournalMaxCount\t")).map(clean).unwrap_or_default();
+            return Some(format!("|cffff8080{text}|r"));
+        }
+        p.tracked = track;
+        send(net, NpcCommand::QuestTrack { tid, track });
+        None
     }
 }
 
@@ -838,6 +864,12 @@ pub fn panel(
                 }
             }
             NpcUi::QuestAbandon(tid) => glue.abandon = Some(tid),
+            NpcUi::QuestTrack(tid) => {
+                let track = !glue.journal.get(&tid).is_some_and(|p| p.tracked);
+                if let Some(text) = glue.set_tracked(assets, net, tid, track) {
+                    ui.push_chat_in(0x10, text);
+                }
+            }
         }
     }
 
@@ -1094,8 +1126,12 @@ impl App {
                 let name = self.npc.quest_name(&assets, tid);
                 log::info!("quête {tid} : op {op}, réussite {success}");
                 let id = match (op, success) {
+                    // FUN_14065c3d0 : la quête prise entre au journal de suivi (op 14), s'il reste de la place.
                     (1, true) => {
-                        self.npc.journal.entry(tid).or_insert(QuestProgress { tid, monster_a: 0, monster_b: 0, done: false });
+                        self.npc.journal.entry(tid).or_insert(QuestProgress { tid, monster_a: 0, monster_b: 0, done: false, tracked: false });
+                        if self.npc.tracked_count() < TRACK_MAX {
+                            let _ = self.npc.set_tracked(&assets, self.net.as_ref(), tid, true);
+                        }
                         Some(436)
                     }
                     (3, true) => {
@@ -1113,7 +1149,11 @@ impl App {
                     self.npc.info = Some(self.npc.sys(&assets, id).replacen("%s", &name, 1)).filter(|t| !t.is_empty());
                 }
             }
-            NpcEvent::QuestJournal { progress, update } => {
+            NpcEvent::QuestJournal { mut progress, update } => {
+                // Op 10 : le suivi reste celui de l'op 4 (le 5ᵉ entier n'y est pas lu).
+                if update {
+                    progress.tracked = self.npc.journal.get(&progress.tid).is_some_and(|p| p.tracked);
+                }
                 let before = self.npc.journal.insert(progress.tid, progress);
                 // Progression : Archonia la montre dans le texte de la quête, rien dans la discussion.
                 if update && before != Some(progress) {
@@ -1121,6 +1161,17 @@ impl App {
                 }
             }
             NpcEvent::QuestsDone(list) => self.npc.done = list.into_iter().collect(),
+            // Op 8 (0x140656310) : sysstr 447 ; op 9 (0x1406567d0) : « [nom] » puis sysstr 440, en rouge.
+            NpcEvent::QuestNoSpace { op, tid } => {
+                log::info!("quête {tid} : op {op}, plus de place dans le sac");
+                let text = if op == op_quest::REWARD_NO_SPACE {
+                    self.npc.sys(&assets, 447)
+                } else {
+                    let name = self.npc.quest_name(&assets, tid);
+                    format!("|cffff0000[{name}] {}|r", self.npc.sys(&assets, 440))
+                };
+                self.ui.push_chat_in(0x10, text);
+            }
         }
     }
 
@@ -1213,6 +1264,26 @@ impl App {
         tids.iter().map(|&tid| QuestEntry { tid, name: self.npc.quest_name(&assets, tid), state: self.npc.state(tid) }).collect()
     }
 
+    /// Type de repère de minicarte d'un PNJ vu (FUN_14065c620, états de FUN_140659ad0) : 2 si une quête
+    /// du journal se rend chez lui (états 3 / 4, `Main_Minimap_Pos_NPC1`), sinon 1 s'il propose une
+    /// quête ni faite ni prise (état 1, `…_NPC2`), sinon 0 (`…_NPC0`) ; `None` : pas un PNJ. Les
+    /// conditions de prise (niveau, race, FUN_14027a750) ne sont pas vérifiées par ArchRust.
+    pub(super) fn npc_minimap_kind(&mut self, cid: i32) -> Option<u8> {
+        if !self.npc.functions.contains_key(&cid) {
+            return None;
+        }
+        let Some(group) = self.npc.function_data(cid, function::QUEST) else { return Some(0) };
+        let assets = self.assets.clone();
+        let Some((give, confirm)) = self.npc.data(&assets).groups.get(&group).cloned() else { return Some(0) };
+        if confirm.iter().any(|t| self.npc.journal.contains_key(t)) {
+            return Some(2);
+        }
+        if give.iter().any(|t| !self.npc.done.contains(&(*t as u32)) && !self.npc.journal.contains_key(t)) {
+            return Some(1);
+        }
+        Some(0)
+    }
+
     /// `/parler [nom]`, `/boutique`, `/banque`, `/registraire` (gestionnaire de guilde), `/quetespnj`, `/quetes`, `/prendrequete TID`,
     /// `/abandonner TID`.
     pub(super) fn npc_slash(&mut self, cmd: &str, arg: &str) -> bool {
@@ -1279,6 +1350,17 @@ impl App {
                     self.npc.quest_npc = None;
                 }
             }
+            // Journal de suivi : inscrire ou retirer une quête prise (comme « Ajouter au journal »).
+            "/suivrequete" | "/suivrequête" | "/trackquest" => match arg.trim().parse::<i32>() {
+                Ok(tid) if self.npc.journal.contains_key(&tid) => {
+                    let track = !self.npc.journal.get(&tid).is_some_and(|p| p.tracked);
+                    let assets = self.assets.clone();
+                    if let Some(text) = self.npc.set_tracked(&assets, self.net.as_ref(), tid, track) {
+                        self.ui.push_chat_in(0x10, text);
+                    }
+                }
+                _ => self.ui.push_chat(format!("[quête] usage : {cmd} TID d'une quête prise")),
+            },
             "/prendrequete" | "/prendrequête" | "/abandonner" | "/abandon" => match arg.trim().parse::<i32>() {
                 Ok(tid) => send(
                     self.net.as_ref(),
@@ -1295,6 +1377,28 @@ impl App {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// `client_text` : une table des données du serveur posée seulement dans `ini/` l'emporte sur la copie
+    /// d'Archonia du dossier de langue ; sans elle, le dossier de langue reste prioritaire.
+    #[test]
+    fn donnees_du_serveur_avant_le_dossier_de_langue() {
+        let root = std::env::temp_dir().join(format!("archrust-client-text-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let (game, server) = (root.join("Game"), root.join("server-data"));
+        let lang = crate::assets::text_dirs()[0];
+        for d in [game.join(lang), game.join("ini"), server.join("ini")] {
+            std::fs::create_dir_all(d).unwrap();
+        }
+        std::fs::write(game.join(lang).join("itemoptiontable.txt"), "TID\tLevel\r\n1\tarchonia\r\n").unwrap();
+        std::fs::write(game.join("ini/itemoptiontable.txt"), "TID\tLevel\r\n1\tclient\r\n").unwrap();
+        let assets = Assets::new(Some(game.clone()), &[]);
+        assert!(client_text(&assets, "itemoptiontable.txt").contains("archonia"));
+        std::fs::write(server.join("ini/itemoptiontable.txt"), "TID\tLevel\r\n1\tserveur\r\n").unwrap();
+        let assets = Assets::new(Some(game.clone()), &[]).with_server_data(Some(&server));
+        assert!(client_text(&assets, "itemoptiontable.txt").contains("serveur"));
+        assert!(client_text_in(&assets, "ini", "itemoptiontable.txt").contains("serveur"));
+        let _ = std::fs::remove_dir_all(&root);
+    }
 
     #[test]
     fn balise_des_objets_de_quete() {

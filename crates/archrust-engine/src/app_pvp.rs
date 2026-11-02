@@ -4,8 +4,12 @@
 //!   l'entier (champ 3) du paquet.
 //! * Entrée dans une zone sûre, libre ou de combat : le client les annonce lui-même au changement de région
 //!   (bits 2-3 du `Type` de RegionTemplate.ini), le serveur ne les envoie pas.
-//! * Ennemis déclarés (op 2, 4, 6) : on les attaque sans Ctrl ; un autre joueur ne s'attaque qu'avec Ctrl (attaque
-//!   forcée, champ 6 de l'action).
+//! * Ennemis déclarés (op 2, 4, 6, 8) : on les attaque sans Ctrl ; un autre joueur ne s'attaque qu'avec Ctrl (attaque
+//!   forcée, champ 6 de l'action). Un membre du groupe n'entre pas dans la liste (`FUN_1402d6780`).
+//! * Guildes ennemies (op 10, 12, 14, 16) : hors zone sûre, tout membre d'une guilde ennemie, ou d'une guilde
+//!   hostile (AgpmGuild), est un ennemi (EstEnnemi, `FUN_1402d8b90`) ; la sûreté de l'autre joueur n'est pas
+//!   connue du client ArchRust : celle de la région du joueur est prise pour les deux. Archonia ne change pas la
+//!   couleur du nom d'un ennemi (`FUN_140827ca0` : premier attaquant et meurtrier seulement) ; ArchRust non plus.
 //! * Statut de premier attaquant (champ 12 du personnage) et points de meurtrier (facteur de statut 11) : couleur
 //!   du nom (`IDColor_FirstAttacker`, `IDColor_MurdererLevel1-3` de color.ini, `FUN_140827ca0`) et, pour le joueur,
 //!   « MurdererGetPoint », « BecomeMurdererLv1-3 » et « FreeMurdererLv1-3 » (`FUN_1404fc5e0`).
@@ -120,8 +124,10 @@ fn ini_color(assets: &Assets, key: &str) -> Option<u32> {
 #[derive(Default)]
 pub struct PvpGlue {
     messages: Option<HashMap<String, String>>,
-    /// Ennemis déclarés du joueur (op 2 / 4 / 6).
+    /// Ennemis déclarés du joueur (op 2 / 4 / 6 / 8).
     pub enemies: HashSet<i32>,
+    /// Guildes ennemies du joueur (op 10 / 12 / 14 / 16), en minuscules, et leur mode PvP.
+    pub enemy_guilds: HashMap<String, i64>,
     pub wins: i64,
     pub losses: i64,
     /// Statut de premier attaquant et points de meurtrier connus, par CID.
@@ -224,6 +230,7 @@ impl App {
             WorldEvent::CharacterSeen(c) => (c.cid, c.stats.as_ref()),
             WorldEvent::Disconnected(_) | WorldEvent::Connected => {
                 self.pvp.enemies.clear();
+                self.pvp.enemy_guilds.clear();
                 self.pvp.marks.clear();
                 self.pvp.safety = None;
                 return;
@@ -264,13 +271,28 @@ impl App {
                 self.pvp.losses = ev.lose;
                 self.hud.stats.pvp = Some((ev.win, ev.lose));
             }
-            op::ADD_ENEMY => {
+            // FUN_1402d6780 : refusé pour un membre du groupe du joueur.
+            op::ADD_ENEMY if !self.party.state.contains(ev.target as i32) => {
                 self.pvp.enemies.insert(ev.target as i32);
             }
+            op::ADD_ENEMY => {}
             op::REMOVE_ENEMY => {
                 self.pvp.enemies.remove(&(ev.target as i32));
             }
             op::INIT_ENEMY => self.pvp.enemies.clear(),
+            // Ennemi déjà connu : mode et instant actualisés (le client n'en montre rien).
+            op::UPDATE_ENEMY => log::debug!("ennemi {} actualisé (mode {:?})", ev.target, ev.mode),
+            op::ADD_ENEMY_GUILD | op::UPDATE_ENEMY_GUILD if !ev.text1.is_empty() => {
+                // Op 16 (`FUN_1402d78e0`) : guilde déjà connue seulement.
+                let key = ev.text1.to_lowercase();
+                if ev.op == op::ADD_ENEMY_GUILD || self.pvp.enemy_guilds.contains_key(&key) {
+                    self.pvp.enemy_guilds.insert(key, ev.mode.unwrap_or(-1));
+                }
+            }
+            op::REMOVE_ENEMY_GUILD => {
+                self.pvp.enemy_guilds.remove(&ev.text1.to_lowercase());
+            }
+            op::INIT_ENEMY_GUILD => self.pvp.enemy_guilds.clear(),
             op::SYSTEM_MESSAGE => {
                 let code = ev.cid;
                 let args: Vec<String> = match code {
@@ -318,7 +340,20 @@ impl App {
     /// juge du reste (zones, niveaux, amis).
     pub(super) fn pvp_target(&self, cid: i32) -> bool {
         let player = self.entities.iter().any(|e| e.cid == cid && e.is_player);
-        player && (self.pvp.enemies.contains(&cid) || self.addon_glue.modifiers.control_key())
+        player && (self.pvp_enemy(cid) || self.addon_glue.modifiers.control_key())
+    }
+
+    /// EstEnnemi (`FUN_1402d8b90`, sans le combat de guildes, vu par `GuildState::is_enemy`) : ennemi déclaré ;
+    /// hors zone sûre, membre d'une guilde ennemie (op 10) ou hostile.
+    pub(super) fn pvp_enemy(&self, cid: i32) -> bool {
+        if self.pvp.enemies.contains(&cid) {
+            return true;
+        }
+        if self.pvp.safety.is_none_or(|s| s == 0) {
+            return false;
+        }
+        let Some(guild) = self.guild.state.links.get(&cid).filter(|g| !g.is_empty()) else { return false };
+        enemy_guild(&self.pvp.enemy_guilds, &self.guild.state.hostiles, guild)
     }
 
     /// Couleur du nom d'un joueur selon son statut (format `0xAABBGGRR`), sinon `None`.
@@ -350,9 +385,22 @@ impl App {
     }
 }
 
+/// Guilde dans les guildes ennemies (op 10) ou hostiles (casse ignorée).
+fn enemy_guild(enemies: &HashMap<String, i64>, hostiles: &[(String, i64)], guild: &str) -> bool {
+    enemies.contains_key(&guild.to_lowercase()) || hostiles.iter().any(|(g, _)| g.eq_ignore_ascii_case(guild))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn guildes_ennemies_et_hostiles() {
+        let enemies = HashMap::from([("lames".to_string(), 2)]);
+        let hostiles = vec![("Corbeaux".to_string(), 0)];
+        assert!(enemy_guild(&enemies, &hostiles, "Lames") && enemy_guild(&enemies, &hostiles, "corbeaux"));
+        assert!(!enemy_guild(&enemies, &hostiles, "Amis"));
+    }
 
     #[test]
     fn textes_a_trous() {

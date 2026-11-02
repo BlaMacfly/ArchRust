@@ -75,6 +75,17 @@
 //!   `GWARE_NOT_ENOUGH_MONEY`) ; la fenêtre se ferme (op 2) si le joueur s'éloigne de plus de 149 du point
 //!   d'ouverture (FUN_1405fc830).
 //!
+//! * combattants des types 3 et 4 (survie de groupe, survie individuelle) : après la confirmation du défi ou
+//!   l'acceptation, `UI_GuildBattleMember` (AgcmUIGuildBattleMember) : membres en ligne, le chef coché d'office
+//!   (`GuildBattleMember_NotEraseMaster`), clic sur une ligne = cocher (`OP_GuildBattleListSelect`), monter et
+//!   descendre la ligne choisie (`OP_GuildBattleListUp/Down`), tirage au sort (`OP_GuildBattleListRandomSelect`),
+//!   « Terminer » (`OP_GuildBattleListDone`, FUN_1408c59a0) : moins de cochés que l'effectif →
+//!   `GuildBattleMember_LackMember`, sinon op 14 avec les premiers cochés puis la demande (op 15) ou l'acceptation
+//!   (op 16) ; `GuildBattleMember_MemberSelect` sous la liste ;
+//! * combattants et points (ops 26 et 27, FUN_14084f200 / FUN_14084f2c0) : `UI_GuildBattleResult`, sa guilde à
+//!   gauche, l'adverse à droite, ouverte au résultat (op 25, FUN_14084f400 → FUN_1404ded30) ; manche (op 46) ;
+//!   trêve refusée (op 42) : `Guild_Hostile_Leave_Reject`.
+//!
 //! Commandes d'ArchRust pour les combats : `/gguerre guilde` (fenêtre du défi), `/gguerre appliquer`,
 //! `/gguerre annuler`, `/gg` (abandon) ; pour les relations : `/gliste allies|hostiles`, `/galliance guilde|quitter`,
 //! `/ghostile guilde`, `/gtreve guilde`.
@@ -87,7 +98,7 @@ use super::App;
 use crate::assets::Assets;
 use crate::hud::{GridCell, GuildEdit, GuildRow, GuildUi, GuildView, GwareItem, GwareView, HudState, ItemUi, ListSpec, PageColors};
 use crate::net::NetLink;
-use archrust_netclient::guild::{self, GuildBattle, GuildCommand, GuildEvent, GuildMember, GuildNotice, GuildState};
+use archrust_netclient::guild::{self, BattleFighter, GuildBattle, GuildCommand, GuildEvent, GuildMember, GuildNotice, GuildState};
 use archrust_netclient::party::PartyCommand;
 use archrust_netclient::Command;
 use std::collections::{HashMap, HashSet};
@@ -242,6 +253,8 @@ enum Win {
     Mark,
     MarkConfirm,
     GBattle,
+    BattleMember,
+    BattleResult,
 }
 
 impl Win {
@@ -261,6 +274,8 @@ impl Win {
             Win::Mark => "Guild_Mark",
             Win::MarkConfirm => "Guild_MarkConfirm",
             Win::GBattle => "Guild_GBattle",
+            Win::BattleMember => "UI_GuildBattleMember",
+            Win::BattleResult => "UI_GuildBattleResult",
         }
     }
 }
@@ -393,9 +408,64 @@ pub struct GuildGlue {
     /// Combat de guildes : choix de `Guild_GBattle`, annonce du centre de l'écran (texte, couleur ARGB, fin).
     battle_form: BattleForm,
     battle_notice: Option<(String, u32, std::time::Instant)>,
+    /// `UI_GuildBattleMember` ouverte : choix des combattants.
+    picker: Option<BattlePicker>,
+    /// Combattants connus (ops 26 et 27) : sa guilde, la guilde adverse ; première ligne de `UI_GuildBattleResult`.
+    fighters: (Vec<BattleFighter>, Vec<BattleFighter>),
+    result_first: usize,
+    /// Dernier combat terminé (op 25), pour `UI_GuildBattleResult`.
+    last_battle: Option<GuildBattle>,
     gware: Gware,
     /// Clics de la dernière image, traités par `guild_frame`.
     clicks: Vec<GuildUi>,
+}
+
+/// Choix des combattants (`UI_GuildBattleMember`) : demande (`accept` = `None`) ou acceptation du défi de cette
+/// guilde, effectif exigé, membres (nom, niveau, coché), ligne choisie, première ligne affichée.
+#[derive(Debug, Clone, Default)]
+struct BattlePicker {
+    accept: Option<String>,
+    count: i32,
+    rows: Vec<(String, i64, bool)>,
+    cursor: Option<usize>,
+    first: usize,
+}
+
+/// Lignes visibles des listes de combat (200 / 20 et 160 / 16).
+const BATTLE_ROWS: usize = 10;
+
+impl BattlePicker {
+    /// Membres en ligne de la guilde, le chef en tête et coché.
+    fn new(state: &GuildState, accept: Option<String>, count: i32) -> Self {
+        let mut members: Vec<&GuildMember> = state.members.iter().filter(|m| m.active() && m.online).collect();
+        members.sort_by_key(|m| m.rank != guild::rank::MASTER);
+        let rows = members.iter().map(|m| (m.name.clone(), m.level, m.rank == guild::rank::MASTER)).collect();
+        BattlePicker { accept, count, rows, cursor: None, first: 0 }
+    }
+
+    /// Noms cochés, dans l'ordre de la liste.
+    fn chosen(&self) -> Vec<String> {
+        self.rows.iter().filter(|r| r.2).map(|r| r.0.clone()).collect()
+    }
+
+    /// Tirage au sort (`OP_GuildBattleListRandomSelect`) : le chef reste, les autres places au hasard.
+    fn random(&mut self, master: &str, seed: u64) {
+        let mut x = seed | 1;
+        let mut others: Vec<usize> = (0..self.rows.len()).filter(|i| !self.rows[*i].0.eq_ignore_ascii_case(master)).collect();
+        for i in (1..others.len()).rev() {
+            x ^= x << 13;
+            x ^= x >> 7;
+            x ^= x << 17;
+            others.swap(i, (x % (i as u64 + 1)) as usize);
+        }
+        let need = (self.count.max(0) as usize).saturating_sub(self.rows.iter().filter(|r| r.0.eq_ignore_ascii_case(master)).count());
+        for r in self.rows.iter_mut() {
+            r.2 = r.0.eq_ignore_ascii_case(master);
+        }
+        for i in others.into_iter().take(need) {
+            self.rows[i].2 = true;
+        }
+    }
 }
 
 impl GuildGlue {
@@ -618,6 +688,8 @@ pub fn panel(ctx: &egui::Context, glue: &mut GuildGlue, hud: &mut HudState, asse
         Win::Mark,
         Win::MarkConfirm,
         Win::GBattle,
+        Win::BattleMember,
+        Win::BattleResult,
         Win::CreateRequest,
         Win::CreateComplete,
         Win::DestroyConfirm,
@@ -893,6 +965,42 @@ pub fn panel(ctx: &egui::Context, glue: &mut GuildGlue, hud: &mut HudState, asse
                     v.disabled.extend(["CONTROL_4060", "CONTROL_29955", "CONTROL_17192", "CONTROL_6484", "CONTROL_21248", "CONTROL_12900", "CONTROL_12454"]);
                 }
             }
+            // UI_GuildBattleMember : numéro, nom, niveau, coché ; `GuildBattleMember_MemberSelect` (effectif).
+            Win::BattleMember => {
+                let Some(p) = &glue.picker else { continue };
+                v.list = Some(ListSpec::BATTLE_MEMBERS);
+                v.texts.insert("CONTROL_8021", printf(&d.msg("GuildBattleMember_MemberSelect"), &[&p.count]));
+                v.rows = p.rows.iter().enumerate().skip(p.first).take(BATTLE_ROWS).map(|(i, (name, level, on))| GuildRow { cols: vec![(i + 1).to_string(), name.clone(), level.to_string()], online: Some(*on) }).collect();
+                v.selected = p.cursor.and_then(|c| c.checked_sub(p.first)).filter(|c| *c < BATTLE_ROWS);
+            }
+            // UI_GuildBattleResult : sa guilde à gauche, l'adverse à droite, colonnes de points selon le type
+            // (`GuildBattleResult_Point`, ou `GuildBattleResult_Kill/Dead` hors combat aux points), totaux = scores.
+            Win::BattleResult => {
+                v.list = Some(ListSpec::BATTLE_RESULT);
+                let b = glue.state.battle.clone().or_else(|| glue.last_battle.clone()).unwrap_or_default();
+                let points_kind = b.kind == 0;
+                let cell = |f: &BattleFighter| if points_kind { f.points.to_string() } else { format!("{}/{}", f.b, f.c) };
+                v.texts.insert("GuildScoreInfo", d.msg(guild::battle::KINDS[(b.kind.max(0) as usize).min(4)]));
+                v.texts.insert("CONTROL_27421", guild_name.clone());
+                v.texts.insert("CONTROL_9089", b.enemy.clone());
+                let head = d.msg(if points_kind { "GuildBattleResult_Point" } else { "GuildBattleResult_Kill/Dead" });
+                v.texts.insert("CONTROL_29653", head.clone());
+                v.texts.insert("CONTROL_6008", head);
+                v.texts.insert("CONTROL_27273", b.score.to_string());
+                v.texts.insert("CONTROL_4379", b.enemy_score.to_string());
+                v.texts.insert("GuildScoreWinInfo", String::new());
+                v.texts.insert("GuildSroceLoseInfo", String::new());
+                let (left, right) = &glue.fighters;
+                let n = left.len().max(right.len());
+                v.rows = (glue.result_first..n)
+                    .take(BATTLE_ROWS)
+                    .map(|i| {
+                        let l = left.get(i);
+                        let r = right.get(i);
+                        GuildRow { cols: vec![l.map(|f| f.name.clone()).unwrap_or_default(), l.map(cell).unwrap_or_default(), r.map(|f| f.name.clone()).unwrap_or_default(), r.map(cell).unwrap_or_default()], online: None }
+                    })
+                    .collect();
+            }
         }
         crate::hud::draw_guild_window(ctx, hud, assets, win.name(), v, &colors, &mut out);
     }
@@ -1104,6 +1212,28 @@ impl App {
                 return;
             }
             GuildEvent::Battle { op, battle, .. } => self.guild_battle_event(*op, battle),
+            // Op 26 (FUN_14084f200) : une ligne, à gauche pour sa guilde, à droite sinon.
+            GuildEvent::BattleFighter { guild, fighter } => {
+                let mine = self.guild.state.name().eq_ignore_ascii_case(guild);
+                let side = if mine { &mut self.guild.fighters.0 } else { &mut self.guild.fighters.1 };
+                match side.iter_mut().find(|f| f.name.eq_ignore_ascii_case(&fighter.name)) {
+                    Some(f) => (f.points, f.b, f.c) = (fighter.points, fighter.b, fighter.c),
+                    None => side.push(fighter.clone()),
+                }
+                return;
+            }
+            // Op 27 (FUN_1404dee40) : listes entières ; le quatrième entier (-1) ne change pas l'ancien.
+            GuildEvent::BattleFighters { guild, mine, enemy } => {
+                let (l, r) = if self.guild.state.name().eq_ignore_ascii_case(guild) { (mine, enemy) } else { (enemy, mine) };
+                merge_fighters(&mut self.guild.fighters.0, l);
+                merge_fighters(&mut self.guild.fighters.1, r);
+                return;
+            }
+            GuildEvent::HostileLeaveRejected { .. } => {
+                let t = self.guild.data.as_ref().map(|d| d.msg("Guild_Hostile_Leave_Reject")).unwrap_or_default();
+                self.guild_message(&t, 0xFFFF_FFFF);
+                return;
+            }
             // Demande reçue par le chef (FUN_1408cc440, FUN_1408cbb00, FUN_1408cba20) : rien s'il refuse les
             // relations de guilde (options, bit 0x40).
             GuildEvent::RelationAsk { kind, guild, other, master } => {
@@ -1195,8 +1325,10 @@ impl App {
                 let t = d.msg("Guild_Msg_Battle_Cancel_Accpet");
                 self.guild_message(&t, white);
             }
-            // Début (FUN_14084f610) : sysstr 0x152 en rouge 5 s, Guild_Msg_Battle_Start.
+            // Début (FUN_14084f610) : sysstr 0x152 en rouge 5 s, Guild_Msg_Battle_Start ; combattants remis à zéro.
             guild::op::BATTLE_START => {
+                self.guild.fighters = Default::default();
+                self.guild.result_first = 0;
                 let t = d.msg("Guild_Msg_Battle_Start");
                 self.guild.battle_notice = Some((sys(0x152), 0xFFFF_0000, until));
                 self.guild_message(&t, white);
@@ -1213,6 +1345,14 @@ impl App {
                 };
                 let t = if b.result <= 3 { printf(&d.msg(key), &[&b.score, &b.enemy_score]) } else { d.msg(key) };
                 self.guild.battle_notice = None;
+                // FUN_1404ded30 : `UI_GuildBattleResult` avec le combat terminé (type et adversaire du combat en cours).
+                let mut last = self.guild.state.battle.clone().unwrap_or_default();
+                (last.score, last.enemy_score, last.result) = (b.score, b.enemy_score, b.result);
+                if last.enemy.is_empty() {
+                    last.enemy = b.enemy.clone();
+                }
+                self.guild.last_battle = Some(last);
+                self.guild.open.insert(Win::BattleResult);
                 self.guild_message(&t, white);
             }
             _ => {}
@@ -1476,7 +1616,14 @@ impl App {
             Ask::JointAccept(other) => send(net, GuildCommand::JointAnswer { guild, other, yes: ok }),
             Ask::HostileAccept(other) => send(net, GuildCommand::HostileAnswer { guild, other, yes: ok }),
             Ask::HostileLeaveAccept(other) => send(net, GuildCommand::HostileLeaveAnswer { guild, other, yes: ok }),
-            // Défi reçu (FUN_14084e7a0) : OK → op 16 ; Annuler → op 17 et Guild_Msg_Battle_Reject.
+            // Défi reçu (FUN_14084e7a0) : OK → op 16 ; Annuler → op 17 et Guild_Msg_Battle_Reject. Types 3 et 4 :
+            // l'acceptation attend le choix des combattants (`UI_GuildBattleMember`, mode 1).
+            Ask::BattleAnswer(enemy) if ok && self.guild.battle_form.men().get(self.guild.battle_form.man).is_some() => {
+                self.guild.open.remove(&Win::GBattle);
+                let count = self.guild.battle_form.men()[self.guild.battle_form.man];
+                self.guild.picker = Some(BattlePicker::new(&self.guild.state, Some(enemy), count));
+                self.guild.open.insert(Win::BattleMember);
+            }
             Ask::BattleAnswer(enemy) => {
                 self.guild.open.remove(&Win::GBattle);
                 send(net, GuildCommand::BattleAnswer { guild, enemy, yes: ok });
@@ -1498,6 +1645,12 @@ impl App {
                 self.guild.open.remove(&Win::GBattle);
                 let duration = guild::battle::MINUTES[f.time.min(5)] * 60;
                 let person = f.men().get(f.man).copied().unwrap_or(0);
+                // Types 3 et 4 : la demande part après le choix des combattants (mode 0).
+                if person > 0 {
+                    self.guild.picker = Some(BattlePicker::new(&self.guild.state, None, person));
+                    self.guild.open.insert(Win::BattleMember);
+                    return;
+                }
                 send(net, GuildCommand::BattleRequest { guild, enemy: f.enemy, kind: f.kind as i32, duration, person });
             }
             Ask::BattleCancel => send(net, GuildCommand::BattleCancel { guild }),
@@ -1614,6 +1767,22 @@ impl App {
                 self.guild.list_selected = (i < self.guild.list_entries().len()).then_some(i);
                 return;
             }
+            // OP_GuildBattleListSelect : la ligne est choisie et cochée (ou décochée, sauf le chef).
+            GuildUi::Row(list, i) if list == ListSpec::BATTLE_MEMBERS.list => {
+                let master = self.guild.state.info.as_ref().map(|g| g.master.clone()).unwrap_or_default();
+                let Some(p) = self.guild.picker.as_mut() else { return };
+                let at = p.first + i;
+                let Some(row) = p.rows.get_mut(at) else { return };
+                p.cursor = Some(at);
+                if row.2 && row.0.eq_ignore_ascii_case(&master) {
+                    let t = self.guild.data.as_ref().map(|d| d.msg("GuildBattleMember_NotEraseMaster")).unwrap_or_default();
+                    self.guild_message(&t, 0xFFFF_FFFF);
+                } else {
+                    row.2 = !row.2;
+                }
+                return;
+            }
+            GuildUi::Row(list, _) if list == ListSpec::BATTLE_RESULT.list => return,
             GuildUi::Row(_, i) => {
                 self.guild.selected = (self.guild.page * PAGE + i < self.guild.state.members.len()).then_some(i);
                 return;
@@ -1816,6 +1985,42 @@ impl App {
                 self.guild.ask = Some((Ask::BattleRequest, text));
             }
             ("Guild_GBattle", "CONTROL_9564" | "CONTROL_26698") => close(&mut self.guild, Win::GBattle),
+            // UI_GuildBattleMember : monter / descendre la ligne choisie, tirage, défilement, fermeture, fin.
+            ("UI_GuildBattleMember", "CONTROL_24557" | "CONTROL_2784") => {
+                let Some(p) = self.guild.picker.as_mut() else { return };
+                let Some(c) = p.cursor else { return };
+                let to = if control == "CONTROL_24557" { c.checked_sub(1) } else { Some(c + 1).filter(|t| *t < p.rows.len()) };
+                if let Some(t) = to {
+                    p.rows.swap(c, t);
+                    p.cursor = Some(t);
+                    p.first = p.first.min(t).max((t + 1).saturating_sub(BATTLE_ROWS));
+                }
+            }
+            ("UI_GuildBattleMember", "CONTROL_13140") => {
+                let master = self.guild.state.info.as_ref().map(|g| g.master.clone()).unwrap_or_default();
+                let seed = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(1, |d| d.as_nanos() as u64);
+                if let Some(p) = self.guild.picker.as_mut() {
+                    p.random(&master, seed);
+                }
+            }
+            ("UI_GuildBattleMember", "CONTROL_13872" | "CONTROL_2495") => {
+                if let Some(p) = self.guild.picker.as_mut() {
+                    let last = p.rows.len().saturating_sub(BATTLE_ROWS);
+                    p.first = if control == "CONTROL_13872" { p.first.saturating_sub(1) } else { (p.first + 1).min(last) };
+                }
+            }
+            ("UI_GuildBattleMember", "CONTROL_17266") => {
+                self.guild.picker = None;
+                close(&mut self.guild, Win::BattleMember);
+            }
+            ("UI_GuildBattleMember", "CONTROL_15682") => self.guild_battle_members_done(),
+            ("UI_GuildBattleResult", "CONTROL_29570") => close(&mut self.guild, Win::BattleResult),
+            ("UI_GuildBattleResult", "CONTROL_14117" | "CONTROL_15119") => {
+                let n = self.guild.fighters.0.len().max(self.guild.fighters.1.len());
+                let last = n.saturating_sub(BATTLE_ROWS);
+                let f = &mut self.guild.result_first;
+                *f = if control == "CONTROL_14117" { f.saturating_sub(1) } else { (*f + 1).min(last) };
+            }
             // Guild_Appoint_Click (FUN_1408c0340) : le second se voit retirer son rang après confirmation ;
             // sinon la nomination part aussitôt.
             ("Guild_Member", "CONTROL_31321") => {
@@ -2007,15 +2212,73 @@ impl App {
     }
 
     /// Déconnexion : plus de guilde ni de fenêtre.
+    /// « Terminer » d'`UI_GuildBattleMember` (FUN_1408c59a0) : assez de cochés → op 14, puis la demande (mode 0,
+    /// FUN_14084e150) ou l'acceptation (mode 1, FUN_14084e080).
+    fn guild_battle_members_done(&mut self) {
+        let Some(p) = self.guild.picker.clone() else { return };
+        let chosen = p.chosen();
+        if (chosen.len() as i32) < p.count {
+            let t = self.guild.data.as_ref().map(|d| d.msg("GuildBattleMember_LackMember")).unwrap_or_default();
+            self.guild_message(&t, 0xFFFF_FFFF);
+            return;
+        }
+        self.guild.picker = None;
+        self.guild.open.remove(&Win::BattleMember);
+        let guild = self.guild.state.name().to_string();
+        let net = self.net.as_ref();
+        send(net, GuildCommand::BattlePerson { guild: guild.clone(), count: p.count as i16, names: chosen });
+        match p.accept {
+            Some(enemy) => send(net, GuildCommand::BattleAnswer { guild, enemy, yes: true }),
+            None => {
+                let f = self.guild.battle_form.clone();
+                let duration = guild::battle::MINUTES[f.time.min(5)] * 60;
+                send(net, GuildCommand::BattleRequest { guild, enemy: f.enemy, kind: f.kind as i32, duration, person: p.count });
+            }
+        }
+    }
+
     pub(super) fn guild_reset(&mut self) {
         let data = self.guild.data.take();
         self.guild = GuildGlue { data, ..Default::default() };
     }
 }
 
+/// Op 27 : listes reçues ; un quatrième entier à -1 garde l'ancien (FUN_1404dee40).
+fn merge_fighters(side: &mut Vec<BattleFighter>, list: &[BattleFighter]) {
+    for f in list {
+        match side.iter_mut().find(|x| x.name.eq_ignore_ascii_case(&f.name)) {
+            Some(x) => {
+                (x.points, x.b, x.c) = (f.points, f.b, f.c);
+                if f.d != -1 {
+                    x.d = f.d;
+                }
+            }
+            None => side.push(f.clone()),
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn choix_des_combattants() {
+        let mut s = GuildState::default();
+        for (name, rank, online) in [("Chef", guild::rank::MASTER, true), ("Bo", 1, true), ("Zed", 1, false), ("Al", 1, true), ("Ny", 1, true)] {
+            s.members.push(GuildMember { name: name.into(), rank, online, level: 30, ..Default::default() });
+        }
+        let mut p = BattlePicker::new(&s, None, 3);
+        assert_eq!(p.rows.iter().map(|r| r.0.as_str()).collect::<Vec<_>>(), ["Chef", "Bo", "Al", "Ny"]);
+        assert_eq!(p.chosen(), vec!["Chef".to_string()]);
+        p.random("Chef", 12345);
+        let c = p.chosen();
+        assert_eq!(c.len(), 3);
+        assert!(c.contains(&"Chef".to_string()));
+        let mut side = vec![BattleFighter { name: "Al".into(), points: 1, d: 7, ..Default::default() }];
+        merge_fighters(&mut side, &[BattleFighter { name: "al".into(), points: 5, d: -1, ..Default::default() }, BattleFighter { name: "Bo".into(), ..Default::default() }]);
+        assert_eq!((side.len(), side[0].points, side[0].d), (2, 5, 7));
+    }
 
     #[test]
     fn textes_d_archonia() {

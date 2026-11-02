@@ -48,6 +48,11 @@ struct Cli {
     /// en cours de jeu.
     #[arg(long, global = true, default_value = "assets")]
     assets: PathBuf,
+    /// Dossier des données du serveur (tables écrites par `archcore export-client-tables`), lu avant
+    /// les packs et le client. Par défaut : `ARCHRUST_SERVER_DATA`, puis `server-data/` à côté de
+    /// `realmlist.wtf` (exécutable, dossier courant, `Game`).
+    #[arg(long, global = true)]
+    server_data: Option<PathBuf>,
     #[command(subcommand)]
     cmd: Cmd,
 }
@@ -236,6 +241,7 @@ fn main() -> Result<()> {
                 game_dir,
                 addons_dir: cli.addons,
                 patch_dirs,
+                server_data: cli.server_data.clone(),
                 saved_dir: PathBuf::from("saved-variables"),
                 title: "ArchRust".into(),
                 preview_model: preview,
@@ -263,7 +269,7 @@ fn main() -> Result<()> {
         Cmd::Inspect {
             what: Inspect::Gltf { file },
         } => inspect_gltf(&file),
-        Cmd::Inspect { what } => inspect(&require_client("inspect")?, &patch_dirs, what),
+        Cmd::Inspect { what } => inspect(&require_client("inspect")?, &patch_dirs, cli.server_data.as_deref(), what),
         Cmd::Export { dir, name, out } => {
             let assets = Assets::new(Some(require_client("export")?), &patch_dirs);
             export_obj(&assets, &dir, &name, &out)
@@ -596,8 +602,10 @@ fn inspect_gltf(file: &Path) -> Result<()> {
     Ok(())
 }
 
-fn inspect(game: &PathBuf, patch_dirs: &[PathBuf], what: Inspect) -> Result<()> {
-    let assets = Assets::new(Some(game.clone()), patch_dirs);
+fn inspect(game: &PathBuf, patch_dirs: &[PathBuf], server_data: Option<&Path>, what: Inspect) -> Result<()> {
+    // Tables : données du serveur d'abord, comme en jeu.
+    let server_data = archrust_engine::server_data::find_dir(server_data, Some(game));
+    let assets = Assets::new(Some(game.clone()), patch_dirs).with_server_data(server_data.as_deref());
     match what {
         Inspect::Gltf { file } => inspect_gltf(&file)?,
         Inspect::Pack { dir, limit } => {

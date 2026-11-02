@@ -17,6 +17,15 @@
 //!     → op 8 (action 2 : 1 cible, 2 facteurs du résultat comme pour le combat)
 //! AGPMSKILL op 3 (2 base (3, CID), 9 bloc de 220 octets) : part des compétences des caractéristiques secondaires
 //!     (voir [`SkillAttach`]) ; Archonia copie le champ 9 de tout paquet AGPMSKILL qui le porte.
+//! AGPMSKILL S → C (réception 0x1402f5b70) :
+//!     op 6 (2 base, 8 minis SKILL_BUFF) : tous les effets du personnage (remplace sa liste, rappel 12)
+//!     op 10 (1 genre d'effet, 2 base du lanceur, 4 CID de la cible) : effet secondaire (1 explosion de fin
+//!         d'effet, 2 téléport, 3 / 4 absorption PM / PV, 5 / 6 conversion, 7 libération, 8 pierre de lentille,
+//!         9 parchemin de détection, 10 soin) ; rappel 9, abonné non identifié : rien d'affiché
+//!     op 14 (1 bonus, 2 base) : bonus de niveau de toutes les compétences (attache+0x854, < 31)
+//!     op 15 (1 identifiant, 2 base, 4 TID) : recharge de la compétence remise à zéro (FUN_1402ff450)
+//!     op 16 (1 identifiant, 2 base, 4 niveau) : bonus de niveau d'une compétence (compétence+0x188)
+//!     (op 9 ignorée ; op 17, recharge imposée, ajout d'Archonia hors épisode 8 : non reprise)
 //! ```
 
 use crate::world::{ActionFactorPoints, WorldEvent};
@@ -31,8 +40,13 @@ pub mod op {
     pub const UPDATE: i64 = 2;
     /// Données attachées du personnage (champ 9 seul ; FUN_1402f5b70 n'a pas de cas 3).
     pub const ATTACH: i64 = 3;
+    pub const ALL_BUFFED: i64 = 6;
     pub const CAST: i64 = 7;
     pub const CAST_RESULT: i64 = 8;
+    pub const ADDITIONAL_EFFECT: i64 = 10;
+    pub const MODIFIED_SKILL_LEVEL: i64 = 14;
+    pub const INIT_COOLTIME: i64 = 15;
+    pub const SPECIFIC_SKILL_LEVEL: i64 = 16;
 }
 
 /// Types d'action du mini SKILL_ACTION (champ 0) : 0 lancer, 4 annuler le lancement.
@@ -211,6 +225,16 @@ pub enum SkillEvent {
     Upgraded { id: i32, result: i32 },
     /// Part des compétences des caractéristiques secondaires d'un personnage (AGPMSKILL champ 9).
     Attach { cid: i32, data: SkillAttach },
+    /// Tous les effets actifs d'un personnage (op 6) : (TID de l'effet, durée en ms).
+    Buffs { owner: i32, buffs: Vec<(i32, u64)> },
+    /// Effet secondaire (op 10) : genre, lanceur, cible.
+    AdditionalEffect { kind: i32, caster: i32, target: i32 },
+    /// Bonus de niveau de toutes les compétences du personnage (op 14).
+    LevelBonus { owner: i32, bonus: i32 },
+    /// Recharge remise à zéro (op 15) : identifiant et TID de la compétence.
+    CooldownReset { owner: i32, id: i32, tid: i32 },
+    /// Bonus de niveau d'une compétence (op 16).
+    SkillBonus { owner: i32, id: i32, level: i32 },
 }
 
 fn int(values: &[Option<Value>], i: usize) -> Option<i64> {
@@ -248,6 +272,42 @@ pub fn translate(t: u8, values: &[Option<Value>]) -> Option<WorldEvent> {
                 exp: bytes(values, 3).and_then(|f| factors_dirt(f, DIRT_SKILL_EXP)),
             })),
             op::REMOVE => Some(WorldEvent::Skill(SkillEvent::Removed { id: int(values, 1)? as i32 })),
+            op::ALL_BUFFED => {
+                let list: Vec<&[u8]> = match values.get(8).and_then(Option::as_ref) {
+                    Some(Value::PacketList(l)) => l.iter().map(Vec::as_slice).collect(),
+                    Some(Value::Packet(b)) => vec![b.as_slice()],
+                    _ => Vec::new(),
+                };
+                let buffs = list
+                    .into_iter()
+                    .filter_map(|b| decode_mini(mini::SKILL_BUFF, b).ok())
+                    .filter_map(|(_, v)| {
+                        let ms = match v.get(1).and_then(Option::as_ref) {
+                            Some(Value::U64(x)) => *x,
+                            Some(x) => x.as_i64().unwrap_or(0).max(0) as u64,
+                            None => 0,
+                        };
+                        Some((int(&v, 0)? as i32, ms)).filter(|(t, _)| *t != 0)
+                    })
+                    .collect();
+                Some(WorldEvent::Skill(SkillEvent::Buffs { owner: base_cid(bytes(values, 2))?, buffs }))
+            }
+            op::ADDITIONAL_EFFECT => Some(WorldEvent::Skill(SkillEvent::AdditionalEffect {
+                kind: int(values, 1)? as i32,
+                caster: base_cid(bytes(values, 2)).unwrap_or(0),
+                target: int(values, 4).unwrap_or(0) as i32,
+            })),
+            op::MODIFIED_SKILL_LEVEL => Some(WorldEvent::Skill(SkillEvent::LevelBonus { owner: base_cid(bytes(values, 2)).unwrap_or(0), bonus: int(values, 1)? as i32 })),
+            op::INIT_COOLTIME => Some(WorldEvent::Skill(SkillEvent::CooldownReset {
+                owner: base_cid(bytes(values, 2)).unwrap_or(0),
+                id: int(values, 1).unwrap_or(0) as i32,
+                tid: int(values, 4).unwrap_or(0) as i32,
+            })),
+            op::SPECIFIC_SKILL_LEVEL => Some(WorldEvent::Skill(SkillEvent::SkillBonus {
+                owner: base_cid(bytes(values, 2)).unwrap_or(0),
+                id: int(values, 1)? as i32,
+                level: int(values, 4).unwrap_or(0) as i32,
+            })),
             op::UPDATE => {
                 let id = int(values, 1)? as i32;
                 let exp = bytes(values, 3).and_then(|f| factors_dirt(f, DIRT_SKILL_EXP));
@@ -375,6 +435,24 @@ mod tests {
         // Arbres de maîtrise : apprendre par TID (op 1), améliorer par identifiant (op 2, champ 3).
         let (s, v) = command_packet(&SkillCommand::Upgrade { npc: 9, id: 12 }, 42);
         assert_eq!((s.id, int(&v, 0), int(&v, 3), int(&v, 2)), (0x3b, Some(2), Some(12), Some(42)));
+    }
+
+    #[test]
+    fn effets_bonus_et_recharges() {
+        let k = main::SKILL;
+        let d = |pairs: &[(usize, Value)]| decode_packet(k, &build_packet(k, &sparse(k, pairs)).unwrap()).unwrap().values;
+        let b = mini::SKILL_BUFF;
+        let buff = |tid: i32, ms: u64| build_mini(b, &sparse(b, &[(0, Value::I32(tid)), (1, Value::U64(ms))])).unwrap();
+        let v = d(&[(0, Value::I8(6)), (2, base(42)), (8, Value::PacketList(vec![buff(57, 30_000), buff(58, 1_000)]))]);
+        assert!(matches!(translate(packet_type::SKILL, &v), Some(WorldEvent::Skill(SkillEvent::Buffs { owner: 42, buffs })) if buffs == vec![(57, 30_000), (58, 1_000)]));
+        let v = d(&[(0, Value::I8(10)), (1, Value::I32(8)), (2, base(42)), (4, Value::I32(77))]);
+        assert!(matches!(translate(packet_type::SKILL, &v), Some(WorldEvent::Skill(SkillEvent::AdditionalEffect { kind: 8, caster: 42, target: 77 }))));
+        let v = d(&[(0, Value::I8(14)), (1, Value::I32(2)), (2, base(42))]);
+        assert!(matches!(translate(packet_type::SKILL, &v), Some(WorldEvent::Skill(SkillEvent::LevelBonus { owner: 42, bonus: 2 }))));
+        let v = d(&[(0, Value::I8(15)), (1, Value::I32(5)), (2, base(42)), (4, Value::I32(222))]);
+        assert!(matches!(translate(packet_type::SKILL, &v), Some(WorldEvent::Skill(SkillEvent::CooldownReset { owner: 42, id: 5, tid: 222 }))));
+        let v = d(&[(0, Value::I8(16)), (1, Value::I32(5)), (2, base(42)), (4, Value::I32(3))]);
+        assert!(matches!(translate(packet_type::SKILL, &v), Some(WorldEvent::Skill(SkillEvent::SkillBonus { owner: 42, id: 5, level: 3 }))));
     }
 
     #[test]

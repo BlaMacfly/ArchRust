@@ -33,11 +33,21 @@ use crate::audio::AudioSettings;
 use crate::options::{DisplayOptions, RefuseOptions, VideoOptions};
 use crate::ui::PackAction;
 
-const TABS: [(&str, &str); 5] = [("GFX", "Option_Video"), ("Son", "Option_Sound"), ("Affichage", "Option_System"), ("Fonction", "Option_Option"), ("Avance", "Option_Advanced")];
-pub(super) const OPTION_WINDOWS: [&str; 6] = ["Option_Video", "Option_Sound", "Option_System", "Option_Option", "Option_Advanced", DETAIL_NATURE];
+const TABS: [(&str, &str); 6] = [("GFX", "Option_Video"), ("Son", "Option_Sound"), ("Affichage", "Option_System"), ("Fonction", "Option_Option"), ("Avance", "Option_Advanced"), ("Video", "Option_VideoRes")];
+pub(super) const OPTION_WINDOWS: [&str; 7] = ["Option_Video", "Option_Sound", "Option_System", "Option_Option", "Option_Advanced", DETAIL_NATURE, "Option_VideoRes"];
+/// Onglets d'`Option_VideoRes` (« Video », ouverte par `OpTabVid_Option_Video` d'`Option_Video`) : rang de
+/// [`TABS`] d'après le nom du bouton (`OpVR_Btn_GFX`…), ses libellés restant en anglais.
+const VIDEORES_TABS: [(&str, usize); 5] = [("OpVR_Btn_GFX", 0), ("OpVR_Btn_Sound", 1), ("OpVR_Btn_Display", 2), ("OpVR_Btn_Func", 3), ("OpVR_Btn_Adv", 4)];
+/// Modes de fenêtre d'`OP_WindowMode` (chaînes du constructeur d'AgcmUIOption, FUN_140703da0).
+const WINDOW_MODES: [&str; 3] = ["Fullscreen", "Windowed", "Borderless"];
+/// Libellés d'`OP_Shadow` (0 à 3, `Shadow` de `COption.ini` ; liste d'Archonia non relevée) et des
+/// listes Oui / Non (`OP_AntiAliasing` ramené à 0 / 1 par FUN_14070ed10, `OP_HighOptimization` « V-Sync »).
+const SHADOW_LABELS: [&str; 4] = ["Option_Msg_OFF", "Option_Msg_LOW", "Option_Msg_MEDIUM", "Option_Msg_HIGH"];
+const ON_OFF_LABELS: [&str; 2] = ["Option_Msg_OFF", "Option_Msg_ON"];
 /// Fenêtre « Environnement » ouverte par le bouton détail (`OP_Nature`) de l'onglet GFX : reflets
-/// (`OP_LensFlare`), brouillard (`OP_Fog`), effets météo (`OP_Sky`) en cases Oui/Non ; la ligne
-/// « Objets » (`OP_NaturalObj`) reste inactive.
+/// (`OP_LensFlare`), brouillard (`OP_Fog`), effets météo (`OP_Sky`) en cases Oui/Non ; « Objets »
+/// (`OP_NaturalObj`, herbe) en trois cases exclusives `OP_Detail_Nature_Radio_H/M/L`
+/// (`CtrlUserData2=3/2/1:0:OP_NaturalObj`).
 const DETAIL_NATURE: &str = "Option_Detail_Nature";
 /// Libellés de la liste `OP_Nature` (`uimessage.txt`).
 const NATURE_LABELS: [&str; 3] = ["Option_Msg_LOW", "Option_Msg_MEDIUM", "Option_Msg_HIGH"];
@@ -60,6 +70,8 @@ pub struct OptionsEdit<'a> {
     pub display: &'a mut DisplayOptions,
     pub refuse: &'a mut RefuseOptions,
     pub video: &'a mut VideoOptions,
+    /// Résolutions proposées par `OP_Resolution` (modes du moniteur, 12 au plus comme AgcmUIOption +0x38c8).
+    pub resolutions: &'a [(u32, u32)],
 }
 
 /// Case des onglets Affichage et Fonction reliée à un réglage d'ArchRust, d'après son rappel.
@@ -71,6 +83,8 @@ fn option_flag<'b>(action: &str, display: &'b mut DisplayOptions, refuse: &'b mu
         "OP_ViewNameParty" => &mut display.name_party,
         "OP_ViewNameOthers" => &mut display.name_others,
         "OP_VisibleViewHelmet" => &mut display.helmet,
+        "OP_ViewBaloonChat" => &mut display.balloon_chat,
+        "OP_ViewSelfBars" => &mut display.self_bars,
         "OP_RefuseTrade" => &mut refuse.trade,
         "OP_RefusePartyIn" => &mut refuse.party,
         "OP_RefuseGuildIn" => &mut refuse.guild,
@@ -118,7 +132,7 @@ pub fn draw_options(ctx: &egui::Context, hud: &mut HudState, assets: &Assets, ed
     let mut new_tab = None;
     let rows = if tab == 4 { advanced_rows(&edit) } else { Vec::new() };
     let mut adv_click: Option<AdvAction> = None;
-    let OptionsEdit { audio, language, packs, display, refuse, video, .. } = edit;
+    let OptionsEdit { audio, language, packs, display, refuse, video, resolutions, .. } = edit;
     // Listes déroulantes actives (rectangle, rappel) : leur flèche `Common_Button_PGDN` est un
     // contrôle enfant sans nom posé dedans.
     let mut combos: Vec<(Rect, &str)> = Vec::new();
@@ -137,11 +151,10 @@ pub fn draw_options(ctx: &egui::Context, hud: &mut HudState, assets: &Assets, ed
                 let r = layout.rect(rect.min, c.pos, c.size);
                 let fixed = c.display.as_deref().and_then(|d| d.strip_prefix("1:"));
                 let name = c.name.as_str();
-                // Onglet « Video » (452, 35) : sans fenêtre propre, non affiché.
-                if fixed == Some("Video") {
-                    continue;
-                }
-                if let Some(i) = fixed.and_then(|f| TABS.iter().position(|(l, _)| *l == f)).filter(|_| c.textures.iter().any(|(_, t)| t.to_ascii_lowercase().starts_with("op_tab"))) {
+                // Onglet « Video » (`OpTabVid_Option_Video`, 452, 35) : `Option_VideoRes` ; onglets de celle-ci par leur nom.
+                let named_tab = if name == "OpTabVid_Option_Video" { Some(5) } else { VIDEORES_TABS.iter().find(|(n, _)| *n == name).map(|(_, i)| *i) };
+                let label_tab = || fixed.and_then(|f| TABS.iter().position(|(l, _)| *l == f)).filter(|_| c.textures.iter().any(|(_, t)| t.to_ascii_lowercase().starts_with("op_tab")));
+                if let Some(i) = named_tab.or_else(label_tab) {
                     if c.kind == 3 {
                         if button(ctx, ui, hud, assets, &painter, r, c, fixed.unwrap_or(""), font, true, ("options-tab", tab, name)).clicked() {
                             new_tab = Some(i);
@@ -197,6 +210,39 @@ pub fn draw_options(ctx: &egui::Context, hud: &mut HudState, assets: &Assets, ed
                             }
                         }
                     }
+                    // GFX et Video : ombre, multiéchantillonnage, V-Sync, résolution, mode de fenêtre.
+                    (5, _) if (tab == 0 && matches!(c.action.as_deref(), Some("OP_Shadow" | "OP_AntiAliasing" | "OP_HighOptimization"))) || (tab == 5 && matches!(c.action.as_deref(), Some("OP_Resolution" | "OP_WindowMode"))) => {
+                        let action = c.action.as_deref().unwrap_or("");
+                        let text = match action {
+                            "OP_Shadow" => ui_message(hud, assets, SHADOW_LABELS[video.shadow.min(3) as usize]),
+                            "OP_AntiAliasing" => ui_message(hud, assets, ON_OFF_LABELS[video.multisampling as usize]),
+                            "OP_HighOptimization" => ui_message(hud, assets, ON_OFF_LABELS[video.vsync as usize]),
+                            "OP_Resolution" => video.resolution.map(|(w, h)| format!("{w} x {h}")).unwrap_or_default(),
+                            _ => WINDOW_MODES[video.window_mode.min(2) as usize].to_string(),
+                        };
+                        if button(ctx, ui, hud, assets, &painter, r, c, "", font, true, ("options-combo", action)).clicked() {
+                            cycle_option(video, action, resolutions);
+                            out.changed = true;
+                        }
+                        shadow_text(&painter, r.left_center() + Vec2::new(4.0 * s, 0.0), Align2::LEFT_CENTER, &text, font, Color32::WHITE);
+                        combos.push((r, action));
+                    }
+                    // Gamma (`OP_BrightVal`, `BRIGHT=100:valeur`) : curseur « Dark » → « Bright ».
+                    (14, _) if tab == 0 && c.action.as_deref() == Some("OP_BrightVal") => {
+                        let cursor = w.controls.iter().skip_while(|x| x.name != name).nth(1).filter(|x| x.kind == 15);
+                        let mut value = video.bright.min(100) as f32 / 100.0;
+                        if slider(ctx, ui, hud, assets, &painter, r, c, cursor, &mut value, s, ("options-slide", name)) {
+                            video.bright = (value * 100.0).round() as u8;
+                            out.changed = true;
+                        }
+                    }
+                    // Video : « Turn off other players skill effects » (`DisableOtherPlayerSkillEffect`).
+                    (3, _) if tab == 5 && c.action.as_deref() == Some("OP_DisableOtherPlayerSkillEffect") => {
+                        if checkbox(ctx, ui, hud, assets, &painter, r, c, video.hide_other_effects, true, ("options-check", tab, name)).clicked() {
+                            video.hide_other_effects = !video.hide_other_effects;
+                            out.changed = true;
+                        }
+                    }
                     // Onglet GFX : distances des personnages et de la carte, un clic passe au choix suivant.
                     (5, _) if tab == 0 && matches!(c.action.as_deref(), Some("OP_CharView" | "OP_MapView" | "OP_Nature" | "OP_Effect")) => {
                         let action = match c.action.as_deref() {
@@ -221,7 +267,7 @@ pub fn draw_options(ctx: &egui::Context, hud: &mut HudState, assets: &Assets, ed
                     (3, _) if c.textures.iter().any(|(_, t)| t.starts_with("Common_Button_PGDN")) && combos.iter().any(|(cr, _)| cr.contains(r.center())) => {
                         let action = combos.iter().find(|(cr, _)| cr.contains(r.center())).map_or("", |(_, a)| *a);
                         if button(ctx, ui, hud, assets, &painter, r, c, "", font, true, ("options-combo-arrow", action)).clicked() {
-                            cycle_view(video, action);
+                            cycle_option(video, action, resolutions);
                             out.changed = true;
                         }
                     }
@@ -305,6 +351,24 @@ pub fn draw_options(ctx: &egui::Context, hud: &mut HudState, assets: &Assets, ed
     Some(out)
 }
 
+/// Choix suivant des listes d'`Option_Video` / `Option_VideoRes` ajoutées (ombre, multiéchantillonnage,
+/// V-Sync, résolution, mode de fenêtre), sinon [`cycle_view`].
+fn cycle_option(video: &mut VideoOptions, action: &str, resolutions: &[(u32, u32)]) {
+    match action {
+        "OP_Shadow" => video.shadow = (video.shadow.min(3) + 1) % 4,
+        "OP_AntiAliasing" => video.multisampling = !video.multisampling,
+        "OP_HighOptimization" => video.vsync = !video.vsync,
+        "OP_WindowMode" => video.window_mode = (video.window_mode.min(2) + 1) % 3,
+        "OP_Resolution" => {
+            if !resolutions.is_empty() {
+                let i = video.resolution.and_then(|r| resolutions.iter().position(|x| *x == r)).map_or(0, |i| (i + 1) % resolutions.len());
+                video.resolution = Some(resolutions[i]);
+            }
+        }
+        _ => cycle_view(video, action),
+    }
+}
+
 /// Choix suivant d'une liste de distances (proche → moyen → loin → global → proche) ou de
 /// l'environnement (bas → moyen → haut → bas).
 fn cycle_view(video: &mut VideoOptions, action: &str) {
@@ -368,6 +432,18 @@ fn draw_detail_nature(ctx: &egui::Context, hud: &mut HudState, assets: &Assets, 
                     3 if name == "OP_Detail_Nature_Btn1" || name == "OP_Detail_Nature_Btn2" => {
                         if button(ctx, ui, hud, assets, &painter, r, c, fixed.unwrap_or(""), font, true, ("detail-nature", name)).clicked() {
                             close = true;
+                        }
+                    }
+                    // « Objets » : herbe haute / moyenne / basse (`OP_NaturalObj` 3 / 2 / 1).
+                    3 if name.starts_with("OP_Detail_Nature_Radio_") => {
+                        let value = match name.trim_start_matches("OP_Detail_Nature_Radio_") {
+                            "H" => 3,
+                            "M" => 2,
+                            _ => 1,
+                        };
+                        if checkbox(ctx, ui, hud, assets, &painter, r, c, video.natural_obj == value, true, ("detail-nature", name)).clicked() && video.natural_obj != value {
+                            video.natural_obj = value;
+                            changed = true;
                         }
                     }
                     3 => match detail_nature_flag(name, video) {

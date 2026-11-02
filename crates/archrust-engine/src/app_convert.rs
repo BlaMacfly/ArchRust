@@ -478,9 +478,30 @@ pub struct ConvertGlue {
     properties_at: Option<std::time::Instant>,
 }
 
+/// Contenu d'une socket pour les effets des pierres d'esprit (`app_stones.rs`) : rune, ou pierre
+/// d'esprit avec son élément (`Spirit Type`, `SPIRIT_STONE_TYPE` du client) et son rang.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) struct SocketFill {
+    pub rune: bool,
+    pub spirit: i64,
+    pub rank: i64,
+}
+
 impl ConvertGlue {
     fn data(&mut self, assets: &Assets) -> &ConvertData {
         self.data.get_or_insert_with(|| load_data(assets))
+    }
+
+    /// État de conversion connu de l'objet `iid` pour les effets des pierres d'esprit : niveau de
+    /// renforcement, nombre de sockets et contenu de chaque socket, dans l'ordre.
+    pub(super) fn socket_fills(&mut self, assets: &Assets, iid: i32) -> Option<(u8, u8, Vec<SocketFill>)> {
+        let st = self.states.get(&iid)?.clone();
+        let d = self.data(assets);
+        let fills = st.filled.iter().map(|t| {
+            let info = d.info(Some(*t));
+            SocketFill { rune: d.is_rune(Some(*t)), spirit: info.spirit, rank: info.rank }
+        });
+        Some((st.level, st.sockets, fills.collect()))
     }
 
     fn apply(&mut self, s: &ConvertState) {

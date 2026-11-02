@@ -66,6 +66,8 @@ pub struct UiState {
     pub packs_restart: bool,
     /// AddOns proposés dans les Options : (nom, titre, activé) ; vide = à relire.
     pub addon_list: Vec<(String, String, bool)>,
+    /// Résolutions de `OP_Resolution` (`Option_VideoRes`), remplies par le moteur depuis le moniteur.
+    pub resolutions: Vec<(u32, u32)>,
     /// AddOn activé ou désactivé depuis les Options, à appliquer par le moteur.
     pub addon_toggle: Option<(String, bool)>,
 }
@@ -143,6 +145,7 @@ impl Default for UiState {
             server_language: None,
             packs_restart: false,
             addon_list: Vec::new(),
+            resolutions: Vec::new(),
             addon_toggle: None,
         }
     }
@@ -176,7 +179,7 @@ pub fn options_panel(
     }
     let crate::options::ClientOptions { audio, language, display, refuse, video } = options;
     // Fenêtres d'options d'Archonia (`Option_*`, voir `hud_options.rs`).
-    let edit = crate::hud::OptionsEdit { audio, language, languages: LANGUAGES, packs, packs_restart: st.packs_restart, addons: &st.addon_list, display, refuse, video };
+    let edit = crate::hud::OptionsEdit { audio, language, languages: LANGUAGES, packs, packs_restart: st.packs_restart, addons: &st.addon_list, display, refuse, video, resolutions: &st.resolutions };
     if let Some(out) = crate::hud::draw_options(ctx, hud, assets, edit) {
         *pack_action = out.pack_action;
         if out.addon_toggle.is_some() {

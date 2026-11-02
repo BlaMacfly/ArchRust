@@ -279,6 +279,27 @@ pub fn draw_bank_money(ctx: &egui::Context, hud: &mut HudState, assets: &Assets,
     out.escape.then_some(false)
 }
 
+/// Or à jeter (`UI_DropMoneyFromInventory`) : champ `CONTROL_INV_DropGhelldEdit`, « Confirm »
+/// (`Inventory_DropMoneyYes`), « Cancel » et la croix (`Inventory_DropMoneyCancel`).
+pub fn draw_drop_money(ctx: &egui::Context, hud: &mut HudState, assets: &Assets, amount: &mut i64, max: i64) -> Option<bool> {
+    let out = draw_dialog(ctx, hud, assets, "UI_DropMoneyFromInventory", |ui, _hud, _painter, c, r, font| {
+        if c.name == "CONTROL_INV_DropGhelldEdit" {
+            number_edit(ui, r, "drop-money", amount, max, font);
+            return true;
+        }
+        false
+    })?;
+    match out.clicked.as_deref() {
+        Some("CONTROL_INV_DropGhelldYesButton") => return Some(true),
+        Some("CONTROL_INV_DropGhelldCancelButton" | "CONTROL_INV_DropGhelldExitButton") => return Some(false),
+        _ => {}
+    }
+    if out.enter {
+        return Some(true);
+    }
+    out.escape.then_some(false)
+}
+
 /// Boîte d'information d'Archonia (`Action=4:0` : `Common_Message_Base2.png`, un seul bouton
 /// « OK » centré) : rend `true` quand elle est fermée (clic, croix, Entrée ou Échap).
 pub fn info_box(ctx: &egui::Context, hud: &mut HudState, assets: &Assets, text: &str) -> bool {

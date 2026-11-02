@@ -13,6 +13,16 @@
 //! « Ignore » (`CONTROL_32003`, FUN_1405e4750) envoie l'op 17 et affiche `PartyRejectRecall`. Le lanceur reçoit
 //! l'op 16 ou 17 (champ 1 = membre) : `PartyTargetAcceptRecall` / `PartyTargetRejectRecall` ; l'op 4 d'AGPMITEM
 //! de l'orbe affiche `PartyUseRecallSuccess` (voir `app_consumables.rs`).
+//!
+//! Mise à jour du groupe (0x08 op 2, AgcmUIParty) : zone d'effet (champ 7, `0x1405e4b20`) : nom de chaque membre au
+//! statut `PartyActiveEffectArea{Knight|Ranger|Mage}` selon la classe du chef (FUN_1401a5da0 : 1, 2, 4) s'il est dans
+//! la zone, `PartyDisableEffectArea` sinon, `PartySetDead` s'il est mort (`Status2` 0 à 4 de `CONTROL_29971`,
+//! `CONTROL_26137` pour le joueur) ; bonus (champ 9, `0x1405e5180` / `0x1405e6650`) : `Party_Add_None` si tout est
+//! nul, sinon `Party_Add_Damage`, `Party_Add_Defense`, `Party_Add_HPMP` en `Party_Text_Color`, pour un membre
+//! seulement. Archonia appelle `wsprintfA` sans argument pour le `%d` : ArchRust y met la valeur reçue.
+//! Échecs : 9 `PartyRecvOperationFailed`, 12 `Party_DelegationLeaderFailed`, 13 `Party_InviteMemeberLevelDiff`,
+//! 18 à 20 `Party_Murderer_Error_Self/Target/Leave` en `Party_Murderer_Error_Color` dans la discussion (le `%s` de
+//! `…_Target` n'est pas rempli par Archonia : retiré).
 
 use super::App;
 use crate::net::NetLink;
@@ -170,10 +180,49 @@ impl App {
                 archrust_netclient::party::mgmt::FAILED_NO_LOGIN => (false, super::guild_glue::fill_braces(&event("PartyOptionUI_RecvInviteNoLoginMember"), name)),
                 // FUN_1405e45f0 : uimessage `Option_Party_Off_User` (« %s bloque… ») en ligne système.
                 archrust_netclient::party::mgmt::FAILED_REFUSE => (false, crate::hud::ui_message(&mut self.hud, &assets, "Option_Party_Off_User").replacen("%s", name, 1)),
+                // FUN_1405e3e70 (`Action=4:3`) et FUN_1405e3ec0 (`Action=4:0`).
+                archrust_netclient::party::mgmt::DELEGATION_LEADER_FAILED => (false, event("Party_DelegationLeaderFailed")),
+                archrust_netclient::party::mgmt::FAILED_LEVEL_DIFF => (true, event("Party_InviteMemeberLevelDiff")),
+                // Meurtrier (FUN_1405e4240, FUN_1405e42e0, FUN_1405e44d0) : discussion, plus bas.
+                archrust_netclient::party::mgmt::FAILED_MURDERER_SELF..=archrust_netclient::party::mgmt::FAILED_MURDERER_LEAVE => (false, String::new()),
                 _ => (true, event("PartyRecvOperationFailed")),
             },
             _ => (false, String::new()),
         };
+        // Lignes de discussion d'uimessage (meurtrier, bonus), en couleur ARGB de leur clé `…_Color`.
+        let colored = |hud: &mut crate::hud::HudState, key: &str, color_key: &str| {
+            let argb = crate::hud::ui_message(hud, &assets, color_key).trim().parse::<u32>().unwrap_or(0xFFFF_FFFF);
+            let text = crate::hud::ui_message(hud, &assets, key);
+            (!text.is_empty()).then(|| format!("|cff{:06x}{text}|r", argb & 0xFF_FFFF))
+        };
+        let mut chat: Vec<String> = Vec::new();
+        if let PartyNotice::Failed { code, .. } = &notice {
+            let key = match *code {
+                archrust_netclient::party::mgmt::FAILED_MURDERER_SELF => Some("Party_Murderer_Error_Self"),
+                archrust_netclient::party::mgmt::FAILED_MURDERER_TARGET => Some("Party_Murderer_Error_Target"),
+                archrust_netclient::party::mgmt::FAILED_MURDERER_LEAVE => Some("Party_Murderer_Error_Leave"),
+                _ => None,
+            };
+            if let Some(line) = key.and_then(|k| colored(&mut self.hud, k, "Party_Murderer_Error_Color")) {
+                chat.push(line.replace("%s ", "").replace("%s", ""));
+            }
+        }
+        // Bonus (0x1405e5180) : seulement pour un membre du groupe.
+        if let (PartyNotice::Bonus(b), true) = (&notice, self.party.state.contains(me)) {
+            let lines: Vec<(&str, i32)> = if b.is_none() {
+                vec![("Party_Add_None", 0)]
+            } else {
+                [("Party_Add_Damage", b.damage), ("Party_Add_Defense", b.defense), ("Party_Add_HPMP", b.max_hp.max(b.max_mp))].into_iter().filter(|(_, v)| *v > 0).collect()
+            };
+            for (key, value) in lines {
+                if let Some(line) = colored(&mut self.hud, key, "Party_Text_Color") {
+                    chat.push(line.replacen("%d", &value.to_string(), 1));
+                }
+            }
+        }
+        for line in chat {
+            self.ui.push_chat_in(0x10, line);
+        }
         if boxed {
             self.party.info = Some(text).filter(|t| !t.is_empty());
         } else {
@@ -365,11 +414,17 @@ impl App {
                 crate::hud::party_face(num("Race")?, num("Class")?).map(|f| (cid, f))
             })
             .collect();
+        // Classe du chef (`Class` de charactertemplate.ini : 1 chevalier, 2 archer, 4 mage), pour la zone d'effet.
+        let leader_class = self.party.state.leader().and_then(|cid| {
+            let tid = if cid == me { self.player.as_ref().map(|p| p.tid) } else { self.entities.iter().find(|e| e.cid == cid).map(|e| e.tid) }?;
+            templates.as_ref()?.section(&tid.to_string())?.get("Class")?.trim().parse::<i32>().ok()
+        });
         PartyView {
             me,
             members,
             faces,
             selected: self.addons.target_cid(),
+            leader_class,
         }
     }
 }
@@ -380,6 +435,8 @@ pub struct PartyView {
     pub members: Vec<(i32, String, MemberStats)>,
     pub faces: HashMap<i32, String>,
     pub selected: Option<i32>,
+    /// Classe du chef (zone d'effet).
+    pub leader_class: Option<i32>,
 }
 
 /// Bouton « Groupe », fenêtre du groupe et fenêtre d'invitation.
@@ -444,6 +501,21 @@ pub fn panel(
 
     // Cadres, menus et options du groupe d'Archonia (voir `hud_party.rs`).
     let leader = glue.state.leader();
+    // Statut du nom (0x1405e4b20) : 0 à 2 dans la zone (classe du chef 1 chevalier, 2 archer, 4 mage), 3 hors de
+    // la zone, 4 mort.
+    let area_status = |cid: i32, hp: Option<i32>| {
+        if hp == Some(0) {
+            4
+        } else if !glue.state.in_effect_area(cid) {
+            3
+        } else {
+            match view.leader_class {
+                Some(2) => 1,
+                Some(4) => 2,
+                _ => 0,
+            }
+        }
+    };
     let frame = |(cid, name, stats): &(i32, String, MemberStats)| crate::hud::PartyFrame {
         cid: *cid,
         name: name.clone(),
@@ -452,6 +524,7 @@ pub fn panel(
         max_hp: stats.max_hp,
         leader: leader == Some(*cid),
         face: view.faces.get(cid).cloned(),
+        area_status: area_status(*cid, stats.hp),
     };
     let frames = crate::hud::PartyFrames {
         me: glue.state.in_party().then(|| view.members.iter().find(|m| m.0 == view.me).map(frame)).flatten(),

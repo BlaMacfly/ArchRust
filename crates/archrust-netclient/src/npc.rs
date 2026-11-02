@@ -20,7 +20,11 @@
 //! 0x3E op 0 (1 EVENT_BASE, 2 CID)            → op 0 : fenêtre des quêtes du PNJ
 //! AGPMQUEST op 0 prendre, 2 terminer (7 récompense), 6 abandonner (1 CID, 2 EVENT_BASE, 4 TID)
 //!     → op 1, 3, 7 (4 TID, 6 résultat 1 réussi / 0 refus) ; op 4 et 10 : quête du journal
-//!     (3 mini QUEST_INFO) ; op 5 : quêtes terminées (8 à 10 : bits, TID % 16 384 du bloc TID / 16 384)
+//!     (3 mini QUEST_INFO : TID, monstres A et B, objectifs remplis, suivi à l'écran) ; op 5 : quêtes terminées
+//!     (8 à 10 : bits, TID % 16 384 du bloc TID / 16 384) ; op 8 (1 CID, 4 TID) : récompense sans place dans le
+//!     sac, op 9 : objet de départ sans place (Archonia 0x140656310, 0x1406567d0)
+//! AGPMQUEST op 14 (1 CID, 3 QUEST_INFO {TID, 0, 0, 0, drapeau}, 4 TID) : quête inscrite (1) au journal de suivi
+//!     ou retirée (0), sans réponse (fabricant 0x14033f0c0) ; le serveur renvoie le drapeau au 5ᵉ entier de l'op 4
 //! ```
 
 use archrust_protocol::packet::{build_mini, decode_mini, decode_packet, sparse, Value};
@@ -136,6 +140,8 @@ pub enum NpcCommand {
     QuestComplete { npc: Option<i32>, tid: i32, reward: i32 },
     /// Abandonner une quête.
     QuestAbandon(i32),
+    /// Inscrire une quête au journal de suivi à l'écran (`true`) ou l'en retirer (op 14, AgcmQuest 0x1404f5690).
+    QuestTrack { tid: i32, track: bool },
 }
 
 /// Paquet d'une demande aux PNJ pour le personnage `me`.
@@ -204,6 +210,12 @@ pub fn command_packet(cmd: &NpcCommand, me: i32) -> (&'static Schema, Vec<Option
         NpcCommand::QuestAccept { npc, tid } => quest(0, *npc, *tid, None),
         NpcCommand::QuestComplete { npc, tid, reward } => quest(2, *npc, *tid, Some(*reward)),
         NpcCommand::QuestAbandon(tid) => quest(6, None, *tid, None),
+        NpcCommand::QuestTrack { tid, track } => {
+            let q = mini::QUEST_INFO;
+            let info = sparse(q, &[(0, Value::I32(*tid)), (1, Value::I32(0)), (2, Value::I32(0)), (3, Value::I32(0)), (4, Value::I32(i32::from(*track)))]);
+            let info = Value::Packet(build_mini(q, &info).unwrap_or_default());
+            (main::QUEST, sparse(main::QUEST, &[(0, Value::I8(op_quest::TRACK)), (1, Value::I32(me)), (3, info), (4, Value::I32(*tid))]))
+        }
     }
 }
 
@@ -215,7 +227,22 @@ pub struct QuestProgress {
     pub monster_b: i32,
     /// Objectifs remplis (la quête peut être rendue).
     pub done: bool,
+    /// Inscrite au journal de suivi à l'écran (5ᵉ entier, `stJournalInfo` ; lu à l'op 4 seulement).
+    pub tracked: bool,
 }
+
+/// Opérations d'AGPMQUEST propres au journal de suivi et aux refus faute de place.
+pub mod op_quest {
+    /// Récompense sans place dans le sac : sysstr 447 (S → C).
+    pub const REWARD_NO_SPACE: i8 = 8;
+    /// Objet de départ sans place : nom de la quête et sysstr 440 (S → C).
+    pub const START_NO_SPACE: i8 = 9;
+    /// Journal de suivi : inscription ou retrait (C → S).
+    pub const TRACK: i8 = 14;
+}
+
+/// Quêtes au plus dans le journal de suivi (`JournalMaxCount`).
+pub const TRACK_MAX: usize = 10;
 
 /// Réponses des PNJ.
 #[derive(Debug, Clone, PartialEq)]
@@ -240,6 +267,8 @@ pub enum NpcEvent {
     QuestJournal { progress: QuestProgress, update: bool },
     /// Quêtes terminées (op 5).
     QuestsDone(Vec<u32>),
+    /// Refus faute de place dans le sac : op 8 (récompense) ou 9 (objet de départ), TID de la quête.
+    QuestNoSpace { op: i8, tid: i32 },
 }
 
 fn npc_of(values: &[Option<Value>], field: usize) -> i32 {
@@ -308,11 +337,13 @@ pub fn translate(packet_type: u8, values: &[Option<Value>]) -> Option<NpcEvent> 
                         monster_a: int(&q, 1).unwrap_or(0) as i32,
                         monster_b: int(&q, 2).unwrap_or(0) as i32,
                         done: int(&q, 3).unwrap_or(0) != 0,
+                        tracked: o == 4 && int(&q, 4).unwrap_or(0) != 0,
                     },
                     update: o == 10,
                 }
             }
             5 => NpcEvent::QuestsDone(done_quests(values)),
+            o @ (8 | 9) => NpcEvent::QuestNoSpace { op: o as i8, tid: int(values, 4)? as i32 },
             _ => return None,
         },
         _ => return None,
@@ -367,5 +398,34 @@ mod tests {
         bits[4632 / 8] |= 1 << (4632 % 8);
         let done = sparse(main::QUEST, &[(0, Value::I8(5)), (8, Value::Block(bits))]);
         assert_eq!(translate(0x13, &done), Some(NpcEvent::QuestsDone(vec![4632])));
+    }
+
+    #[test]
+    fn journal_de_suivi_et_refus_faute_de_place() {
+        // Op 14 : 1 CID, 3 QUEST_INFO {TID, 0, 0, 0, drapeau}, 4 TID.
+        let (s, v) = command_packet(&NpcCommand::QuestTrack { tid: 4632, track: true }, 7);
+        let raw = encode_packet(s, &v).unwrap();
+        let p = decode_packet(main::QUEST, &raw).unwrap();
+        assert_eq!((int(&p.values, 0), int(&p.values, 1), int(&p.values, 4)), (Some(14), Some(7), Some(4632)));
+        let (_, q) = decode_mini(mini::QUEST_INFO, p.values[3].as_ref().and_then(Value::as_bytes).unwrap()).unwrap();
+        assert_eq!((int(&q, 0), int(&q, 3), int(&q, 4)), (Some(4632), Some(0), Some(1)));
+        let (_, v) = command_packet(&NpcCommand::QuestTrack { tid: 4632, track: false }, 7);
+        let (_, q) = decode_mini(mini::QUEST_INFO, v[3].as_ref().and_then(Value::as_bytes).unwrap()).unwrap();
+        assert_eq!(int(&q, 4), Some(0));
+        // Op 4 : 5ᵉ entier relu ; op 10 : ignoré.
+        let info = |flag: i32| {
+            let s = mini::QUEST_INFO;
+            Value::Packet(build_mini(s, &sparse(s, &[(0, Value::I32(4632)), (1, Value::I32(2)), (4, Value::I32(flag))])).unwrap())
+        };
+        let journal = sparse(main::QUEST, &[(0, Value::I8(4)), (3, info(1))]);
+        let Some(NpcEvent::QuestJournal { progress, update: false }) = translate(0x13, &journal) else { panic!() };
+        assert!(progress.tracked && progress.monster_a == 2);
+        let progress10 = sparse(main::QUEST, &[(0, Value::I8(10)), (3, info(1))]);
+        let Some(NpcEvent::QuestJournal { progress, update: true }) = translate(0x13, &progress10) else { panic!() };
+        assert!(!progress.tracked);
+        for o in [8i8, 9] {
+            let refused = sparse(main::QUEST, &[(0, Value::I8(o)), (1, Value::I32(7)), (4, Value::I32(4632))]);
+            assert_eq!(translate(0x13, &refused), Some(NpcEvent::QuestNoSpace { op: o, tid: 4632 }));
+        }
     }
 }

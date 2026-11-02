@@ -245,14 +245,9 @@ fn seconds(ms: i64, tenth: bool, unit: &str) -> String {
 }
 
 fn load_tables(assets: &Assets) -> SkillTables {
-    // SKILL_CONST.txt : une ligne par niveau, le nom sur la première.
-    let text = assets
-        .read_file("ini/SKILL_CONST.txt")
-        .map(|raw| {
-            let plain = archrust_data::ini::decrypt_ini(&raw);
-            if plain.starts_with("name") { plain } else { String::from_utf8_lossy(&raw).into_owned() }
-        })
-        .unwrap_or_default();
+    // SKILL_CONST.txt : une ligne par niveau, le nom sur la première (en clair ou chiffrée, CP949 : les
+    // noms doivent rester ceux de SKILLTEMPLATE.ini).
+    let text = assets.read_text("ini", "SKILL_CONST.txt").unwrap_or_default();
     let mut lines = text.lines();
     let header: Vec<&str> = lines.next().unwrap_or("").split('\t').map(str::trim).collect();
     let col = |n: &str| header.iter().position(|h| h.eq_ignore_ascii_case(n));
@@ -297,14 +292,7 @@ fn load_tables(assets: &Assets) -> SkillTables {
         });
     }
     // SKILL_SPEC.txt : drapeaux du décompte des maîtrises.
-    let spec = assets
-        .read_file("ini/SKILL_SPEC.txt")
-        .map(|raw| {
-            let plain = archrust_data::ini::decrypt_ini(&raw);
-            if plain.get(..4).is_some_and(|h| h.eq_ignore_ascii_case("name")) { plain } else { String::from_utf8_lossy(&raw).into_owned() }
-        })
-        .map(|t| parse_spec(&t))
-        .unwrap_or_default();
+    let spec = assets.read_text("ini", "SKILL_SPEC.txt").map(|t| parse_spec(&t)).unwrap_or_default();
     // SKILLTEMPLATE.ini : TID → nom.
     let mut tables = SkillTables::default();
     if let Ok(t) = assets.table("ini", "SKILLTEMPLATE.ini") {
@@ -379,14 +367,17 @@ pub struct SkillsGlue {
     info: Option<String>,
     /// Messages des événements d'interface (`[EventMap]`).
     events: Option<HashMap<String, String>>,
+    /// Bonus de niveau de toutes les compétences (AGPMSKILL op 14, attache+0x854) et de chacune (op 16,
+    /// compétence+0x188), par identifiant.
+    level_bonus: i32,
+    skill_bonus: HashMap<i32, i32>,
 }
 
 /// Bonus de niveau d'une compétence apprise (FUN_1408762b0) : bonus du personnage (+0x854 des données de
-/// compétence, FUN_1402ff810), +1 si le titre porté est lié à la compétence (FUN_1401c3e90,
-/// `TitleRelatedSkills.txt`, ajout d'Archonia écarté) et bonus propre à la compétence (+0x188). Aucun n'est
-/// tenu par ArchRust : 0.
-fn skill_level_bonus(_tid: i32) -> i32 {
-    0
+/// compétence, FUN_1402ff810, AGPMSKILL op 14), +1 si le titre porté est lié à la compétence (FUN_1401c3e90,
+/// `TitleRelatedSkills.txt`, ajout d'Archonia écarté) et bonus propre à la compétence (+0x188, op 16).
+fn skill_level_bonus(glue: &SkillsGlue, tid: i32) -> i32 {
+    glue.level_bonus + glue.id_of(tid).and_then(|id| glue.skill_bonus.get(&id)).copied().unwrap_or(0)
 }
 
 /// En-tête « %s : %d », ou « %s : %d (+%d) » avec un bonus (FUN_1408762b0, FUN_14087cb70).
@@ -441,7 +432,7 @@ impl SkillsGlue {
             self.tooltip_rows(assets, data.as_ref(), row.as_ref(), 1, Color32::from_rgb(200, 220, 255), &mut lines);
             return lines;
         }
-        let bonus = skill_level_bonus(tid);
+        let bonus = skill_level_bonus(self, tid);
         let current = owned + bonus;
         let [now_word, next_word] = [24, 25].map(|n| super::npc_glue::sysstr(assets, n).unwrap_or_default());
         lines.push((level_header(&now_word, current, bonus), Color32::from_rgb(255, 235, 170)));
@@ -686,6 +677,29 @@ impl App {
             SkillEvent::Cast { .. } => {}
             // Expérience de production : relevée par `product_observe` (voir `app_product.rs`).
             SkillEvent::Exp { .. } => {}
+            // Op 6 : la liste des effets du joueur remplace l'ancienne (FUN_1402f5b70, rappel 12).
+            SkillEvent::Buffs { owner, buffs } => {
+                if owner == me {
+                    self.hud.buffs.clear();
+                    for (tid, ms) in buffs {
+                        self.hud.add_buff(tid, ms);
+                    }
+                }
+            }
+            // Op 10 : rappel 9 sans abonné identifié dans Archonia (rien d'affiché).
+            SkillEvent::AdditionalEffect { kind, caster, target } => log::debug!("effet secondaire {kind} de {caster} sur {target}"),
+            SkillEvent::LevelBonus { owner, bonus } if owner == me || me == 0 => self.skills.level_bonus = bonus.clamp(0, 30),
+            SkillEvent::SkillBonus { owner, id, level } if owner == me || me == 0 => {
+                self.skills.skill_bonus.insert(id, level);
+            }
+            // Op 15 (rappel 0x1d → 0x1405d9f20) : la recharge affichée s'efface.
+            SkillEvent::CooldownReset { owner, id, tid } if owner == me || me == 0 => {
+                let id = if self.skills.known.contains_key(&id) { Some(id) } else { self.skills.id_of(tid) };
+                if let Some(id) = id {
+                    self.skills.cooldowns.remove(&id);
+                }
+            }
+            SkillEvent::LevelBonus { .. } | SkillEvent::SkillBonus { .. } | SkillEvent::CooldownReset { .. } => {}
             // Part des compétences des caractéristiques secondaires (fenêtre du personnage, `hud_status.rs`).
             SkillEvent::Attach { cid, data } => {
                 if cid == me || me == 0 {

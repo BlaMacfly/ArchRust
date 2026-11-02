@@ -36,7 +36,9 @@ Licence : [GPL-3.0-or-later](LICENSE.md).
 | Tuiles du monde (`MagPack` + aPLib) : secteurs, textures, attributs | ✅ 1280/1280 secteurs lus |
 | Rendu wgpu (terrain autour du joueur, modèles, caméra orbitale), interface egui | ✅ terrain, joueur et PNJ affichés ([capture](docs/captures/anchorville.png)) |
 | Textures du sol (base + couches fondues par masque, extension `0xfffff001`) | ✅ à l'échelle, transitions douces, validé en jeu |
-| Objets du monde (`ini/obj%05d.ini` + `objecttemplate.ini`, pack `object`) | ✅ bâtiments, arbres, barrières, décor d'Anchorville ; LOD et animations à faire |
+| Objets du monde (`ini/obj%05d.ini` + `objecttemplate.ini`, pack `object`) | ✅ bâtiments, arbres, barrières, décor d'Anchorville ; niveaux de détail (`loddistancetype.txt`) ; animations du décor (`object/animation`, colonne `ANIMATION`, groupes) et lumières des repères (fonction 30, éteintes selon le ciel) ; ombres projetées des objets sur le sol (AgcmShadow2 : texture 512 × 512 vue d'une lumière fixe, `OP_Shadow` ≥ 2) ; lueur des armures serties (`ee_ss_fx.txt`, `uvAnim.fx`) ; à confirmer en jeu |
+| Distance de vue d'Archonia : sol détaillé (`D`) sur 1 à 3 secteurs, sol grossier (`R{sx},{sy}.dff`, 17 × 17) jusqu'à 4 à 9 secteurs selon `MapView` | 🟡 testé contre les données du client, à voir en jeu |
+| Eau (`world/water/wt%d.dat`, `WaterStatusT1.ini` : surfaces à deux couches qui défilent, vagues de rivage) et herbe (`world/grass/gr%d.dat`, `GrassTemplate.ini` : touffes instanciées, balancement, option `NaturalObj`) | 🟡 testé contre les données du client, à voir en jeu |
 | Modèles de personnages (règle `charactertemplateclient.ini` → fichiers `a/b/c` en hexadécimal) | ✅ joueur et 18 PNJ d'Anchorville |
 | AddOns Lua (`.toc`, frames, événements, slash, minuteurs, SavedVariables, LibStub + Ace3, API étendue) | ✅ voir [docs/ADDONS.md](docs/ADDONS.md) |
 | Packs de ressources (`patch.toml`, dossier ou `.ahp` ; graphismes et sons ; priorités, repli, onglet « Packs de ressources » des Options, `saved-variables/packs.toml`) | ✅ textures, modèles, fichiers, sons ; voir [docs/PACKS-DE-RESSOURCES.md](docs/PACKS-DE-RESSOURCES.md) ; shaders pas encore appliqués |
@@ -46,6 +48,7 @@ Licence : [GPL-3.0-or-later](LICENSE.md).
 | Inventaire et équipement (paquets 0x04 : porter, ranger, déplacer, réunir et séparer les piles, utiliser potions et parchemins, détruire, retour d'un aller-retour ; fenêtre du personnage `Character_Status` et ses emplacements, `C` ou `/perso` ; glisser-déposer, clic droit, Maj + clic ; `/utiliser`, `/porter`, `/ranger`, `/detruire`, `/retour`) | ✅ validé sur ArchCore (`examples/items.rs`, client graphique : [capture](docs/captures/personnage.png)) ; glisser-déposer pas encore essayé à la souris ; armes et boucliers pas encore rattachés aux os de la main, donc non affichés sur le joueur |
 | Animations `.ean` (attente, course, attaque, coup reçu, mort) | ✅ validées en jeu sur ArchCore (TID 96 et Ver vert) |
 | HUD d’Archonia (`UI_1024X768.ini`) : PV, PM, expérience, niveau, barre de raccourcis, menus, minicarte, améliorations | ✅ affiché en jeu sur ArchCore ([capture](docs/captures/hud.png)) ; contenu des raccourcis (UI_STATUS) à faire |
+| Confort d’Archonia : caméra `CamSetting.xml` (bornes, F10/F11/F12, flèches, collision aux objets), ombres rondes, repère de destination, minicarte (zoom, masquer, PNJ et quêtes), bulles de discussion, barres PV/PM, mode de fenêtre / résolution / V-Sync / gamma, capture Impr. écran | ✅ codé et testé sans affichage (à essayer en jeu) ; multiéchantillonnage non appliqué |
 | Fenêtre d’inventaire d’Archonia (`UI_Inventory`) : 5 sacs, icônes `l%07x`, quantités, argent | ✅ affichée en jeu sur ArchCore ([capture](docs/captures/inventaire.png)) ; déplacer et détruire faits (voir « Inventaire et équipement »), vente aux PNJ faite (voir « PNJ ») |
 | Sélection et création de personnage (scène d'origine `LoginSettings.txt` : salle du trône, temples par race, caméras, zoom) | ✅ liste, création race/classe/visage/coiffure/nom, suppression, entrée en jeu, validés sur ArchCore |
 | Orientation et têtes par défaut | ✅ personnages tournés vers leur marche, visage et cheveux skinnés (`character\defaulthead`), validés en jeu (TID 96) |
@@ -106,6 +109,25 @@ dans le dossier `Game` ; il donne le serveur de l'écran de connexion. Sans `rea
 en repli l'`ArchoniaTest.ini` d'Archonia (XML `IPInfo/ServerGroup/GroupName/IP`, première adresse).
 `--connect utilisateur:mdp@/personnage` (sans hôte) se connecte à ce serveur ; un hôte donné à
 `--connect` reste prioritaire.
+
+### Données du serveur (`server-data/`)
+
+Les valeurs de jeu affichées (infobulles, prix, conditions, maîtrises, titres, statistiques,
+catégories de la maison des ventes…) doivent être celles du serveur, pas celles des tables
+d'Archonia. ArchCore les écrit au format des tables du client :
+
+```bash
+archcore export-client-tables <dossier>     # côté serveur, après chaque import de la base monde
+```
+
+Le dossier produit contient `ini/`, un dossier par langue (`ini_fr/`, `ini_de/`…) et `tables.toml`
+(empreinte). Placez-le sous le nom **`server-data/` à côté de `realmlist.wtf`** (dossier de
+l'exécutable, dossier courant ou dossier `Game`, dans cet ordre), ou indiquez-le avec
+`--server-data <dossier>` ou la variable `ARCHRUST_SERVER_DATA`. ArchRust y lit les tables avant les
+packs de ressources et les données du jeu ; aucun pack ne peut les désactiver. Relancez le client
+après un nouvel export. Si le serveur annonce une autre empreinte (ou si le dossier manque), un
+avertissement est écrit dans le journal. Ce dossier est propre à chaque serveur et n'est pas publié
+(`.gitignore`). Détails : [docs/FORMATS.md](docs/FORMATS.md#données-du-serveur-server-data).
 
 La connexion passe par les fenêtres d'Archonia : saisie du compte (`UI_LG_IDPASSWORD`, « Confirm »),
 puis choix du monde (`UI_SelectServer` : liste des mondes du serveur de connexion, « Connect » ou

@@ -42,11 +42,16 @@ pub struct DisplayOptions {
     pub name_others: bool,
     /// Casque visible (`OP_VisibleViewHelmet`), envoyé au serveur (AgpmUIStatus op 3, champ 8).
     pub helmet: bool,
+    /// Bulles de discussion au-dessus des têtes (`OP_ViewBaloonChat`, `VH_BALOONCHAT`, voir `app_balloon.rs`).
+    pub balloon_chat: bool,
+    /// Barres PV / PM sous le nom du joueur (`OP_ViewSelfBars`, `VS_BARS`, AgcmHPBar).
+    pub self_bars: bool,
 }
 
 impl Default for DisplayOptions {
+    /// `COption.ini` d'Archonia : `VH_BALOONCHAT=1`, `VS_BARS=0`.
     fn default() -> Self {
-        Self { name_self: true, name_monster: true, name_guild: true, name_party: true, name_others: true, helmet: true }
+        Self { name_self: true, name_monster: true, name_guild: true, name_party: true, name_others: true, helmet: true, balloon_chat: true, self_bars: false }
     }
 }
 
@@ -97,14 +102,43 @@ pub struct VideoOptions {
     /// `DisableOtherPlayerSkillEffect` (`OP_TurnOffAllEffects`, « Désactiver les effets des autres
     /// joueurs ») : effets des compétences des autres joueurs masqués.
     pub hide_other_effects: bool,
+    /// `Shadow` (`OP_Shadow`, 0 à 3) : 0 coupe l'ombre ronde sous les personnages (`app_decals.rs`),
+    /// 2 et plus allument les ombres projetées des objets sur le sol (`shadow`, AgcmShadow2).
+    pub shadow: u8,
+    /// `Width` / `Height` de `[Patch_Option]` (`OP_Resolution`) ; `None` : taille de la fenêtre gardée.
+    pub resolution: Option<(u32, u32)>,
+    /// `WindowMode` (`OP_WindowMode`) : 0 plein écran, 1 fenêtré, 2 sans bordure (FUN_140703da0).
+    pub window_mode: u8,
+    /// `Multisampling` (`OP_AntiAliasing`, ramené à 0 / 1 par FUN_14070ed10). Enregistré seulement :
+    /// Archonia ne l'applique jamais (niveau de multiéchantillonnage toujours 1, `FUN_140357fb0`).
+    pub multisampling: bool,
+    /// `VSync` (`OP_HighOptimization`, case « V-Sync », FUN_140707970).
+    pub vsync: bool,
+    /// Valeur de `BRIGHT=100:<valeur>` (`OP_BrightVal`, gamma, FUN_14070f5d0), de 0 à 100.
+    pub bright: u8,
+    /// `NaturalObj` (`OP_NaturalObj`, « Objets ») : herbe du monde, 0 aucune, 1 type de distance 2,
+    /// 2 et 3 type 3 (`FUN_140711350` → `FUN_140597390`, voir `grass.rs`).
+    pub natural_obj: u8,
 }
 
 impl Default for VideoOptions {
     /// Valeurs de `COption.ini` d'Archonia : `Nature=2`, `LensFlare=1`, `Fog=1`, `Sky=1`, `Effect=2`,
-    /// `DisableOtherPlayerSkillEffect=0`.
+    /// `DisableOtherPlayerSkillEffect=0`, `Shadow=3`, `WindowMode=1`, `Multisampling=1`, `VSync=1`, `NaturalObj=1` ;
+    /// gamma 50 (valeur du constructeur d'AgcmUIOption, FUN_140703da0 : courbe neutre).
     fn default() -> Self {
-        Self { char_view: 3, map_view: 1, nature: 2, sky: true, fog: true, lens_flare: true, effect: 2, hide_other_effects: false }
+        Self { char_view: 3, map_view: 1, nature: 2, sky: true, fog: true, lens_flare: true, effect: 2, hide_other_effects: false, shadow: 3, resolution: None, window_mode: 1, multisampling: true, vsync: true, bright: 50, natural_obj: 1 }
     }
+}
+
+/// Rampe gamma d'Archonia (FUN_14070f5d0) pour `bright` sur 100 : `(i / 255)^(1 / (bright/100 + 0,5))`
+/// × 65 536, bornée à 65 535 (contraste et luminosité à 100/100 : sans effet).
+pub fn gamma_ramp(bright: u8) -> [u16; 256] {
+    let exp = 1.0 / (bright.min(100) as f32 / 100.0 + 0.5);
+    let mut out = [0u16; 256];
+    for (i, v) in out.iter_mut().enumerate() {
+        *v = ((i as f32 / 255.0).powf(exp) * 65_536.0).clamp(0.0, 65_535.0) as u16;
+    }
+    out
 }
 
 impl VideoOptions {
@@ -150,8 +184,8 @@ impl VideoOptions {
     }
 
     /// Rayon (en secteurs de 6400) du sol et des objets chargés autour du joueur : 2 à 5. Archonia
-    /// charge un sol grossier sur 4 / 6 / 7 / 9 secteurs et détaillé sur 1 / 1 / 2 / 3 ; ArchRust n'a
-    /// qu'un niveau de détail.
+    /// charge un sol grossier sur 4 / 6 / 7 / 9 secteurs et détaillé sur 1 / 1 / 2 / 3, comme ArchRust
+    /// (`world::TerrainView`) ; ce rayon-ci garde les hauteurs, le blocage et les objets.
     pub fn sector_radius(&self) -> i32 {
         2 + self.map_view.min(3) as i32
     }

@@ -33,6 +33,9 @@ pub struct PartyFrame {
     pub leader: bool,
     /// `Party_Face_XX.png` d'après la race et la classe du modèle.
     pub face: Option<String>,
+    /// Statut du nom (`Status2` de `CONTROL_29971` / `CONTROL_26137`) : 0 à 2 dans la zone d'effet du chef
+    /// (chevalier, archer, mage), 3 hors de la zone, 4 mort.
+    pub area_status: usize,
 }
 
 /// Données affichées : le joueur d'abord, puis les autres membres.
@@ -159,8 +162,11 @@ pub fn draw_party(ctx: &egui::Context, hud: &mut HudState, assets: &Assets, view
                 if let (Some((_, r)), Some(level)) = (rect_of(names[2]), frame.level) {
                     shadow_text(&painter, r.left_center(), Align2::LEFT_CENTER, &level.to_string(), font, Color32::from_rgb(255, 230, 160));
                 }
-                if let Some((_, r)) = rect_of(names[3]) {
-                    shadow_text(&painter, r.left_center(), Align2::LEFT_CENTER, &frame.name, font, Color32::WHITE);
+                // Nom à la couleur du statut de zone d'effet (`PartyActiveEffectArea*`, `PartyDisableEffectArea`,
+                // `PartySetDead`).
+                if let Some((c, r)) = rect_of(names[3]) {
+                    let color = c.status_colors.get(frame.area_status).map_or(Color32::WHITE, |&v| super::portal_ui::argb(v));
+                    shadow_text(&painter, r.left_center(), Align2::LEFT_CENTER, &frame.name, font, color);
                 }
                 if frame.leader {
                     if let Some((c, r)) = rect_of(names[4]) {

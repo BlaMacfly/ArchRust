@@ -6,14 +6,18 @@
 //!            3 départ, 4 exclusion (chef), 11 passage de chef (chef)
 //!   reçu   : 0 invitation (auteur, nom de l'auteur), 1 refus et 2 acceptation (cible, nom de l'invité),
 //!            4 exclusion, 11 nouveau chef (auteur), échecs 5 autre groupe, 6 déjà membre, 7 plein,
-//!            8 pas chef, 10 joueur absent
+//!            8 pas chef, 10 joueur absent, 9 échec général (`PartyRecvOperationFailed`), 12 passage de chef
+//!            refusé, 13 invité de 10 niveaux de moins (au moins), 18 / 19 / 20 meurtrier (soi, la cible, exclu)
 //! Rappel de groupe (Summoning Orb, usage 15 ; Archonia AgcmParty FUN_1406ec890, AgcmUIParty) :
 //!   reçu   : 15 demande (1 = CID du lanceur, ignorée s'il n'est pas du même groupe : `UI_ConfirmRecall`),
 //!            16 et 17 au lanceur (1 = CID du membre qui accepte / refuse)
 //!   envoyé : 16 accepter (1 soi, 2 lanceur ; précédé de l'annulation d'échange 0x07 op 5), 17 refuser
 //! Groupe (0x08, drapeaux 2) : 0 opération, 1 identifiant, 2 membres au plus, 3 membres, 4 CID d'un
 //!   membre, 5 liste des CID (u32, chef en tête), 8 répartition de l'expérience, 10 des objets.
-//!   reçu   : 0 groupe et liste, 3 membre ajouté, 4 membre retiré, 1 groupe retiré, 5 et 6 réglages
+//!   reçu   : 0 groupe et liste, 3 membre ajouté, 4 membre retiré, 1 groupe retiré, 5 et 6 réglages,
+//!            2 mise à jour (Archonia 0x1402dbfc0) : 2 membres au plus (si ≠ 0), 7 zone d'effet (mini de 5 × I8,
+//!            un par membre dans l'ordre de la liste, 1 = dans la zone ; seules les cases changées), 9 bonus
+//!            (mini I8 dégâts, I8 défense, I16 PV max, I16 PM max ; tout nul = bonus annulé par l'écart de niveau)
 //!   envoyé : 5 (champ 8) et 6 (champ 10) par le chef
 //! ```
 //!
@@ -30,6 +34,8 @@ use std::collections::HashMap;
 pub mod op {
     pub const ADD: i8 = 0;
     pub const REMOVE: i8 = 1;
+    /// Mise à jour : zone d'effet (champ 7) et bonus (champ 9), S → C.
+    pub const UPDATE: i8 = 2;
     pub const ADD_MEMBER: i8 = 3;
     pub const REMOVE_MEMBER: i8 = 4;
     pub const UPDATE_EXP_TYPE: i8 = 5;
@@ -47,7 +53,17 @@ pub mod mgmt {
     pub const FAILED_ALREADY_MEMBER: i8 = 6;
     pub const FAILED_FULL: i8 = 7;
     pub const FAILED_NOT_LEADER: i8 = 8;
+    /// Échec sans motif (`PartyRecvOperationFailed`, FUN_1405e4560).
+    pub const FAILED: i8 = 9;
     pub const FAILED_NO_LOGIN: i8 = 10;
+    /// Passage de chef refusé (`Party_DelegationLeaderFailed`, FUN_1405e3e70).
+    pub const DELEGATION_LEADER_FAILED: i8 = 12;
+    /// Invité trop bas : 10 niveaux de moins ou plus (`Party_InviteMemeberLevelDiff`, FUN_1405e3ec0).
+    pub const FAILED_LEVEL_DIFF: i8 = 13;
+    /// Meurtrier : le joueur (`Party_Murderer_Error_Self`), la cible (`…_Target`), exclu du groupe (`…_Leave`).
+    pub const FAILED_MURDERER_SELF: i8 = 18;
+    pub const FAILED_MURDERER_TARGET: i8 = 19;
+    pub const FAILED_MURDERER_LEAVE: i8 = 20;
     /// L'invité refuse les invitations de groupe (options).
     pub const FAILED_REFUSE: i8 = 14;
     pub const DELEGATION_LEADER: i8 = 11;
@@ -82,6 +98,24 @@ pub fn item_division_label(t: i8) -> &'static str {
     }
 }
 
+/// Bonus du groupe (champ 9 de l'op 2) : dégâts, défense, PV max, PM max.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct PartyBonus {
+    pub damage: i32,
+    pub defense: i32,
+    pub max_hp: i32,
+    pub max_mp: i32,
+}
+
+impl PartyBonus {
+    pub fn is_none(&self) -> bool {
+        *self == PartyBonus::default()
+    }
+}
+
+/// Membres au plus d'un groupe (zone d'effet : un octet par membre).
+pub const MAX_MEMBERS: usize = 5;
+
 /// Paquet de groupe (0x08) décodé.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PartyPacket {
@@ -93,6 +127,10 @@ pub struct PartyPacket {
     pub members: Option<Vec<i32>>,
     pub exp_type: Option<i8>,
     pub item_division: Option<i8>,
+    /// Zone d'effet (op 2, champ 7) : drapeau de chaque membre, `None` pour une case non envoyée.
+    pub effect_area: Option<[Option<bool>; MAX_MEMBERS]>,
+    /// Bonus (op 2, champ 9).
+    pub bonus: Option<PartyBonus>,
 }
 
 /// Paquet de gestion (0x09) décodé.
@@ -118,6 +156,18 @@ pub fn decode_party(p: &Incoming) -> Option<PartyPacket> {
             .map(|c| u32::from_le_bytes([c[0], c[1], c[2], c[3]]) as i32)
             .collect()
     });
+    let mini_of = |i: usize, s: &'static archrust_protocol::schema::Schema| p.get(i).and_then(Value::as_bytes).and_then(|b| archrust_protocol::packet::decode_mini(s, b).ok()).map(|(_, v)| v);
+    let effect_area = mini_of(7, archrust_protocol::schema::mini::PARTY_EFFECT_AREA).map(|v| {
+        let mut out = [None; MAX_MEMBERS];
+        for (i, slot) in out.iter_mut().enumerate() {
+            *slot = v.get(i).and_then(Option::as_ref).and_then(Value::as_i64).map(|f| f != 0);
+        }
+        out
+    });
+    let bonus = mini_of(9, archrust_protocol::schema::mini::PARTY_BONUS).map(|v| {
+        let n = |i: usize| v.get(i).and_then(Option::as_ref).and_then(Value::as_i64).unwrap_or(0) as i32;
+        PartyBonus { damage: n(0), defense: n(1), max_hp: n(2), max_mp: n(3) }
+    });
     Some(PartyPacket {
         op: int(p, 0)? as i8,
         id: int(p, 1).map(|v| v as i32),
@@ -126,6 +176,8 @@ pub fn decode_party(p: &Incoming) -> Option<PartyPacket> {
         members,
         exp_type: int(p, 8).map(|v| v as i8),
         item_division: int(p, 10).map(|v| v as i8),
+        effect_area,
+        bonus,
     })
 }
 
@@ -246,6 +298,10 @@ pub enum PartyNotice {
     /// Au lanceur : ce membre accepte (op 16) ou refuse (op 17) d'être rappelé.
     RecallAccepted(i32),
     RecallRejected(i32),
+    /// Zone d'effet changée (op 2, champ 7).
+    EffectArea,
+    /// Bonus reçu (op 2, champ 9) ; tout nul : `Party_Add_None`.
+    Bonus(PartyBonus),
 }
 
 impl PartyNotice {
@@ -275,6 +331,8 @@ impl PartyNotice {
             PartyNotice::RecallRequested(i) => format!("rappel demandé par {}", i.name),
             PartyNotice::RecallAccepted(c) => format!("rappel accepté par {}", name(c)),
             PartyNotice::RecallRejected(c) => format!("rappel refusé par {}", name(c)),
+            PartyNotice::EffectArea => format!("zone d'effet : {:?}", state.effect_area),
+            PartyNotice::Bonus(b) => format!("bonus du groupe : {b:?}"),
             PartyNotice::Failed { code, name } => {
                 let who = if name.is_empty() { "Ce joueur" } else { name.as_str() };
                 match *code {
@@ -307,6 +365,10 @@ pub struct PartyState {
     pub names: HashMap<i32, String>,
     /// Rappel en attente de réponse (`UI_ConfirmRecall` ouverte) : lanceur.
     pub recall: Option<Invitation>,
+    /// Membre dans la zone d'effet du chef, dans l'ordre de `members` (groupe+0x98, op 2 champ 7).
+    pub effect_area: [bool; MAX_MEMBERS],
+    /// Dernier bonus reçu (op 2 champ 9, `0x1405e5180`).
+    pub bonus: PartyBonus,
 }
 
 impl PartyState {
@@ -353,7 +415,14 @@ impl PartyState {
         let was = self.in_party();
         self.id = None;
         self.members.clear();
+        self.effect_area = [false; MAX_MEMBERS];
+        self.bonus = PartyBonus::default();
         was
+    }
+
+    /// Membre dans la zone d'effet (faux pour un CID hors du groupe).
+    pub fn in_effect_area(&self, cid: i32) -> bool {
+        self.members.iter().position(|c| *c == cid).and_then(|i| self.effect_area.get(i)).copied().unwrap_or(false)
     }
 
     /// Applique un paquet de groupe reçu ; `me` = CID du joueur.
@@ -399,6 +468,29 @@ impl PartyState {
                 let t = p.item_division?;
                 self.item_division = t;
                 Some(PartyNotice::ItemDivisionChanged(t))
+            }
+            // 0x1402dbfc0 : champ 2 retenu s'il n'est pas nul, cases de zone envoyées, bonus (rappel 13).
+            op::UPDATE => {
+                if !self.in_party() {
+                    return None;
+                }
+                if let Some(m) = p.max_members.filter(|m| *m != 0) {
+                    self.max_members = m.max(1) as usize;
+                }
+                if let Some(area) = p.effect_area {
+                    for (slot, flag) in self.effect_area.iter_mut().zip(area) {
+                        if let Some(f) = flag {
+                            *slot = f;
+                        }
+                    }
+                }
+                match p.bonus {
+                    Some(b) => {
+                        self.bonus = b;
+                        Some(PartyNotice::Bonus(b))
+                    }
+                    None => p.effect_area.map(|_| PartyNotice::EffectArea),
+                }
             }
             _ => None,
         }
@@ -450,7 +542,13 @@ impl PartyState {
             | mgmt::FAILED_ALREADY_MEMBER
             | mgmt::FAILED_FULL
             | mgmt::FAILED_NOT_LEADER
+            | mgmt::FAILED
             | mgmt::FAILED_NO_LOGIN
+            | mgmt::DELEGATION_LEADER_FAILED
+            | mgmt::FAILED_LEVEL_DIFF
+            | mgmt::FAILED_MURDERER_SELF
+            | mgmt::FAILED_MURDERER_TARGET
+            | mgmt::FAILED_MURDERER_LEAVE
             | mgmt::FAILED_REFUSE) => Some(PartyNotice::Failed {
                 code,
                 name: m.name.clone(),
@@ -593,6 +691,34 @@ mod tests {
         }
         s.reset();
         assert_eq!(s.recall, None);
+    }
+
+    #[test]
+    fn zone_d_effet_et_bonus() {
+        let mut s = PartyState { id: Some(1), members: vec![7, 9, 12], ..Default::default() };
+        let area = |pairs: &[(usize, Value)]| {
+            let m = archrust_protocol::schema::mini::PARTY_EFFECT_AREA;
+            Value::Packet(archrust_protocol::packet::build_mini(m, &sparse(m, pairs)).unwrap())
+        };
+        // Cases 0 et 2 envoyées seules : la case 1 reste.
+        let n = s.apply_party(&party(&[(0, Value::I8(op::UPDATE)), (1, Value::I32(1)), (7, area(&[(0, Value::I8(1)), (2, Value::I8(1))]))]), 9);
+        assert_eq!(n, Some(PartyNotice::EffectArea));
+        assert!(s.in_effect_area(7) && !s.in_effect_area(9) && s.in_effect_area(12) && !s.in_effect_area(99));
+        s.apply_party(&party(&[(0, Value::I8(op::UPDATE)), (7, area(&[(2, Value::I8(0))]))]), 9);
+        assert!(s.in_effect_area(7) && !s.in_effect_area(12));
+        let b = archrust_protocol::schema::mini::PARTY_BONUS;
+        let bonus = Value::Packet(archrust_protocol::packet::build_mini(b, &sparse(b, &[(0, Value::I8(4)), (2, Value::I16(150))])).unwrap());
+        let n = s.apply_party(&party(&[(0, Value::I8(op::UPDATE)), (2, Value::I8(0)), (9, bonus)]), 9);
+        let want = PartyBonus { damage: 4, defense: 0, max_hp: 150, max_mp: 0 };
+        assert_eq!(n, Some(PartyNotice::Bonus(want)));
+        assert_eq!((s.bonus, s.max_members), (want, 0));
+        // Départ : tout s'efface.
+        s.apply_party(&party(&[(0, Value::I8(op::REMOVE))]), 9);
+        assert!(s.bonus.is_none() && !s.in_effect_area(7));
+        // Échecs ajoutés : 9, 12, 13, 18 à 20.
+        for code in [mgmt::FAILED, mgmt::DELEGATION_LEADER_FAILED, mgmt::FAILED_LEVEL_DIFF, mgmt::FAILED_MURDERER_SELF, mgmt::FAILED_MURDERER_TARGET, mgmt::FAILED_MURDERER_LEAVE] {
+            assert!(matches!(s.apply_management(&management(code, 9, 7, "Bob")), Some(PartyNotice::Failed { code: c, .. }) if c == code));
+        }
     }
 
     #[test]

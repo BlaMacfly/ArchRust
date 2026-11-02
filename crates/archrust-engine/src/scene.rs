@@ -709,18 +709,31 @@ pub fn entity_meshes_with_head(
         // Archonia, seule la pièce de sa partie est gardée, et elle remplace la pièce de cette partie
         // (vêtement par défaut ou autre objet). Tout ajouter superposait les pièces, qui clignotaient.
         let part = item_part_for_tid(assets, item.template_id).filter(|p| matches!(p, 2 | 5 | 6 | 7));
-        let kept: Vec<_> = match part {
-            Some(p) => pieces.iter().filter(|(_, _, q)| *q == Some(p)).cloned().collect(),
-            None => Vec::new(),
+        let (kept, others): (Vec<_>, Vec<_>) = match part {
+            Some(p) => pieces.into_iter().partition(|(_, _, q)| *q == Some(p)),
+            None => (Vec::new(), pieces),
         };
         if let (Some(p), false) = (part, kept.is_empty()) {
             meshes.retain(|(_, _, q)| *q != Some(p));
-            meshes.extend(kept);
+            // Pièce marquée de son objet : lueur de l'armure sertie (`app_stones.rs`).
+            meshes.extend(kept.into_iter().map(|(m, t, q)| (with_item(m, item.template_id), t, q)));
         } else {
-            meshes.extend(pieces);
+            meshes.extend(kept.into_iter().chain(others));
         }
     }
     Ok(meshes.into_iter().map(|(m, t, _)| (m, t)).collect())
+}
+
+/// Maillage marqué du TID de l'objet porté dont il vient (`Mesh::item_tid`) ; un maillage partagé
+/// (modèle de patch en cache) reste tel quel.
+fn with_item(mesh: Arc<Mesh>, tid: i32) -> Arc<Mesh> {
+    match Arc::try_unwrap(mesh) {
+        Ok(mut m) => {
+            m.item_tid = Some(tid);
+            Arc::new(m)
+        }
+        Err(shared) => shared,
+    }
 }
 
 /// Angle (degrés) qui tourne un personnage de `from` vers `to`, comme `FUN_14016bf60`

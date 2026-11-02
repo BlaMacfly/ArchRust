@@ -1,7 +1,8 @@
 //! Réglages des onglets GFX, Affichage et Fonction des options (`hud_options.rs`), appliqués au jeu :
 //!
 //! - **GFX** : `CharView` borne la distance de tracé des personnages, `MapView` celle des objets et
-//!   le rayon de sol chargé autour du joueur (voir [`crate::options::VideoOptions`]) ;
+//!   les rayons de sol détaillé et grossier (`world::TerrainView`), `NaturalObj` l'herbe (voir
+//!   [`crate::options::VideoOptions`]) ;
 //! - **Affichage** : noms filtrés dans `app_boards.rs`, casque retiré du modèle du joueur
 //!   (`app_items.rs`) et envoyé au serveur (AgpmUIStatus op 3, champ 8) ;
 //! - **Fonction** : drapeaux de refus envoyés au serveur (AgpmCharacter op 0x11, champ 22) à l'entrée
@@ -34,6 +35,12 @@ impl App {
     /// Rayon de sol et d'objets chargés d'après `MapView`.
     fn apply_video_options(options: &ClientOptions, terrain: &mut Terrain, objects: &mut WorldObjects) {
         let radius = options.video.sector_radius();
+        let view = crate::world::TerrainView { map_view: options.video.map_view, natural_obj: options.video.natural_obj };
+        if terrain.view != view {
+            terrain.view = view;
+            terrain.last_center = None;
+        }
+        objects.lod_factor = options.video.map_factor();
         if terrain.radius != radius || objects.radius != radius {
             terrain.radius = radius;
             objects.radius = radius;
@@ -45,6 +52,8 @@ impl App {
     /// Entrée en jeu : drapeaux de refus et casque d'après `options.toml`, qui fait foi comme
     /// `COption.ini` pour Archonia.
     pub(super) fn options_enter_world(&mut self) {
+        self.terrain.view = crate::world::TerrainView { map_view: self.options.video.map_view, natural_obj: self.options.video.natural_obj };
+        self.objects.lod_factor = self.options.video.map_factor();
         let Some(net) = self.net.as_ref() else { return };
         net.send(Command::OptionFlags(self.options.refuse.flags()));
         net.send(Command::ViewHelmet(self.options.display.helmet));

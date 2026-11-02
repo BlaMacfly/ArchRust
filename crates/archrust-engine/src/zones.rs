@@ -96,7 +96,15 @@ pub fn cell_ground_blocked(cell: u32) -> bool {
     cell & 0x100 != 0
 }
 
-/// Musiques d'une section `skyset.ini` : `HH_BackGroundMusic` distincts et non vides des six
+/// Type de sol d'une cellule : octet 0 décalé d'un bit (`FUN_14018c380` : `*cellule >> 1`, lu par
+/// les pas du joueur `FUN_14056d630` ; le bit 0 n'est pas relevé). Indices d'`ee_move_sound.txt`
+/// (`FUN_140831000`) : 0 SOIL, 1 SWAMP, 2 GRASS, 3 SAND, 4 LEAF, 5 SNOW, 6 WATER, 7 STONE, 8 WOOD,
+/// 9 METAL, 10 BONE, 11 MUD, 12 SOILGRASS, 13 SOILSOLID, 14 SPORE, 15 MOSS, 16 GRANITE.
+pub fn cell_ground(cell: u32) -> u8 {
+    ((cell & 0xff) >> 1) as u8
+}
+
+/// Musiques d'une section `skyset.ini` :`HH_BackGroundMusic` distincts et non vides des six
 /// tranches (`sound/bgm/…`). Archonia en tire une au hasard, sans suivre l'heure (voir
 /// [`crate::sky::MusicPlaylist`]).
 pub fn sky_music(section: &archrust_data::ini::IniSection) -> Vec<String> {
@@ -260,7 +268,7 @@ pub struct ZoneAudio {
     /// Musiques (`sound/bgm/…`) du gabarit de ciel de la région (toutes tranches).
     pub music: Vec<String>,
     /// Ambiances (`sound/stream/…`) de la région à l'heure donnée, dans l'ordre des
-    /// `EffectIndex` ; Archonia les joue toutes, ArchRust la première.
+    /// `EffectIndex` ; Archonia les joue toutes à la fois, ArchRust aussi.
     pub ambience: Vec<String>,
 }
 
@@ -288,14 +296,24 @@ impl Zones {
         loaded
     }
 
-    /// Indice de région (`RegionTemplate.ini`) de la cellule contenant (x, z).
-    pub fn region_at(&mut self, assets: &Assets, x: f32, z: f32) -> Option<u16> {
+    /// Cellule d'attributs (`.amf`) contenant (x, z).
+    pub fn cell_at(&mut self, assets: &Assets, x: f32, z: f32) -> Option<u32> {
         let (sx, sy) = sector_of(x, z);
         let grid = self.grid(assets, sx, sy)?;
         let origin = sector_origin(sx, sy);
         let cx = (((x - origin.x) / CELL_SIZE).floor() as i64).clamp(0, CELLS as i64 - 1) as usize;
         let cz = (((z - origin.z) / CELL_SIZE).floor() as i64).clamp(0, CELLS as i64 - 1) as usize;
-        Some(cell_region(grid[cz * CELLS + cx]))
+        Some(grid[cz * CELLS + cx])
+    }
+
+    /// Indice de région (`RegionTemplate.ini`) de la cellule contenant (x, z).
+    pub fn region_at(&mut self, assets: &Assets, x: f32, z: f32) -> Option<u16> {
+        self.cell_at(assets, x, z).map(cell_region)
+    }
+
+    /// Type de sol (indice d'`ee_move_sound.txt`, 0 SOIL … 16 GRANITE) sous (x, z).
+    pub fn ground_at(&mut self, assets: &Assets, x: f32, z: f32) -> Option<u8> {
+        self.cell_at(assets, x, z).map(cell_ground)
     }
 
     /// Nom (coréen) d'une région.
@@ -330,12 +348,18 @@ impl Zones {
             return Vec::new();
         };
         let ids = sky_effect_sets(section, hour);
+        Self::ambience_of_sets(assets, &ids)
+    }
+
+    /// Flux d'ambiance (`sound/stream/…`) des jeux d'effets `ids` : chaque effet son de chaque jeu,
+    /// dans l'ordre (Archonia les joue tous à la fois, `FUN_140581fd0`).
+    pub fn ambience_of_sets(assets: &Assets, ids: &[u32]) -> Vec<String> {
         if ids.is_empty() {
             return Vec::new();
         }
         let sets = assets.effect_sets();
         let mut out = Vec::new();
-        for id in ids {
+        for &id in ids {
             match sets.get(id) {
                 Some(set) => {
                     if set.sounds.is_empty() {

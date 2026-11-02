@@ -15,7 +15,8 @@
 //!
 //! Rendu (voir `docs/FORMATS.md`, « Effets ») : planches (`AgcdEffBoard`, carré de ±7,064 unités,
 //! FUN_1408d2e20, face à la caméra si le drapeau 1 de la base est mis — déduit des données), planches au
-//! sol, objets (`effect/clump/K*.ECL`), sons ; animations couleur, échelle, rotation (vitesse en
+//! sol, objets (`effect/clump/K*.ECL`), sons (FUN_1408fbf70 : type 1 en 3D au repère de la base, type 3
+//! en 2D, 0 boucle = en boucle jusqu'à la fin du jeu ; voir `audio.rs`) ; animations couleur, échelle, rotation (vitesse en
 //! degrés par seconde, cumulée comme FUN_1408f4020), déplacement linéaire, coordonnées de texture
 //! (image par paliers, FUN_1408f45b0), spline (`effect/animation/*.ESP`, position seulement).
 //! Animation RtAnim des objets (animation 7, `AgcdEffCtrl_Obj` FUN_140834f50, FUN_1408f43e0) : la
@@ -144,6 +145,8 @@ struct Instance {
     delay: u32,
     /// Effet d'apparition (condition 0x1) : joué tant que le personnage est en vue.
     permanent: bool,
+    /// Effet d'une arme sertie (`app_stones.rs`) : permanent, remplacé quand la conversion change.
+    stone: bool,
     /// Émetteurs des bases de particules (types 1 et 2), par indice de base.
     emitters: Vec<Option<particles::Emitter>>,
     /// Traînées (type 3), par indice de base.
@@ -202,6 +205,8 @@ pub struct EffectsGlue {
     pending_spawn: Vec<i32>,
     /// Les effets lancés en ce moment sont des effets d'apparition.
     spawning: bool,
+    /// Sons en boucle des jeux en cours (instance : naissance, jeu, porteur) → voix audio.
+    voices: Vec<((Instant, u32, i32), u64)>,
 }
 
 /// `ee_common_char.txt` : NAME → effets (EID, OFFSET_X/Y/Z, SCALE, NODE_ID, GAP).
@@ -229,22 +234,25 @@ fn column(table: &archrust_data::IniTable, name: &str) -> Option<String> {
     table.section("")?.entries.iter().find(|(_, v)| v.eq_ignore_ascii_case(name)).map(|(k, _)| k.clone())
 }
 
-/// Effets de la compétence `skill_tid` lancée par le modèle `char_tid` avec l'ensemble d'animation
-/// `equip` (voir l'en-tête du module).
-pub fn skill_effects(assets: &Assets, char_tid: i32, skill_tid: i32, equip: u32) -> Vec<Placed> {
+/// Rang de la compétence `skill_tid` (nom de `SKILLTEMPLATE.ini`) parmi les `UsableSkillTName<i>` du
+/// modèle `char_tid` (`CharacterTemplatePublic.ini`) : premier champ des `SKILL_EFFECT_DATA` et des
+/// `SKILL_EFFECT_SOUND` (voir `app_sounds.rs`).
+pub fn skill_rank(assets: &Assets, char_tid: i32, skill_tid: i32) -> Option<u32> {
     let name = (|| {
         let t = assets.table("ini", "SKILLTEMPLATE.ini").ok()?;
         let c = column(&t, "Name")?;
         t.section(&skill_tid.to_string())?.get(&c).map(str::to_owned)
-    })();
-    let Some(name) = name else { return Vec::new() };
-    let rank = (|| {
-        let t = assets.table("ini", "CharacterTemplatePublic.ini").ok()?;
-        let header = t.section("")?;
-        let sec = t.section(&char_tid.to_string())?;
-        header.entries.iter().filter_map(|(k, v)| Some((v.strip_prefix("UsableSkillTName")?.parse::<u32>().ok()?, k))).find_map(|(i, k)| sec.get(k).filter(|s| s.trim().eq_ignore_ascii_case(name.trim())).map(|_| i))
-    })();
-    let Some(rank) = rank else { return Vec::new() };
+    })()?;
+    let t = assets.table("ini", "CharacterTemplatePublic.ini").ok()?;
+    let header = t.section("")?;
+    let sec = t.section(&char_tid.to_string())?;
+    header.entries.iter().filter_map(|(k, v)| Some((v.strip_prefix("UsableSkillTName")?.parse::<u32>().ok()?, k))).find_map(|(i, k)| sec.get(k).filter(|s| s.trim().eq_ignore_ascii_case(name.trim())).map(|_| i))
+}
+
+/// Effets de la compétence `skill_tid` lancée par le modèle `char_tid` avec l'ensemble d'animation
+/// `equip` (voir l'en-tête du module).
+pub fn skill_effects(assets: &Assets, char_tid: i32, skill_tid: i32, equip: u32) -> Vec<Placed> {
+    let Some(rank) = skill_rank(assets, char_tid, skill_tid) else { return Vec::new() };
     let Ok(t) = assets.table("ini", "charactertemplateskill.ini") else { return Vec::new() };
     let (Some(header), Some(sec)) = (t.section(""), t.section(&char_tid.to_string())) else { return Vec::new() };
     let data_cols: std::collections::HashSet<&str> = header.entries.iter().filter(|(_, v)| v.starts_with("SKILL_EFFECT_DATA")).map(|(k, _)| k.as_str()).collect();
@@ -659,7 +667,7 @@ impl App {
             emitters.push(b.particles.is_some().then(|| particles::Emitter::new(self.effects.seed)));
         }
         let trails = set.bases.iter().map(|b| b.tail.is_some().then(particles::Trail::default)).collect();
-        self.effects.active.push(Instance { sounded: vec![false; set.bases.len()], set, born: Instant::now(), anchor, last: at, offset: p.offset, scale: p.scale, life, node: p.node, delay: p.delay, permanent: self.effects.spawning, emitters, trails, attach });
+        self.effects.active.push(Instance { sounded: vec![false; set.bases.len()], set, born: Instant::now(), anchor, last: at, offset: p.offset, scale: p.scale, life, node: p.node, delay: p.delay, permanent: self.effects.spawning, stone: false, emitters, trails, attach });
         true
     }
 
@@ -677,9 +685,32 @@ impl App {
         self.effects_play_on(cid, &list, Class::Combat);
     }
 
+    /// Effets d'une arme sertie du personnage `cid` (`app_stones.rs`) : remplacent les précédents,
+    /// joués en permanence au niveau « combat » d'`OP_Effect`.
+    pub(super) fn effects_set_stones(&mut self, cid: i32, placed: &[Placed]) {
+        self.effects.active.retain(|i| !(i.stone && matches!(i.anchor, Anchor::Character(c) if c == cid)));
+        if placed.is_empty() || !self.effects_class_on(Class::Combat) {
+            return;
+        }
+        let Some(at) = self.effects_anchor_of(cid) else { return };
+        for p in placed {
+            if self.effects_spawn(*p, Anchor::Character(cid), at) {
+                if let Some(i) = self.effects.active.last_mut() {
+                    i.permanent = true;
+                    i.stone = true;
+                }
+            }
+        }
+    }
+
+    /// Le personnage `cid` a des effets d'arme sertie en cours.
+    pub(super) fn effects_has_stones(&self, cid: i32) -> bool {
+        self.effects.active.iter().any(|i| i.stone && matches!(i.anchor, Anchor::Character(c) if c == cid))
+    }
+
     /// Effets d'apparition (condition 0x1) d'un personnage entré dans la vue : remplacent les siens.
     fn effects_spawn_permanent(&mut self, cid: i32) {
-        self.effects.active.retain(|i| !(i.permanent && matches!(i.anchor, Anchor::Character(c) if c == cid)));
+        self.effects.active.retain(|i| !(i.permanent && !i.stone && matches!(i.anchor, Anchor::Character(c) if c == cid)));
         self.effects.spawning = true;
         self.effects_event(cid, COND_SPAWN);
         self.effects.spawning = false;
@@ -753,7 +784,8 @@ impl App {
         let right = Vec3::new(view.x_axis.x, view.y_axis.x, view.z_axis.x);
         let up = Vec3::new(view.x_axis.y, view.y_axis.y, view.z_axis.y);
         let cam = particles::CameraAxes { right, up };
-        let mut sounds: Vec<String> = Vec::new();
+        // Sons des bases (type 6) : fichier, position (3D) ou 2D, volume, boucle, porteur suivi, instance.
+        let mut sounds: Vec<(String, Option<Vec3>, f32, bool, Option<i32>, (Instant, u32, i32))> = Vec::new();
         let mut batches: HashMap<(Option<String>, EffectBlend), Vec<Vertex>> = HashMap::new();
         let mut lights: Vec<EffectLight> = Vec::new();
         let assets = self.assets.clone();
@@ -809,10 +841,25 @@ impl App {
                     continue;
                 }
                 let tb = t - base.delay;
-                if let Some((_, file, _, _, _)) = &base.sound {
-                    if !inst.sounded[bi] && !file.is_empty() {
+                if let Some((kind, file, mono, loops, volume)) = &base.sound {
+                    // FUN_1408fbf70 : type 1 = son 3D (fichier « mono ») au repère de la base, type 3 = son
+                    // 2D ; nombre de boucles 0 = en boucle jusqu'à la fin du jeu. Les types 2 (flux
+                    // d'ambiance, joués par le ciel) et 4 ne sont pas joués ici.
+                    if !inst.sounded[bi] {
                         inst.sounded[bi] = true;
-                        sounds.push(file.clone());
+                        let at = frames[bi].unwrap_or(root).w_axis.truncate();
+                        let key = (inst.born, set.id, cid);
+                        let emitter = follows.then_some(cid);
+                        match *kind {
+                            1 => {
+                                let name = if mono.is_empty() { file } else { mono };
+                                if !name.is_empty() {
+                                    sounds.push((name.clone(), Some(at), *volume, *loops == 0, emitter, key));
+                                }
+                            }
+                            3 if !file.is_empty() => sounds.push((file.clone(), None, *volume, *loops == 0, None, key)),
+                            _ => {}
+                        }
                     }
                     continue;
                 }
@@ -938,8 +985,23 @@ impl App {
             }
         }
         self.effects.active = active;
-        for s in sounds {
-            self.audio.play_effect(&s);
+        for (file, at, volume, looping, emitter, key) in sounds {
+            let path = format!("sound/effect/{file}");
+            let voice = match at {
+                Some(p) => self.audio.play_effect_at(&path, p, emitter, volume, looping),
+                None if looping => self.audio.play_effect_at(&path, self.camera.eye(), None, volume, true),
+                None => self.audio.play_effect_volume(&path, volume).then_some(0),
+            };
+            if let Some(v) = voice.filter(|_| looping) {
+                self.effects.voices.push((key, v));
+            }
+        }
+        // Sons en boucle des jeux terminés : arrêtés.
+        let alive: Vec<(Instant, u32, i32)> = self.effects.active.iter().map(|i| { let Anchor::Character(c) = i.anchor; (i.born, i.set.id, c) }).collect();
+        let (keep, ended): (Vec<_>, Vec<_>) = std::mem::take(&mut self.effects.voices).into_iter().partition(|(k, _)| alive.contains(k));
+        self.effects.voices = keep;
+        for (_, v) in ended {
+            self.audio.stop_voice(v);
         }
         let Some(gpu) = self.gpu.as_mut() else { return };
         let mut draws = Vec::with_capacity(batches.len());
@@ -953,7 +1015,14 @@ impl App {
         draws.sort_by_key(|d| d.blend as u8);
         gpu.renderer.effects = draws;
         let eye = view.inverse().w_axis.truncate();
-        gpu.renderer.point_lights = nearest_lights(lights, eye);
+        let mut point_lights = nearest_lights(lights, eye);
+        // Lumières des repères du décor (AgcmEventPointLight, voir `decor.rs`) après celles des effets,
+        // éteintes selon le bit 0x10 de `WeatherEffect1` du ciel courant.
+        if !self.nature.decor_lights_off {
+            point_lights.extend(self.objects.decor.lights_near(eye, self.objects.radius, eye));
+        }
+        point_lights.truncate(crate::render::MAX_POINT_LIGHTS);
+        gpu.renderer.point_lights = point_lights;
     }
 }
 
@@ -1067,7 +1136,7 @@ mod tests {
         let child = EffBase { kind: base_kind::BOARD, position: [10.0, 0.0, 0.0], ..Default::default() };
         let set = Arc::new(EffectSetData { deps: vec![archrust_data::effset::EffDep { parent: 0, node: None, child: 1, flags: 0 }], bases: vec![parent, child], ..Default::default() });
         let attach = set.attachments().unwrap();
-        let inst = Instance { set, born: Instant::now(), anchor: Anchor::Character(0), last: (Vec3::ZERO, 0.0), offset: Vec3::ZERO, scale: 1.0, sounded: vec![false; 2], life: 1000, node: 0, delay: 0, permanent: false, emitters: vec![None, None], trails: vec![None, None], attach };
+        let inst = Instance { set, born: Instant::now(), anchor: Anchor::Character(0), last: (Vec3::ZERO, 0.0), offset: Vec3::ZERO, scale: 1.0, sounded: vec![false; 2], life: 1000, node: 0, delay: 0, permanent: false, stone: false, emitters: vec![None, None], trails: vec![None, None], attach };
         let assets = Assets::new(None, &[]);
         let mut glue = EffectsGlue::default();
         let mut frames = vec![None; 2];
@@ -1094,7 +1163,7 @@ mod tests {
             let set = glue.set(&assets, eid).expect("jeu");
             let attach = set.attachments().unwrap();
             let n = set.bases.len();
-            let inst = Instance { set: set.clone(), born: Instant::now(), anchor: Anchor::Character(0), last: (Vec3::ZERO, 0.0), offset: Vec3::ZERO, scale: 1.0, sounded: vec![false; n], life: 1000, node: 0, delay: 0, permanent: false, emitters: vec![None; n], trails: vec![None; n], attach: attach.clone() };
+            let inst = Instance { set: set.clone(), born: Instant::now(), anchor: Anchor::Character(0), last: (Vec3::ZERO, 0.0), offset: Vec3::ZERO, scale: 1.0, sounded: vec![false; n], life: 1000, node: 0, delay: 0, permanent: false, stone: false, emitters: vec![None; n], trails: vec![None; n], attach: attach.clone() };
             for (i, b) in set.bases.iter().enumerate() {
                 let (Some(p), Some(a)) = (&b.tail, attach[i]) else { continue };
                 let mut frames = vec![None; n];
@@ -1170,7 +1239,7 @@ mod tests {
         assert!(moved.iter().zip(&clump.geometries[gi].vertices).any(|(a, b)| (*a - *b).length() > 0.5), "peau immobile");
         let node = a.node.unwrap();
         let n = set.bases.len();
-        let inst = Instance { set: set.clone(), born: Instant::now(), anchor: Anchor::Character(0), last: (Vec3::ZERO, 0.0), offset: Vec3::ZERO, scale: 1.0, sounded: vec![false; n], life: 1000, node: 0, delay: 0, permanent: false, emitters: vec![None; n], trails: vec![None; n], attach };
+        let inst = Instance { set: set.clone(), born: Instant::now(), anchor: Anchor::Character(0), last: (Vec3::ZERO, 0.0), offset: Vec3::ZERO, scale: 1.0, sounded: vec![false; n], life: 1000, node: 0, delay: 0, permanent: false, stone: false, emitters: vec![None; n], trails: vec![None; n], attach };
         let t = parent.delay + 5000;
         let mut frames = vec![None; n];
         let pm = glue.base_frame(&assets, &inst, Mat4::IDENTITY, t, a.parent, &mut frames);

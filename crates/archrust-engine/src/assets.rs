@@ -1,6 +1,9 @@
-//! Gestionnaire de ressources : patchs HD d'ArchRust, puis système de fichiers virtuel du client.
+//! Gestionnaire de ressources : données du serveur, patchs HD d'ArchRust, puis système de fichiers
+//! virtuel du client.
 //!
 //! Ordre de résolution d'une ressource :
+//! 0. pour les tables (`ini/…`, `ini_<langue>/…`), le dossier des données du serveur
+//!    ([`crate::server_data`], `server-data/`), qu'aucun pack ne peut désactiver ni recouvrir ;
 //! 1. un patch actif (`archrust-patch`, dont `free-assets/`) qui la fournit ;
 //! 2. le système de fichiers virtuel du client, reproduit d'après Archonia.exe (voir [`Assets::open`]).
 //!
@@ -246,6 +249,8 @@ pub struct Assets {
     models: Mutex<HashMap<String, Arc<PatchedModel>>>,
     /// Jeux d'effets (`effect/ini/new/efffile_*.eff`), lus à la première demande.
     effect_sets: Mutex<Option<Arc<archrust_data::EffectSets>>>,
+    /// Tables de valeurs écrites par le serveur (`server-data/`), lues avant tout le reste.
+    server_data: Option<crate::server_data::ServerData>,
 }
 
 impl Assets {
@@ -285,6 +290,45 @@ impl Assets {
             tables: Mutex::new(HashMap::new()),
             models: Mutex::new(HashMap::new()),
             effect_sets: Mutex::new(None),
+            server_data: None,
+        }
+    }
+
+    /// Couche des données du serveur (`server-data/`, voir [`crate::server_data`]), avant toute lecture.
+    /// `None` : les tables viennent des packs et du client.
+    pub fn with_server_data(mut self, dir: Option<&Path>) -> Self {
+        self.server_data = dir.map(crate::server_data::ServerData::open);
+        match &self.server_data {
+            Some(d) => log::info!(
+                "données du serveur : {} ({}){}",
+                d.dir.display(),
+                d.summary(),
+                d.fingerprint().map(|f| format!(", empreinte {f}")).unwrap_or_default()
+            ),
+            None => log::info!("pas de dossier {} : tables de valeurs des packs et du client", crate::server_data::DIR_NAME),
+        }
+        self.tables.lock().unwrap().clear();
+        self
+    }
+
+    /// Données du serveur en service (`None` sans dossier).
+    pub fn server_data(&self) -> Option<&crate::server_data::ServerData> {
+        self.server_data.as_ref()
+    }
+
+    /// Fichier de la couche des données du serveur seulement (`None` s'il n'y est pas).
+    fn from_server_data(&self, rel_path: &str) -> Option<Vec<u8>> {
+        let data = self.server_data.as_ref()?;
+        match data.read(rel_path) {
+            Ok(Some(b)) => {
+                log::debug!("{rel_path} fourni par les données du serveur");
+                Some(b)
+            }
+            Ok(None) => None,
+            Err(e) => {
+                log::warn!("données du serveur : {rel_path} illisible ({e:#}), repli sur les packs et le client");
+                None
+            }
         }
     }
 
@@ -537,9 +581,12 @@ impl Assets {
             .collect())
     }
 
-    /// Fichier brut du client, en passant par les patchs (`[[files]]`) puis le système de fichiers
-    /// virtuel du client (packs, disque, surcharge `etc`).
+    /// Fichier brut du client, en passant par les données du serveur (tables `ini*/` seulement), les
+    /// patchs (`[[files]]`) puis le système de fichiers virtuel du client (packs, disque, surcharge `etc`).
     pub fn read_file(&self, rel_path: &str) -> Result<Vec<u8>> {
+        if let Some(bytes) = self.from_server_data(rel_path) {
+            return Ok(bytes);
+        }
         if let Some((bytes, res)) = self.from_packs(ResourceKind::File, rel_path, |b, _| Ok(b)) {
             log::debug!("{rel_path} fourni par le pack {}", res.patch_id);
             return Ok(bytes);
@@ -579,33 +626,37 @@ impl Assets {
             }
             Err(e) => return Err(e),
         };
-        let cp = CodePage::for_dir(dir);
-        // Les tables de langue (`ini_fr`…) sont parfois déjà en clair.
-        let looks_plain = raw
-            .iter()
-            .take(256)
-            .filter(|&&b| b < 0x20 && b != b'\r' && b != b'\n' && b != b'\t')
-            .count()
-            * 20
-            < raw.len().min(256);
-        let text = if looks_plain {
-            archrust_data::ini::decode_text(&raw, cp)
-        } else {
-            archrust_data::ini::decrypt_ini_with(&raw, cp)
-        };
-        let mut table = IniTable::parse(&text);
+        // Les tables de langue (`ini_fr`…) et les données du serveur sont en clair.
+        let mut table = IniTable::parse(&decode_table_text(&raw, dir));
         // Archonia charge `ItemTemplateAll.ini` puis `ItemTemplateAll2.ini` (chaînes en 0x140e2acf0 et
         // 0x140e2ad08, lues l'une après l'autre en 0x1400f7cab) : les objets récents (ailes TID 60731…)
         // ne sont que dans la seconde. Les deux n'ont pas les mêmes numéros de colonnes : fusion par
         // nom de colonne.
+        // Une table écrite par le serveur (`server-data/`) ne reçoit que la seconde du serveur : les
+        // objets d'Archonia ne reviennent pas par `ItemTemplateAll2.ini` du client.
         if file.eq_ignore_ascii_case("ItemTemplateAll.ini") {
-            if let Ok(second) = self.table(dir, "ItemTemplateAll2.ini") {
+            if self.from_server_data(&format!("{dir}/{file}")).is_some() {
+                if let Some(second) = self.server_text(dir, "ItemTemplateAll2.ini") {
+                    table.merge_positional(IniTable::parse(&second));
+                }
+            } else if let Ok(second) = self.table(dir, "ItemTemplateAll2.ini") {
                 table.merge_positional((*second).clone());
             }
         }
         let table = Arc::new(table);
         self.tables.lock().unwrap().insert(key, table.clone());
         Ok(table)
+    }
+
+    /// Texte d'une table (`dir` = `ini`, `ini_fr`…) par [`Assets::read_file`] (données du serveur,
+    /// packs, client), en clair ou déchiffré, dans la page de code du dossier.
+    pub fn read_text(&self, dir: &str, file: &str) -> Result<String> {
+        Ok(decode_table_text(&self.read_file(&format!("{dir}/{file}"))?, dir))
+    }
+
+    /// Texte d'une table pris dans les données du serveur seulement (`None` s'il n'y est pas).
+    pub fn server_text(&self, dir: &str, file: &str) -> Option<String> {
+        self.from_server_data(&format!("{dir}/{file}")).map(|raw| decode_table_text(&raw, dir))
     }
 
     /// Texture par nom RenderWare (ex. `A00005AA`), décodée en RGBA8. Une texture introuvable
@@ -895,9 +946,26 @@ impl Assets {
     }
 }
 
+/// Vrai si un fichier de table semble en clair (moins d'un octet de contrôle sur 20 dans les 256
+/// premiers) : tables de langue d'Archonia, données du serveur. Sinon il est chiffré (RC4 des `ini`).
+pub fn looks_plain(raw: &[u8]) -> bool {
+    raw.iter().take(256).filter(|&&b| b < 0x20 && b != b'\r' && b != b'\n' && b != b'\t').count() * 20 < raw.len().min(256)
+}
+
+/// Texte d'un fichier de table du dossier `dir` : en clair ou déchiffré, converti depuis la page de
+/// code du dossier ([`CodePage::for_dir`] : CP949 pour `ini`, Windows-1252 pour `ini_fr`…).
+pub fn decode_table_text(raw: &[u8], dir: &str) -> String {
+    let cp = CodePage::for_dir(dir);
+    if looks_plain(raw) {
+        archrust_data::ini::decode_text(raw, cp)
+    } else {
+        archrust_data::ini::decrypt_ini_with(raw, cp)
+    }
+}
+
 /// Cherche `rel` (séparateurs `\`) sous `root` sans tenir compte de la casse, composant par
 /// composant, comme le système de fichiers de Windows sur lequel le client est conçu.
-fn find_case_insensitive(root: &Path, rel: &str) -> Option<PathBuf> {
+pub(crate) fn find_case_insensitive(root: &Path, rel: &str) -> Option<PathBuf> {
     let mut cur = root.to_path_buf();
     for comp in rel.split('\\').filter(|c| !c.is_empty()) {
         let direct = cur.join(comp);
@@ -1073,6 +1141,50 @@ mod tests {
         let touched = assets.reload_packs(&settings);
         assert!(touched.iter().any(|t| t.eq_ignore_ascii_case("a0057aab")), "{touched:?}");
         assert_eq!(assets.texture("a0057aab").unwrap().from_patch.as_deref(), Some("assets-textures"));
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// Couche des données du serveur : avant le pack officiel et le client pour les tables `ini*/`, en
+    /// clair et en CP949, sans toucher aux autres ressources ; une table absente retombe sur les packs.
+    #[test]
+    fn server_data_layer_comes_first() {
+        let root = std::env::temp_dir().join(format!("archrust-server-layer-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let (game, pack, server) = (root.join("Game"), root.join("officiel"), root.join("server-data"));
+        for d in [game.join("ini"), pack.join("files"), server.join("ini"), server.join("ini_fr")] {
+            std::fs::create_dir_all(d).unwrap();
+        }
+        std::fs::write(game.join("ini/itemdatatable.txt"), "TID\tName\r\n1\tclient\r\n").unwrap();
+        std::fs::write(game.join("ini/levelupexp.txt"), "level\texp\r\n1\t10\r\n").unwrap();
+        std::fs::write(pack.join("patch.toml"), "[patch]\nid = \"officiel\"\nname = \"officiel\"\npriority = 1000\n\n[[files]]\npath = \"ini/itemdatatable.txt\"\nfile = \"files/item.txt\"\n\n[[files]]\npath = \"ini/levelupexp.txt\"\nfile = \"files/exp.txt\"\n").unwrap();
+        std::fs::write(pack.join("files/item.txt"), "TID\tName\r\n1\tpack\r\n").unwrap();
+        std::fs::write(pack.join("files/exp.txt"), "level\texp\r\n1\t20\r\n").unwrap();
+        let mut item = b"TID\tName\tDescription\r\n1\tserveur\t".to_vec();
+        item.extend(archrust_data::ini::encode_cp949("검"));
+        item.extend(b"\r\n");
+        std::fs::write(server.join("ini/ItemDataTable.txt"), &item).unwrap();
+        std::fs::write(server.join("ini/RegionTemplate.ini"), "[12]\r\nName=Serveur\r\nLevelMin=46\r\n").unwrap();
+        std::fs::write(server.join("ini_fr/itemdatatable.txt"), b"TID\tName\r\n1\t\xc9p\xe9e\r\n").unwrap();
+        std::fs::write(server.join(crate::server_data::MANIFEST_FILE), "fingerprint = \"f00d\"\n").unwrap();
+
+        let without = Assets::new(Some(game.clone()), &[pack.clone()]);
+        assert!(without.server_data().is_none());
+        assert_eq!(without.read_text("ini", "itemdatatable.txt").unwrap(), "TID\tName\r\n1\tpack\r\n", "sans couche : le pack");
+
+        let assets = Assets::new(Some(game.clone()), &[pack.clone()]).with_server_data(Some(&server));
+        assert_eq!(assets.server_data().and_then(|d| d.fingerprint()), Some("f00d"));
+        assert_eq!(assets.read_text("ini", "itemdatatable.txt").unwrap(), "TID\tName\tDescription\r\n1\tserveur\t검\r\n", "serveur avant le pack, CP949");
+        assert_eq!(assets.read_text("ini_fr", "ItemDataTable.txt").unwrap(), "TID\tName\r\n1\tÉpée\r\n", "dossier de langue en Windows-1252");
+        assert_eq!(assets.read_text("ini", "levelupexp.txt").unwrap(), "level\texp\r\n1\t20\r\n", "absente du serveur : le pack");
+        assert_eq!(assets.server_text("ini", "levelupexp.txt"), None);
+        let region = assets.table("ini", "regiontemplate.ini").unwrap();
+        assert_eq!(region.section("12").and_then(|s| s.get_i64("LevelMin")), Some(46), "table INI en clair");
+        // Le joueur désactive le pack : le serveur répond toujours.
+        let mut settings = archrust_patch::PackSettings::default();
+        settings.packs.push(archrust_patch::PackChoice { id: "officiel".into(), enabled: false, priority: None });
+        let assets = Assets::new(Some(game.clone()), &[pack.clone()]).with_pack_settings(&settings).with_server_data(Some(&server));
+        assert!(assets.read_text("ini", "itemdatatable.txt").unwrap().contains("serveur"));
+        assert_eq!(assets.read_text("ini", "levelupexp.txt").unwrap(), "level\texp\r\n1\t10\r\n", "pack désactivé : le client");
         let _ = std::fs::remove_dir_all(&root);
     }
 

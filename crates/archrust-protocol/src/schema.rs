@@ -328,10 +328,11 @@ pub mod main {
         f!(Int32),          // 4 CID du membre ajouté ou retiré
         f!(MemoryBlock),    // 5 liste des CID (u32, chef en tête)
         f!(Packet),         // 6 facteurs
-        f!(Packet),         // 7 zone d'effet
+        f!(Packet),         // 7 zone d'effet (mini PARTY_EFFECT_AREA)
         f!(Int8),           // 8 répartition de l'expérience (0 dégâts, 1 niveau)
-        f!(Packet),         // 9 bonus
+        f!(Packet),         // 9 bonus (mini PARTY_BONUS)
         f!(Int8),           // 10 répartition des objets
+        f!(Packet),         // 11 5 × INT32 (`+0x1f04`, rappel 19 : ajout d'Archonia, non lu)
     ]);
 
     // AgpmParty, gestion (0x09) — drapeaux 1 : invitation, réponse, départ, exclusion, chef.
@@ -1038,6 +1039,19 @@ pub mod mini {
         f!(Char, 33), f!(Char, 49), f!(UInt64), f!(UInt64), f!(UInt64), f!(UInt32), f!(UInt32), f!(UInt32), f!(UInt64),
         f!(Int32), f!(Int32), f!(Int32), f!(Int32), f!(Int8), f!(UInt32),
     ]);
+
+    // Combattants choisis (champ 18 d'AGPMGUILD, op 14, `+0x21c8`) — drapeaux 1 : nombre, bloc de (U16 longueur,
+    // nom sans NUL) mis bout à bout (FUN_1408c59a0).
+    schema!(pub GUILD_BATTLE_PERSON = "AGPMGUILD_BATTLE_PERSON", 159, 1, [f!(Int16), f!(MemoryBlock)]);
+    // Combattant (champ 19, op 26, `+0x2354`) — drapeaux 1 : guilde, nom, trois entiers (points, puis deux autres).
+    schema!(pub GUILD_BATTLE_MEMBER = "AGPMGUILD_BATTLE_MEMBER", 160, 1, [f!(Char, 33), f!(Char, 49), f!(UInt32), f!(UInt32), f!(UInt32)]);
+    // Listes des combattants (champ 20, op 27, `+0x24e0`) — drapeaux 1 : nombre et bloc d'enregistrements de 0x48
+    // octets de la guilde du champ 2, puis de la guilde adverse (FUN_1404dee40).
+    schema!(pub GUILD_BATTLE_MEMBER_LIST = "AGPMGUILD_BATTLE_MEMBER_LIST", 161, 1, [f!(UInt32), f!(MemoryBlock), f!(UInt32), f!(MemoryBlock)]);
+    // Zone d'effet du groupe (champ 7 d'AGPMPARTY, `+0x1bec`) — drapeaux 1 : un octet par membre (1 dans la zone).
+    schema!(pub PARTY_EFFECT_AREA = "AGPMPARTY_EFFECT_AREA", 126, 1, [f!(Int8), f!(Int8), f!(Int8), f!(Int8), f!(Int8)]);
+    // Bonus du groupe (champ 9 d'AGPMPARTY, `+0x1d78`) — drapeaux 1 : dégâts, défense, PV max, PM max.
+    schema!(pub PARTY_BONUS = "AGPMPARTY_BONUS", 127, 1, [f!(Int8), f!(Int8), f!(Int16), f!(Int16)]);
 
     // Entrée de la liste des guildes — drapeaux 2 : nom, chef, second, niveau, (inconnu), membres, taille,
     // (inconnu), emblème (TID, couleur), points de combat.

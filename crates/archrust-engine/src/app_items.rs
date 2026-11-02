@@ -10,7 +10,11 @@
 //!
 //! Touches et commandes : `C` fenêtre du personnage (`/perso`) ; `/utiliser nom` (`/use`),
 //! `/porter nom` (`/equip`), `/ranger nom` (`/unequip`), `/detruire nom` (`/destroy`),
-//! `/retour` (`/return`) après un parchemin aller-retour.
+//! `/retour` (`/return`) après un parchemin aller-retour, `/jeteror [montant]` (`/dropgold`).
+//!
+//! Or jeté (`UI_DropMoneyFromInventory`) : clic sur l'or de l'inventaire (l'ouverture `INV_OpenDropMoney` est
+//! débranchée dans Archonia) ; « Confirm » (`Inventory_DropMoneyYes`, 0x1407bc3a0) : montant > 0 ramené à l'or
+//! porté, AGPMITEM op 15, puis `INV_CloseDropMoney` ; la boîte se ferme à l'ouverture d'un échange (`PT_OpenUIEvent`).
 //!
 //! L'équipement porté s'affiche aussi sur le modèle du joueur, sauf les armes et boucliers (mains,
 //! `Part` 9 et 10) : leurs modèles ne sont pas encore rattachés aux os de la main et tomberaient aux
@@ -62,6 +66,8 @@ pub struct ItemsGlue {
     split: Option<(i32, i32)>,
     /// Point de retour d'un parchemin aller-retour mémorisé par le serveur.
     return_enabled: bool,
+    /// `UI_DropMoneyFromInventory` ouverte et montant saisi.
+    pub drop_money: Option<i64>,
 }
 
 impl ItemsGlue {
@@ -224,6 +230,27 @@ pub fn panel(
         }
     }
 
+    // Or à jeter : clic sur l'or de l'inventaire, puis `Inventory_DropMoneyYes`.
+    if std::mem::take(&mut hud.drop_money_request) {
+        glue.drop_money = Some(0);
+    }
+    if let Some(mut amount) = glue.drop_money {
+        let money = hud.stats.money.unwrap_or(0).max(0);
+        let answer = crate::hud::draw_drop_money(ctx, hud, assets, &mut amount, money);
+        glue.drop_money = Some(amount.clamp(0, money));
+        match answer {
+            Some(true) => {
+                let amount = amount.min(money).min(i32::MAX as i64);
+                if amount > 0 {
+                    send(net, ItemCommand::DropMoney(amount as i32));
+                }
+                glue.drop_money = None;
+            }
+            Some(false) => glue.drop_money = None,
+            None => {}
+        }
+    }
+
     // Pas de bouton de retour : Archonia enregistre `Item_OpenReturnScrollUI` mais aucune fenêtre
     // de son fichier d'interface ne l'appelle. Le retour passe par `/retour`.
 }
@@ -362,6 +389,13 @@ impl App {
                     Err(text) => self.ui.push_chat(format!("[objet] {text}")),
                 }
             }
+            "/jeteror" | "/dropgold" => match arg.trim() {
+                "" => self.item_ui.drop_money = Some(0),
+                n => match n.parse::<i64>() {
+                    Ok(v) if v > 0 => send(self.net.as_ref(), ItemCommand::DropMoney(v.min(self.hud.stats.money.unwrap_or(0)).min(i32::MAX as i64) as i32)),
+                    _ => self.ui.push_chat(format!("[objet] usage : {cmd} [montant]")),
+                },
+            },
             "/retour" | "/return" => {
                 if !self.item_ui.return_enabled {
                     self.ui.push_chat("[objet] Aucun point de départ mémorisé (parchemin aller-retour).");

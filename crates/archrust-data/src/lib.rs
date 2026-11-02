@@ -8,6 +8,9 @@
 //! | `.dff`, `.ecl`, `.txd`, `.tx1`   | flux RenderWare 3.7 (clump, géométrie, textures)     | [`rw`]      |
 //! | `texture/world/*.tif`            | TIFF non compressé (masque de fondu du sol)          | [`tiff`]    |
 //! | `sound/soundpak.info`, `sound/effect/*.pk` | index des packs de sons et WAV mis bout à bout      | [`soundpak`] |
+//! | `world/water/wt%d.dat`, `WaterStatusT1.ini` | eau par secteur (rectangles, vagues), types d'eau | [`water`] |
+//! | `world/grass/gr%d.dat`, `GrassTemplate.ini` | herbe par secteur (groupes, brins), gabarits de touffes | [`grass`] |
+//! | `loddistancetype.txt`, `R{sx},{sy}.dff` | distances des niveaux de détail, sol grossier       | [`lod`] |
 //!
 //! Les lecteurs sont purement en mémoire : l'appelant fournit les octets, les modules rendent des
 //! structures Rust. Aucun fichier du jeu n'est embarqué.
@@ -15,12 +18,15 @@
 pub mod aplib;
 pub mod ean;
 pub mod effset;
+pub mod grass;
 pub mod ini;
+pub mod lod;
 pub mod magpack;
 pub mod pack;
 pub mod rw;
 pub mod soundpak;
 pub mod tiff;
+pub mod water;
 
 pub use effset::{EffectSet, EffectSets};
 pub use ini::{decrypt_ini, IniTable};

@@ -32,6 +32,8 @@ pub enum NpcUi {
     QuestAccept(i32),
     QuestComplete(i32),
     QuestAbandon(i32),
+    /// « Ajouter au journal » (`QuestDiary_AddQuest`) : inscrire la quête au journal de suivi, ou l'en retirer.
+    QuestTrack(i32),
     /// Clic sur une récompense au choix : rang parmi les objets choisissables, à partir de 0.
     QuestSelectReward(usize),
 }
@@ -533,9 +535,18 @@ pub fn draw_quests(ctx: &egui::Context, hud: &mut HudState, assets: &Assets, vie
                         }
                     }
                 }
-                // « Ajouter au journal » (`QuestDiary_AddQuest`, FUN_1406547d0 : suivi `AgcmUIQuestJournal`) et
-                // « Terminer immediatement » (`Quest_CompleteInstantly`, contre des CC) : non repris, inactifs.
-                "CONTROL_QUEST_SHARE" | "CONTROL_QUEST_SKIP_NEW" => {
+                // « Ajouter au journal » (`QuestDiary_AddQuest`, FUN_1406547d0 / FUN_140655050 : suivi
+                // `AgcmUIQuestJournal`, AGPMQUEST op 14) : quête prise ; un second clic la retire du suivi.
+                "CONTROL_QUEST_SHARE" => {
+                    let enabled = matches!(state, Some(QuestState::InProgress | QuestState::Ready));
+                    if button(ctx, ui, hud, assets, painter, r, c, c.fixed_label(), font, enabled, (id, "track")).clicked() {
+                        if let Some(e) = selected {
+                            out.push(NpcUi::QuestTrack(e.tid));
+                        }
+                    }
+                }
+                // « Terminer immediatement » (`Quest_CompleteInstantly`, contre des CC) : non repris, inactif.
+                "CONTROL_QUEST_SKIP_NEW" => {
                     button(ctx, ui, hud, assets, painter, r, c, c.fixed_label(), font, false, (id, c.name.as_str()));
                 }
                 "CONTROL_QUEST_TREE" => {

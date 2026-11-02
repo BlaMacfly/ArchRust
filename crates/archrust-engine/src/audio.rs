@@ -4,8 +4,9 @@
 //! les packs de sons `.pk` indexés par `soundpak.info` ([`archrust_data::soundpak`]) : un patch
 //! peut donc remplacer n'importe quel son, musique ou pack du client.
 //!
-//! Choix de `rodio` plutôt que `kira` : la sortie est un simple mélangeur (une musique, une
-//! ambiance, quelques effets) sans espace sonore ni horloge musicale ; `rodio` décode MP3 et WAV par
+//! Choix de `rodio` plutôt que `kira` : la sortie est un simple mélangeur (une musique, des
+//! ambiances, des effets) sans horloge musicale ; l'espace sonore se réduit à deux gains par voix
+//! ([`spatial_gains`]), relus par le fil audio ; `rodio` décode MP3 et WAV par
 //! Symphonia à partir d'un tampon mémoire (ce qui convient aux fichiers servis par les packs et les
 //! patchs), s'appuie sur `cpal` déjà présent dans l'écosystème winit/wgpu, et la gestion des volumes
 //! par piste suffit à réaliser le fondu enchaîné depuis la boucle de rendu. `kira` apporte des
@@ -13,16 +14,113 @@
 //!
 //! Sans périphérique de sortie (ou sans client et sans patch fournissant les sons), tout est
 //! silencieux et aucun appel n'échoue : les sons manquants sont journalisés une fois chacun.
+//!
+//! **Sons 3D** (AgcmSound sur FMOD, Archonia.exe) : un son positionné n'est lancé que si la caméra
+//! est à 8 000 unités au plus de sa source (`FUN_1405c7420`, `DAT_140d4cf44`), sauf un son en boucle
+//! qui part toujours. FMOD l'atténue ensuite **linéairement** (`createSound` mode `0x200010` =
+//! `FMOD_3D | FMOD_3D_LINEARROLLOFF`) entre la distance minimale 0 et la maximale 6 000
+//! (`SoundResource` +0x120 / +0x124, `FUN_14047a200`, appliquées par `set3DMinMaxDistance`) ;
+//! l'auditeur est le repère de la caméra (`set3DListenerAttributes`, `FUN_14047b8b0`). La loi de
+//! panoramique gauche / droite interne à FMOD n'est pas relevée : ArchRust prend une loi à
+//! puissance constante sur l'axe droit de la caméra, ramenée à 1 / 1 au centre ([`pan_gains`]).
+//! Le son suit sa source (repère du personnage) tant qu'il joue. Volumes passés par Archonia :
+//! 1,1 pour un son 2D de personnage (`DAT_140e49d68`), 1,0 en 3D, celui des données pour les jeux
+//! d'effets. Option sans 3D (`+0x3c1c`, pilote 3D absent) : tout passe en 2D
+//! ([`AudioSettings::spatial`]).
+//!
+//! **Ambiances** : Archonia joue en même temps, en boucle, tous les effets son (type 6) des cinq
+//! `EffectIndex` de la tranche composée (`FUN_140581fd0`) : autant de pistes d'ambiance ici.
 
 use crate::assets::Assets;
 use anyhow::{anyhow, Context, Result};
 use archrust_data::soundpak::{scan_riff, SoundEntry, SoundIndex};
+use glam::Vec3;
 use rodio::{Decoder, DeviceSinkBuilder, MixerDeviceSink, Player, Source};
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
 use std::io::Cursor;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
+
+/// Distance caméra–source au-delà de laquelle un son 3D ponctuel n'est pas lancé (`DAT_140d4cf44`).
+pub const SPATIAL_START_DISTANCE: f32 = 8000.0;
+/// Distance minimale de l'atténuation linéaire (`SoundResource` +0x120).
+pub const SPATIAL_MIN_DISTANCE: f32 = 0.0;
+/// Distance maximale (silence) de l'atténuation linéaire (`SoundResource` +0x124 = 6 000).
+pub const SPATIAL_MAX_DISTANCE: f32 = 6000.0;
+/// Volume d'un son 2D de personnage (pas, sons d'animation du joueur : `DAT_140e49d68`).
+pub const CHARACTER_2D_VOLUME: f32 = 1.1;
+/// Durée de vie d'une voix 3D dont la durée est inconnue.
+const VOICE_FALLBACK: Duration = Duration::from_secs(20);
+
+/// Auditeur des sons 3D : position et axe droit de la caméra.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Listener {
+    pub position: Vec3,
+    pub right: Vec3,
+}
+
+impl Default for Listener {
+    fn default() -> Self {
+        Self { position: Vec3::ZERO, right: Vec3::X }
+    }
+}
+
+/// Atténuation linéaire de FMOD (`FMOD_3D_LINEARROLLOFF`) : 1 jusqu'à la distance minimale, 0 à la
+/// maximale.
+pub fn attenuation(distance: f32) -> f32 {
+    let span = SPATIAL_MAX_DISTANCE - SPATIAL_MIN_DISTANCE;
+    (1.0 - (distance - SPATIAL_MIN_DISTANCE) / span).clamp(0.0, 1.0)
+}
+
+/// Gains gauche / droite d'une source vue de l'auditeur (choix d'ArchRust, voir l'en-tête) : loi à
+/// puissance constante sur la projection de la direction sur l'axe droit, multipliée par √2 et
+/// bornée à 1 (1 / 1 au centre ou sur la source, 1 / 0 tout à droite ou à gauche).
+pub fn pan_gains(listener: &Listener, source: Vec3) -> [f32; 2] {
+    let d = source - listener.position;
+    let len = d.length();
+    let right = listener.right.normalize_or_zero();
+    let p = if len > 1e-3 { (d.dot(right) / len).clamp(-1.0, 1.0) } else { 0.0 };
+    let a = (p + 1.0) * std::f32::consts::FRAC_PI_4;
+    let s = std::f32::consts::SQRT_2;
+    [(a.cos() * s).min(1.0), (a.sin() * s).min(1.0)]
+}
+
+/// Gains gauche / droite d'un son 3D de volume `volume` à `source`.
+pub fn spatial_gains(listener: &Listener, source: Vec3, volume: f32) -> [f32; 2] {
+    let att = attenuation((source - listener.position).length()) * volume.max(0.0);
+    pan_gains(listener, source).map(|g| g * att)
+}
+
+/// Le son 3D ponctuel (`looping` faux) est-il lancé à cette distance (`FUN_1405c7420`) ?
+pub fn spatial_starts(listener: &Listener, source: Vec3, looping: bool) -> bool {
+    looping || (source - listener.position).length() <= SPATIAL_START_DISTANCE
+}
+
+/// Gains partagés avec le fil audio (bits des `f32`) et arrêt demandé.
+struct VoiceShared {
+    gains: [AtomicU32; 2],
+    stop: AtomicBool,
+}
+
+impl VoiceShared {
+    fn set(&self, g: [f32; 2]) {
+        self.gains[0].store(g[0].to_bits(), Ordering::Relaxed);
+        self.gains[1].store(g[1].to_bits(), Ordering::Relaxed);
+    }
+}
+
+/// Son 3D en cours : position de sa source (suivie si `emitter` est un CID), volume propre.
+struct Voice {
+    id: u64,
+    shared: Arc<VoiceShared>,
+    position: Vec3,
+    emitter: Option<i32>,
+    volume: f32,
+    until: Option<Instant>,
+}
 
 /// Musique des écrans de connexion, de sélection et de création.
 pub const DEFAULT_LOGIN_MUSIC: &str = "sound/bgm/htt_001.mp3";
@@ -49,6 +147,9 @@ pub struct AudioSettings {
     pub music_on: bool,
     pub ambience_on: bool,
     pub effects_on: bool,
+    /// Sons 3D (`COption.ini` `[Sound_Option]` `Sound=3D`) ; faux : tout en 2D, comme Archonia
+    /// sans pilote 3D (`+0x3c1c`).
+    pub spatial: bool,
 }
 
 impl Default for AudioSettings {
@@ -61,6 +162,7 @@ impl Default for AudioSettings {
             music_on: true,
             ambience_on: true,
             effects_on: true,
+            spatial: true,
         }
     }
 }
@@ -75,6 +177,7 @@ impl AudioSettings {
             music_on: self.music_on,
             ambience_on: self.ambience_on,
             effects_on: self.effects_on,
+            spatial: self.spatial,
         }
     }
 
@@ -410,13 +513,26 @@ impl Track {
     }
 }
 
+/// Piste visée par [`Audio::set_track`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Slot {
+    Music,
+    /// Ambiance `n` (Archonia en joue plusieurs à la fois).
+    Ambience(usize),
+}
+
 /// Moteur audio du client.
 pub struct Audio {
     device: Option<MixerDeviceSink>,
     library: SoundLibrary,
     settings: AudioSettings,
     music: Track,
-    ambience: Track,
+    /// Ambiances jouées ensemble (la première est celle de [`Audio::current_ambience`]).
+    ambiences: Vec<Track>,
+    /// Sons 3D en cours et auditeur courant.
+    voices: Vec<Voice>,
+    listener: Listener,
+    next_voice: u64,
     /// Chemins déjà signalés comme introuvables (un avertissement chacun).
     missing: HashSet<String>,
 }
@@ -444,9 +560,32 @@ impl Audio {
             library: SoundLibrary::new(assets, addons_dir),
             settings: settings.clamped(),
             music: Track::new("musique"),
-            ambience: Track::new("ambiance"),
+            ambiences: vec![Track::new("ambiance")],
+            voices: Vec::new(),
+            listener: Listener::default(),
+            next_voice: 1,
             missing: HashSet::new(),
         }
+    }
+
+    fn track(&mut self, slot: Slot) -> &mut Track {
+        match slot {
+            Slot::Music => &mut self.music,
+            Slot::Ambience(i) => {
+                while self.ambiences.len() <= i {
+                    self.ambiences.push(Track::new("ambiance"));
+                }
+                &mut self.ambiences[i]
+            }
+        }
+    }
+
+    fn ambience_gain(&self) -> f32 {
+        AudioSettings::gain(self.settings.ambience, self.settings.muted || !self.settings.ambience_on)
+    }
+
+    fn effects_gain(&self) -> f32 {
+        AudioSettings::gain(self.settings.effects, self.settings.muted || !self.settings.effects_on)
     }
 
     /// Un périphérique de sortie est ouvert.
@@ -467,8 +606,10 @@ impl Audio {
         self.settings = settings.clamped();
         self.music
             .apply_volume(AudioSettings::gain(self.settings.music, self.settings.muted || !self.settings.music_on));
-        self.ambience
-            .apply_volume(AudioSettings::gain(self.settings.ambience, self.settings.muted || !self.settings.ambience_on));
+        let ambience = self.ambience_gain();
+        for t in &self.ambiences {
+            t.apply_volume(ambience);
+        }
     }
 
     /// Musique en cours (chemin), s'il y en a une.
@@ -477,7 +618,12 @@ impl Audio {
     }
 
     pub fn current_ambience(&self) -> Option<&str> {
-        self.ambience.current()
+        self.ambiences.first().and_then(|t| t.current())
+    }
+
+    /// Ambiances en cours (chemins), dans l'ordre de leurs pistes.
+    pub fn current_ambiences(&self) -> Vec<&str> {
+        self.ambiences.iter().filter_map(|t| t.current()).collect()
     }
 
     fn report_missing(&mut self, path: &str, err: &anyhow::Error) {
@@ -492,16 +638,17 @@ impl Audio {
 
     /// Lecture sur une piste, avec fondu enchaîné : en boucle (`once = None`) ou une seule fois
     /// (`once = Some(numéro de tirage)`).
-    fn set_track(&mut self, which: fn(&mut Audio) -> &mut Track, path: Option<&str>, once: Option<u32>) {
+    fn set_track(&mut self, slot: Slot, path: Option<&str>, once: Option<u32>) {
         let path = path
             .map(normalize_sound_path)
             .filter(|p| !p.is_empty());
-        if which(self).wanted == path && (path.is_none() || which(self).wanted_mode == once) {
+        let t = self.track(slot);
+        if t.wanted == path && (path.is_none() || t.wanted_mode == once) {
             return;
         }
-        which(self).wanted = path.clone();
-        which(self).wanted_mode = once;
-        which(self).fade_out_all();
+        t.wanted = path.clone();
+        t.wanted_mode = once;
+        t.fade_out_all();
         let Some(path) = path else {
             return;
         };
@@ -534,7 +681,7 @@ impl Audio {
             self.report_missing(&path, &err);
             return;
         }
-        let track = which(self);
+        let track = self.track(slot);
         log::info!("{} : {path} ({})", track.label, located.source);
         track.layers.push(Layer {
             path,
@@ -547,13 +694,13 @@ impl Audio {
     /// Musique de fond (`None` = silence en fondu). Idempotent : rappeler avec le même chemin ne
     /// relance rien.
     pub fn play_music(&mut self, path: Option<&str>) {
-        self.set_track(|a| &mut a.music, path, None);
+        self.set_track(Slot::Music, path, None);
     }
 
     /// Musique jouée une seule fois (liste de lecture du ciel) ; `generation` distingue deux
     /// tirages du même morceau. Voir [`Audio::music_finished`].
     pub fn play_music_once(&mut self, path: Option<&str>, generation: u32) {
-        self.set_track(|a| &mut a.music, path, Some(generation));
+        self.set_track(Slot::Music, path, Some(generation));
     }
 
     /// La musique demandée en lecture unique est terminée, ou n'a pas pu être lue. Toujours faux
@@ -572,45 +719,149 @@ impl Audio {
 
     /// Ambiance de zone (`sound/stream/*.mp3`), même fonctionnement.
     pub fn play_ambience(&mut self, path: Option<&str>) {
-        self.set_track(|a| &mut a.ambience, path, None);
+        let list: Vec<String> = path.map(str::to_string).into_iter().collect();
+        self.play_ambiences(&list);
+    }
+
+    /// Plusieurs ambiances à la fois, chacune en boucle sur sa piste (`FUN_140581fd0` joue tous les
+    /// effets son des cinq `EffectIndex`). Une piste garde son morceau tant que son rang ne change
+    /// pas ; les pistes en trop s'éteignent en fondu.
+    pub fn play_ambiences(&mut self, paths: &[String]) {
+        let n = paths.len().max(self.ambiences.len());
+        for i in 0..n {
+            self.set_track(Slot::Ambience(i), paths.get(i).map(String::as_str), None);
+        }
     }
 
     /// Effet ponctuel : `sound/ui/x.wav`, `sound/effect/sd0000.wav`, fichier d'AddOn… Rend `false`
     /// si le son n'a pas été joué (introuvable, muet, pas de périphérique).
     pub fn play_effect(&mut self, path: &str) -> bool {
-        let norm = normalize_sound_path(path);
-        let Some(device) = &self.device else {
-            return false;
-        };
-        let gain = AudioSettings::gain(self.settings.effects, self.settings.muted || !self.settings.effects_on);
-        if gain <= 0.0 {
-            return false;
-        }
-        let located = match self.library.read(&norm) {
+        self.play_effect_volume(path, 1.0)
+    }
+
+    /// Décode un son ponctuel, ou en boucle (`None` : introuvable ou indécodable, signalé une fois).
+    fn decode_effect(&mut self, norm: &str, looping: bool) -> Option<Box<dyn Source + Send>> {
+        let located = match self.library.read(norm) {
             Ok(l) => l,
             Err(e) => {
-                self.report_missing(&norm, &e);
-                return false;
+                self.report_missing(norm, &e);
+                return None;
             }
         };
         let ext = norm.rsplit('.').next().unwrap_or("wav").to_ascii_lowercase();
         let len = located.bytes.len() as u64;
-        match Decoder::builder()
+        let builder = Decoder::builder()
             .with_data(Cursor::new(located.bytes))
             .with_hint(&ext)
-            .with_byte_len(len)
-            .build()
-        {
+            .with_byte_len(len);
+        let built: Result<Box<dyn Source + Send>, _> = if looping {
+            builder.with_seekable(true).build_looped().map(|s| Box::new(s) as Box<dyn Source + Send>)
+        } else {
+            builder.build().map(|s| Box::new(s) as Box<dyn Source + Send>)
+        };
+        match built {
             Ok(source) => {
                 log::debug!("effet : {norm} ({})", located.source);
-                device.mixer().add(source.amplify(gain));
-                true
+                Some(source)
             }
             Err(e) => {
                 let err = anyhow!("décodage {ext} : {e}");
-                self.report_missing(&norm, &err);
-                false
+                self.report_missing(norm, &err);
+                None
             }
+        }
+    }
+
+    /// Effet 2D au volume propre `volume` (1,1 pour un son de personnage du joueur, voir
+    /// [`CHARACTER_2D_VOLUME`]), multiplié par le volume des effets.
+    pub fn play_effect_volume(&mut self, path: &str, volume: f32) -> bool {
+        let norm = normalize_sound_path(path);
+        if self.device.is_none() {
+            return false;
+        }
+        let gain = self.effects_gain() * volume.max(0.0);
+        if gain <= 0.0 {
+            return false;
+        }
+        let Some(source) = self.decode_effect(&norm, false) else { return false };
+        let Some(device) = &self.device else { return false };
+        device.mixer().add(source.amplify(gain));
+        true
+    }
+
+    /// Son 3D à `position`, suivi si `emitter` (CID) est donné (voir [`Audio::update_spatial`]),
+    /// joué une fois ou en boucle (`looping`, arrêté par [`Audio::stop_voice`]). Sans 3D dans les
+    /// réglages, joué en 2D au même volume. Rend l'identifiant de la voix, `None` si rien n'est joué
+    /// (trop loin de la caméra pour un son ponctuel, introuvable, muet, sans périphérique).
+    pub fn play_effect_at(&mut self, path: &str, position: Vec3, emitter: Option<i32>, volume: f32, looping: bool) -> Option<u64> {
+        let norm = normalize_sound_path(path);
+        self.device.as_ref()?;
+        if !self.settings.spatial {
+            if looping {
+                // En 2D, une boucle reste une voix (arrêtable), centrée.
+                return self.start_voice(&norm, None, emitter, volume, true);
+            }
+            return self.play_effect_volume(&norm, volume).then_some(0);
+        }
+        if !spatial_starts(&self.listener, position, looping) {
+            return None;
+        }
+        self.start_voice(&norm, Some(position), emitter, volume, looping)
+    }
+
+    fn start_voice(&mut self, norm: &str, position: Option<Vec3>, emitter: Option<i32>, volume: f32, looping: bool) -> Option<u64> {
+        if self.effects_gain() <= 0.0 {
+            return None;
+        }
+        let source = self.decode_effect(norm, looping)?;
+        let duration = source.total_duration();
+        let gains = match position {
+            Some(p) => spatial_gains(&self.listener, p, volume),
+            None => [volume; 2],
+        }
+        .map(|g| g * self.effects_gain());
+        let shared = Arc::new(VoiceShared { gains: [AtomicU32::new(gains[0].to_bits()), AtomicU32::new(gains[1].to_bits())], stop: AtomicBool::new(false) });
+        // Le fil audio relit les gains toutes les 20 ms (position de la source, volume des effets).
+        let controlled = SpatialControl::new(source, shared.clone());
+        let device = self.device.as_ref()?;
+        device.mixer().add(controlled);
+        let id = self.next_voice;
+        self.next_voice += 1;
+        let until = if looping { None } else { Some(Instant::now() + duration.unwrap_or(VOICE_FALLBACK) + Duration::from_millis(100)) };
+        self.voices.push(Voice { id, shared, position: position.unwrap_or(self.listener.position), emitter, volume, until });
+        Some(id)
+    }
+
+    /// Arrête une voix (son en boucle d'un jeu d'effets terminé).
+    pub fn stop_voice(&mut self, id: u64) {
+        self.voices.retain(|v| {
+            let keep = v.id != id;
+            if !keep {
+                v.shared.stop.store(true, Ordering::Relaxed);
+            }
+            keep
+        });
+    }
+
+    /// Identifiants des voix en cours.
+    pub fn voice_ids(&self) -> Vec<u64> {
+        self.voices.iter().map(|v| v.id).collect()
+    }
+
+    /// Chaque image : auditeur (caméra), position des sources suivies (`emitter_position` d'un CID,
+    /// `None` : la source garde sa dernière position) et gains des sons 3D ; voix terminées oubliées.
+    pub fn update_spatial(&mut self, listener: Listener, emitter_position: impl Fn(i32) -> Option<Vec3>) {
+        self.listener = listener;
+        let now = Instant::now();
+        let gain = self.effects_gain();
+        let spatial = self.settings.spatial;
+        self.voices.retain(|v| v.until.is_none_or(|t| now < t));
+        for v in &mut self.voices {
+            if let Some(p) = v.emitter.and_then(&emitter_position) {
+                v.position = p;
+            }
+            let g = if spatial { spatial_gains(&listener, v.position, v.volume) } else { [v.volume; 2] };
+            v.shared.set(g.map(|x| x * gain));
         }
     }
 
@@ -620,8 +871,72 @@ impl Audio {
         let m = &self.settings;
         self.music
             .update(dt, AudioSettings::gain(m.music, m.muted || !m.music_on));
-        self.ambience
-            .update(dt, AudioSettings::gain(m.ambience, m.muted || !m.ambience_on));
+        let ambience = AudioSettings::gain(m.ambience, m.muted || !m.ambience_on);
+        for t in &mut self.ambiences {
+            t.update(dt, ambience);
+        }
+    }
+}
+
+/// Source 3D : ramène l'entrée en mono puis la sort en stéréo avec les gains partagés, relus
+/// toutes les 20 ms ; s'arrête sur demande.
+struct SpatialControl {
+    inner: Box<dyn Source + Send>,
+    shared: Arc<VoiceShared>,
+    gains: [f32; 2],
+    /// Trames avant la prochaine relecture des gains.
+    countdown: u32,
+    /// Échantillon droit de la trame en cours.
+    pending: Option<f32>,
+}
+
+impl SpatialControl {
+    fn new(inner: Box<dyn Source + Send>, shared: Arc<VoiceShared>) -> Self {
+        Self { inner, shared, gains: [0.0; 2], countdown: 0, pending: None }
+    }
+}
+
+impl Iterator for SpatialControl {
+    type Item = rodio::Sample;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        if let Some(r) = self.pending.take() {
+            return Some(r);
+        }
+        if self.countdown == 0 {
+            if self.shared.stop.load(Ordering::Relaxed) {
+                return None;
+            }
+            self.gains = [f32::from_bits(self.shared.gains[0].load(Ordering::Relaxed)), f32::from_bits(self.shared.gains[1].load(Ordering::Relaxed))];
+            self.countdown = (self.inner.sample_rate().get() / 50).max(1);
+        }
+        self.countdown -= 1;
+        let n = self.inner.channels().get().max(1);
+        let mut sum = 0.0;
+        for _ in 0..n {
+            sum += self.inner.next()?;
+        }
+        let m = sum / n as f32;
+        self.pending = Some(m * self.gains[1]);
+        Some(m * self.gains[0])
+    }
+}
+
+impl Source for SpatialControl {
+    fn current_span_len(&self) -> Option<usize> {
+        None
+    }
+
+    fn channels(&self) -> rodio::ChannelCount {
+        rodio::ChannelCount::new(2).unwrap()
+    }
+
+    fn sample_rate(&self) -> rodio::SampleRate {
+        self.inner.sample_rate()
+    }
+
+    fn total_duration(&self) -> Option<Duration> {
+        self.inner.total_duration()
     }
 }
 
@@ -653,6 +968,49 @@ mod tests {
         }
         .clamped();
         assert_eq!((s.music, s.ambience, s.effects), (1.0, 0.0, 0.3));
+    }
+
+    #[test]
+    fn spatial_attenuation_is_linear_from_0_to_6000() {
+        assert_eq!(attenuation(0.0), 1.0);
+        assert!((attenuation(3000.0) - 0.5).abs() < 1e-6);
+        assert_eq!(attenuation(6000.0), 0.0);
+        assert_eq!(attenuation(7000.0), 0.0);
+        let l = Listener { position: Vec3::ZERO, right: Vec3::X };
+        // Lancé jusqu'à 8 000 unités, au-delà seulement en boucle.
+        assert!(spatial_starts(&l, Vec3::new(0.0, 0.0, 8000.0), false));
+        assert!(!spatial_starts(&l, Vec3::new(0.0, 0.0, 8001.0), false));
+        assert!(spatial_starts(&l, Vec3::new(0.0, 0.0, 9000.0), true));
+    }
+
+    #[test]
+    fn spatial_pan_follows_the_camera_right_axis() {
+        let l = Listener { position: Vec3::ZERO, right: Vec3::X };
+        let close = |a: [f32; 2], b: [f32; 2]| (a[0] - b[0]).abs() < 1e-4 && (a[1] - b[1]).abs() < 1e-4;
+        // Devant : centré, plein volume à distance nulle ; sur la source : centré.
+        assert!(close(pan_gains(&l, Vec3::new(0.0, 0.0, -100.0)), [1.0, 1.0]));
+        assert!(close(pan_gains(&l, Vec3::ZERO), [1.0, 1.0]));
+        // À droite : oreille droite seule ; à gauche : gauche seule.
+        assert!(close(pan_gains(&l, Vec3::new(500.0, 0.0, 0.0)), [0.0, 1.0]));
+        assert!(close(pan_gains(&l, Vec3::new(-500.0, 0.0, 0.0)), [1.0, 0.0]));
+        // Atténuation et volume propre.
+        let g = spatial_gains(&l, Vec3::new(3000.0, 0.0, 0.0), 1.1);
+        assert!(close(g, [0.0, 0.55]), "{g:?}");
+        let turned = Listener { position: Vec3::ZERO, right: Vec3::NEG_X };
+        assert!(close(pan_gains(&turned, Vec3::new(500.0, 0.0, 0.0)), [1.0, 0.0]));
+    }
+
+    #[test]
+    fn spatial_source_downmixes_to_stereo_with_shared_gains() {
+        let shared = Arc::new(VoiceShared { gains: [AtomicU32::new(0), AtomicU32::new(0)], stop: AtomicBool::new(false) });
+        shared.set([0.5, 1.0]);
+        let input = rodio::buffer::SamplesBuffer::new(rodio::ChannelCount::new(2).unwrap(), rodio::SampleRate::new(100).unwrap(), vec![1.0, 0.0, 0.5, 0.5]);
+        let out: Vec<f32> = SpatialControl::new(Box::new(input), shared.clone()).collect();
+        assert_eq!(out, vec![0.25, 0.5, 0.25, 0.5]);
+        // Arrêt demandé : la source s'éteint à la relecture suivante.
+        shared.stop.store(true, Ordering::Relaxed);
+        let input = rodio::buffer::SamplesBuffer::new(rodio::ChannelCount::new(1).unwrap(), rodio::SampleRate::new(100).unwrap(), vec![1.0; 10]);
+        assert_eq!(SpatialControl::new(Box::new(input), shared).count(), 0);
     }
 
     #[test]
@@ -710,3 +1068,4 @@ mod tests {
         let _ = std::fs::remove_dir_all(&tmp);
     }
 }
+

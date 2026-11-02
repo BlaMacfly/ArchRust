@@ -468,6 +468,8 @@ impl App {
                 let peer = (other, name_of(other));
                 self.trade.start(peer);
                 self.ui.show_inventory = true;
+                // `PT_OpenUIEvent` ferme aussi `UI_DropMoneyFromInventory`.
+                self.item_ui.drop_money = None;
             }
             TradeEvent::Cancelled { .. } => {
                 self.trade.close();

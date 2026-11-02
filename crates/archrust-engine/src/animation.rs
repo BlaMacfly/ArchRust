@@ -317,6 +317,8 @@ pub struct Animator {
     pub signature: usize,
     /// Ensemble d'animations (`AgcdCharacter+0xfc`, voir `worn::anim_equip`) ; −1 : aucune.
     pub equip: i32,
+    /// Clips lancés depuis la dernière lecture ([`Animator::take_started`]) : type et clip.
+    started: Vec<(u32, Arc<Clip>)>,
 }
 
 impl Animator {
@@ -355,6 +357,7 @@ impl Animator {
             world: None,
             signature,
             equip,
+            started: Vec::new(),
         };
         a.switch(assets, AnimType::Wait as u32);
         Some(a)
@@ -385,6 +388,21 @@ impl Animator {
             .and_then(|v| load_clip(assets, &v.file));
         self.time = 0.0;
         self.since_update = f32::MAX;
+        self.note_started();
+    }
+
+    /// Note le départ du clip courant (rappel « début d'animation » d'AgcmCharacter, que suivent les
+    /// sons d'animation et les pas : voir `app_sounds.rs`).
+    fn note_started(&mut self) {
+        if let Some(c) = &self.clip {
+            self.started.push((self.kind, c.clone()));
+        }
+    }
+
+    /// Clips lancés depuis le dernier appel (type d'animation et clip), y compris chaque nouveau
+    /// cycle d'un clip en boucle (attente, marche, course).
+    pub fn take_started(&mut self) -> Vec<(u32, Arc<Clip>)> {
+        std::mem::take(&mut self.started)
     }
 
     /// Avance l'animation de `dt` et réécrit les sommets si nécessaire (au plus `max_hz` fois par
@@ -477,6 +495,11 @@ impl Animator {
             {
                 self.clip = Some(next);
             }
+            self.note_started();
+        } else if !self.dead && !self.action && (self.kind == AnimType::Walk as u32 || self.kind == AnimType::Run as u32) && self.time >= clip.duration {
+            // Nouveau cycle de marche ou de course (l'échantillonnage boucle déjà sur la durée).
+            self.time -= clip.duration;
+            self.note_started();
         }
         self.since_update += dt;
         if self.since_update < 1.0 / max_hz {
@@ -522,6 +545,7 @@ impl Animator {
         self.time = 0.0;
         self.since_update = f32::MAX;
         self.action = true;
+        self.note_started();
         true
     }
 
@@ -559,6 +583,9 @@ impl Animator {
                 self.time = if at_end { clip.duration } else { 0.0 };
                 self.clip = Some(clip);
                 self.kind = kind;
+                if !at_end {
+                    self.note_started();
+                }
             }
         } else {
             self.kind = u32::MAX;

@@ -474,7 +474,14 @@ impl App {
                 }
                 self.walking = false;
             }
-            TeleportEvent::Loaded { cid } | TeleportEvent::Canceled { cid } if Some(cid) == me => self.portal.loading = false,
+            TeleportEvent::Loaded { cid } if Some(cid) == me => self.portal.loading = false,
+            // Op 2 (rappel 4) : la fenêtre de téléport se ferme, le chargement aussi.
+            TeleportEvent::Canceled { cid } if Some(cid) == me => {
+                self.portal.loading = false;
+                self.portal.open = None;
+            }
+            // Op 6 : demande ignorée, la liste ne s'ouvre pas (rien d'affiché).
+            TeleportEvent::Ignored { cid } if Some(cid) == me => log::info!("portail : demande ignorée par le serveur"),
             _ => {}
         }
     }

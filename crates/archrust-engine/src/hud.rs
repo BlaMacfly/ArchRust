@@ -167,7 +167,7 @@ pub use options_ui::{draw_options, OptionsEdit, OptionsOut};
 pub use login_ui::{draw_char_create, draw_char_select, draw_id_password, draw_select_server, CharSlotView, CreateUi, LoginUi, SelectUi};
 pub use menu_ui::{draw_main_menu, main_menu_open, toggle_options_menu, MenuUi};
 pub use party_ui::{draw_party, party_face, PartyFrame, PartyFrames, PartyUi, PartyUiState};
-pub use dialogs_ui::{info_box, confirm_box, draw_bank_money, draw_buy_count, draw_dialog, draw_split, ui_message, DialogOut};
+pub use dialogs_ui::{info_box, confirm_box, draw_bank_money, draw_buy_count, draw_dialog, draw_drop_money, draw_split, ui_message, DialogOut};
 pub use guild_ui::{draw_battle_texts, draw_guild_warehouse, draw_guild_window, draw_gware_money, draw_message_box, GridCell, GuildEdit, GuildRow, GuildUi, GuildView, GwareItem, GwareView, ListSpec, PageColors};
 pub use portal_ui::{draw_buy_bank, draw_loading, draw_reconnect_hold, draw_remission, draw_teleport, BuyBankView, PortalUi, RemissionUi, RemissionView, TeleportRow, TeleportView};
 pub use skills_ui::{draw_quickbar, draw_skill_book, draw_trainer, BookEntry, BookView, Shortcut, SkillUi, SlotView, TrainerEntry, TrainerView, EXTRA_BELTS, QUICK_SLOTS};
@@ -377,9 +377,58 @@ struct UiImage {
 #[derive(Default)]
 struct MinimapState {
     tex: Option<egui::TextureHandle>,
-    drawn_at: Option<(i32, i32)>,
+    drawn_at: Option<(i32, i32, i32)>,
     tiles: HashMap<String, Option<Arc<crate::assets::RgbaImage>>>,
     mask: Option<Option<crate::assets::RgbaImage>>,
+    /// Facteur de zoom d'AcUIMinimap (`+0x4e3c`, 1 au départ, FUN_1408d3920) : part du raster de
+    /// 237 px affichée = facteur × 148 px ; ± 0,2 par bouton, de 0,4 à 1,6 (FUN_1408d3c80 / 3cf0).
+    /// 0 : pas encore réglé (lu comme 1).
+    scale: f32,
+    /// Carte masquée (`Minimap_Map_Toggle`, FUN_1407015a0 : fond `Main_Minimap_Base_hide.png`).
+    hidden: bool,
+}
+
+/// Demande des boutons de la minicarte traitée par le moteur.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MinimapUi {
+    /// `Minimap_CameraView_Click` : mode de caméra suivant.
+    CameraView,
+    /// `WorldMap_Toggle` (`CONTROL_MINIMAP_WORLDOPEN`) : carte du monde.
+    WorldMap,
+}
+
+/// Repère d'AgcmMinimap (FUN_1408d5490) : type de la liste `+0x1b88` et position du monde.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct MinimapIcon {
+    /// 0 PNJ (`Main_Minimap_Pos_NPC0`, 10 px), 1 quête proposée (`…_NPC2`, 16 px), 2 quête à rendre
+    /// (`…_NPC1`, 16 px), 3 / 4 objets de siège (`…_Siege0` 17 px, `…_Siege1` 20 px).
+    pub kind: u8,
+    pub pos: Vec3,
+}
+
+impl MinimapIcon {
+    /// Image et côté (px du raster) du type (FUN_1408d5490).
+    pub fn image(&self) -> (&'static str, f32) {
+        match self.kind {
+            1 => ("Main_Minimap_Pos_NPC2.png", 16.0),
+            2 => ("Main_Minimap_Pos_NPC1.png", 16.0),
+            3 => ("Main_Minimap_Pos_Siege0.png", 17.0),
+            4 => ("Main_Minimap_Pos_Siege1.png", 20.0),
+            _ => ("Main_Minimap_Pos_NPC0.png", 10.0),
+        }
+    }
+}
+
+/// Facteur de zoom suivant d'un bouton de la minicarte : « + » retire 0,2 (pas sous 0,4), « − » ajoute
+/// 0,2 (pas au-delà de 1,6), en dixièmes entiers comme FUN_1408d3c80 / FUN_1408d3cf0.
+pub fn minimap_zoom(scale: f32, plus: bool) -> f32 {
+    let tenths = (scale * 10.0).round() as i32;
+    let next = if plus { tenths - 2 } else { tenths + 2 };
+    if (plus && next > 3) || (!plus && next < 17) {
+        next as f32 * 0.1
+    } else {
+        scale
+    }
 }
 
 #[derive(Default)]
@@ -394,6 +443,8 @@ pub struct HudState {
     minimap: MinimapState,
     /// Sac affiché dans la fenêtre d'inventaire (onglets « Bag 1 » à « Bag 5 »).
     inventory_layer: i16,
+    /// Clic sur l'or de l'inventaire : `UI_DropMoneyFromInventory` à ouvrir (lu par `app_items.rs`).
+    pub drop_money_request: bool,
     item_icons: Option<HashMap<i32, String>>,
     /// Messages système récents (texte, arrivée), affichés en orange à droite comme Archonia.
     system_messages: Vec<(String, Instant)>,
@@ -415,6 +466,8 @@ pub struct HudState {
     /// Pourcentage de durabilité des objets du joueur qui en ont une (IID → 0 à 100, voir
     /// `app_repair.rs`) : marque des cases à 0 % (porté) ou à 20 % et moins (sac).
     pub durability: HashMap<i32, i32>,
+    /// Boutons de la minicarte cliqués (caméra, carte du monde), traités par le moteur.
+    pub minimap_requests: Vec<MinimapUi>,
 }
 
 /// Cible du joueur affichée dans `UI_TargetInfo`.
@@ -433,12 +486,23 @@ pub struct HudScene {
     pub player: Option<Vec3>,
     /// Direction de la caméra au sol (x, z), pour le cône de la minicarte.
     pub camera_forward: Vec3,
+    /// Repères de la minicarte (PNJ, quêtes), voir [`MinimapIcon`].
+    pub minimap_icons: Vec<MinimapIcon>,
 }
 
 /// Pixels de minicarte par unité du monde (FUN_1408d5220).
 const MINIMAP_PX_PER_UNIT: f32 = 0.003_769_531_1;
-/// Côté du raster de minicarte d'Archonia, affiché dans le contrôle de 148 px.
+/// Côté du raster de minicarte d'Archonia (largeur du contrôle × 1,6, `DAT_140d8dca0`) ; le zoom en
+/// affiche `facteur × 148` px dans le contrôle de 148 px.
 const MINIMAP_RASTER: f32 = 237.0;
+/// Largeur du contrôle de carte (`MiniMap1`, type 16) dans `UI_1024X768.ini`.
+const MINIMAP_VIEW: f32 = 148.0;
+
+/// Côté (px du raster) de la part affichée de la minicarte pour un facteur de zoom.
+fn minimap_shown(scale: f32) -> f32 {
+    let s = if scale > 0.0 { scale } else { 1.0 };
+    (s * MINIMAP_VIEW).min(MINIMAP_RASTER)
+}
 
 impl HudState {
     /// Oublie les images d'interface et la minicarte déjà chargées : elles sont relues à leur
@@ -662,17 +726,8 @@ fn upload(ctx: &egui::Context, name: &str, img: &crate::assets::RgbaImage) -> eg
 }
 
 fn load_exp_table(assets: &Assets) -> HashMap<i32, u64> {
-    let text = assets
-        .read_file("ini/LevelUpExp.txt")
-        .map(|raw| {
-            let plain = archrust_data::ini::decrypt_ini(&raw);
-            if plain.contains("level") {
-                plain
-            } else {
-                String::from_utf8_lossy(&raw).into_owned()
-            }
-        })
-        .unwrap_or_default();
+    // En clair (données du serveur) ou chiffrée (client).
+    let text = assets.read_text("ini", "LevelUpExp.txt").unwrap_or_default();
     let map: HashMap<i32, u64> = text
         .lines()
         .filter_map(|l| {
@@ -956,6 +1011,11 @@ pub fn draw_inventory(
                                 font,
                                 Color32::from_rgb(255, 220, 120),
                             );
+                            // `INV_OpenDropMoney` : débranché dans Archonia (`Inventory_OpenDropMoneyUI` vide, aucune
+                            // action sur `InventoryMoney`) ; ArchRust l'ouvre au clic sur l'or, comme le jeu d'origine.
+                            if ui.interact(r, egui::Id::new("inv-money"), egui::Sense::click()).clicked() {
+                                hud.drop_money_request = true;
+                            }
                         } else if !label.is_empty() {
                             shadow_text(
                                 &painter,
@@ -1365,8 +1425,11 @@ fn draw_minimap(
     };
     let view_rect = layout.rect(origin, view.pos, view.size);
     // Fond de la fenêtre d'abord (son disque intérieur est opaque), puis la carte et les contrôles,
-    // dans l'ordre d'AgcmUIManager2.
-    if let Some((_, tex)) = w.textures.first().cloned() {
+    // dans l'ordre d'AgcmUIManager2. Carte masquée : `Texture=2` (`Main_Minimap_Base_hide.png`),
+    // ni carte ni repères (FUN_1407015a0, `Minimap_Map_OFF`).
+    let hidden = hud.minimap.hidden;
+    let base = if hidden { w.textures.iter().find(|(i, _)| *i == 2).or(w.textures.first()) } else { w.textures.first() };
+    if let Some((_, tex)) = base.cloned() {
         control_image(
             ctx,
             hud,
@@ -1378,7 +1441,7 @@ fn draw_minimap(
             1.0,
         );
     }
-    if let Some(player) = scene.player {
+    if let Some(player) = scene.player.filter(|_| !hidden) {
         update_minimap(ctx, hud, assets, player, view.size[0] as usize);
         if let Some(tex) = &hud.minimap.tex {
             painter.image(
@@ -1387,6 +1450,20 @@ fn draw_minimap(
                 Rect::from_min_max(Pos2::ZERO, Pos2::new(1.0, 1.0)),
                 Color32::WHITE,
             );
+        }
+        // Repères (FUN_1408d5490) : posés dans le raster à 0,0037695 px par unité, à leur taille, puis
+        // le raster est réduit au contrôle avec la carte ; gardés dans le disque de la carte.
+        let per_px = view_rect.width() / minimap_shown(hud.minimap.scale);
+        for icon in &scene.minimap_icons {
+            let d = Vec2::new(icon.pos.x - player.x, icon.pos.z - player.z) * MINIMAP_PX_PER_UNIT * per_px;
+            let (image, side) = icon.image();
+            let half = side * per_px / 2.0;
+            if d.length() + half > view_rect.width() / 2.0 {
+                continue;
+            }
+            if let Some((tex, _)) = hud.image(ctx, assets, image) {
+                painter.image(tex, Rect::from_center_size(view_rect.center() + d, Vec2::splat(half * 2.0)), Rect::from_min_max(Pos2::ZERO, Pos2::new(1.0, 1.0)), Color32::WHITE);
+            }
         }
     }
     for c in w.controls.iter().filter(|c| c.kind == 3) {
@@ -1402,6 +1479,10 @@ fn draw_minimap(
                 1.0,
             );
         }
+    }
+    minimap_buttons(ctx, hud, assets, layout, w);
+    if hidden {
+        return;
     }
     // Cône de la caméra puis repère du joueur, au centre.
     let center = view_rect.center();
@@ -1448,6 +1529,40 @@ fn draw_minimap(
     }
 }
 
+/// Boutons de la minicarte reliés par leur rappel (`Action=3:`) : `Minimap_Plus_Click` /
+/// `Minimap_Minus_Click` (zoom), `Minimap_Map_Toggle` (masquer), `Minimap_CameraView_Click` et
+/// `WorldMap_Toggle` (demandes au moteur, [`MinimapUi`]). Textures a / b / c : repos, survol, appui.
+fn minimap_buttons(ctx: &egui::Context, hud: &mut HudState, assets: &Assets, layout: &Layout, w: &UiWindow) {
+    let origin = layout.window_origin(w);
+    for c in w.controls.iter().filter(|c| c.kind == 3) {
+        let Some(action) = c.action.as_deref() else { continue };
+        if !matches!(action, "Minimap_Plus_Click" | "Minimap_Minus_Click" | "Minimap_Map_Toggle" | "Minimap_CameraView_Click" | "WorldMap_Toggle") {
+            continue;
+        }
+        let r = layout.rect(origin, c.pos, c.size);
+        let mut clicked = false;
+        egui::Area::new(egui::Id::new(("archonia-minimap-button", c.name.as_str()))).fixed_pos(r.min).order(egui::Order::Middle).show(ctx, |ui| {
+            let (rect, resp) = ui.allocate_exact_size(r.size(), egui::Sense::click());
+            let suffix = if resp.is_pointer_button_down_on() { "c.png" } else if resp.hovered() { "b.png" } else { "a.png" };
+            if let Some((_, t)) = c.textures.iter().find(|(_, n)| n.to_ascii_lowercase().ends_with(suffix)).cloned() {
+                control_image(ctx, hud, assets, ui.painter(), rect, c.size, &t, 1.0);
+            }
+            clicked = resp.clicked();
+        });
+        if !clicked {
+            continue;
+        }
+        let m = &mut hud.minimap;
+        match action {
+            "Minimap_Plus_Click" => m.scale = minimap_zoom(if m.scale > 0.0 { m.scale } else { 1.0 }, true),
+            "Minimap_Minus_Click" => m.scale = minimap_zoom(if m.scale > 0.0 { m.scale } else { 1.0 }, false),
+            "Minimap_Map_Toggle" => m.hidden = !m.hidden,
+            "Minimap_CameraView_Click" => hud.minimap_requests.push(MinimapUi::CameraView),
+            _ => hud.minimap_requests.push(MinimapUi::WorldMap),
+        }
+    }
+}
+
 /// Point du monde (x, z) sous un clic gauche sur la carte de la minicarte, pour la téléportation
 /// des MJ (voir `app_worldmap.rs`) : le raster de `MINIMAP_RASTER` px centré sur le joueur couvre
 /// le contrôle de type 16, comme dans `update_minimap`.
@@ -1460,7 +1575,7 @@ pub fn minimap_click(ctx: &egui::Context, hud: &mut HudState, assets: &Assets, p
     egui::Area::new(egui::Id::new("archrust-minimap-gm")).fixed_pos(r.min).order(egui::Order::Middle).show(ctx, |ui| {
         let (_, resp) = ui.allocate_exact_size(r.size(), egui::Sense::click());
         if let Some(p) = resp.clicked().then(|| resp.interact_pointer_pos()).flatten() {
-            let per = MINIMAP_RASTER / MINIMAP_PX_PER_UNIT / r.width().max(1.0);
+            let per = minimap_shown(hud.minimap.scale) / MINIMAP_PX_PER_UNIT / r.width().max(1.0);
             let d = p - r.center();
             hit = Some([player.x + d.x * per, player.z + d.y * per]);
         }
@@ -1492,7 +1607,8 @@ fn update_minimap(
     side: usize,
 ) {
     // Une image par pas de ~200 unités : inutile de recomposer à chaque image.
-    let key = ((player.x / 200.0) as i32, (player.z / 200.0) as i32);
+    let shown = minimap_shown(hud.minimap.scale);
+    let key = ((player.x / 200.0) as i32, (player.z / 200.0) as i32, (shown * 10.0) as i32);
     if hud.minimap.drawn_at == Some(key) && hud.minimap.tex.is_some() {
         return;
     }
@@ -1501,7 +1617,7 @@ fn update_minimap(
     if hud.minimap.mask.is_none() {
         hud.minimap.mask = Some(assets.image("texture/ui", "main_minimap_alpha.png").ok());
     }
-    let units_per_px = MINIMAP_RASTER / MINIMAP_PX_PER_UNIT / side as f32;
+    let units_per_px = shown / MINIMAP_PX_PER_UNIT / side as f32;
     let mut data = vec![0u8; side * side * 4];
     for j in 0..side {
         for i in 0..side {

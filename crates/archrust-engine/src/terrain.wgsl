@@ -14,9 +14,12 @@ struct Globals {
     fog_color: vec4<f32>,
     fog_range: vec4<f32>,
     // Lumières des effets (AgcdEffLight), voir `shader.wgsl`.
-    point_pos: array<vec4<f32>, 8>,
-    point_color: array<vec4<f32>, 8>,
+    point_pos: array<vec4<f32>, 16>,
+    point_color: array<vec4<f32>, 16>,
     point_count: vec4<f32>,
+    // Ombres projetées des objets (AgcmShadow2, voir `shadow.rs`) : monde → (u, v) ; x = 1 allumées.
+    shadow_uv: mat4x4<f32>,
+    shadow_params: vec4<f32>,
 };
 @group(0) @binding(0) var<uniform> globals: Globals;
 
@@ -26,6 +29,9 @@ struct Globals {
 @group(1) @binding(3) var t_mask2: texture_2d<f32>;
 @group(1) @binding(4) var t_layer2: texture_2d<f32>;
 @group(1) @binding(5) var s_terrain: sampler;
+// Texture d'ombre (0 hors ombre, 130/255 dans l'ombre), voir `shadow_render.rs`.
+@group(2) @binding(0) var t_shadow: texture_2d<f32>;
+@group(2) @binding(1) var s_shadow: sampler;
 
 struct VertexIn {
     @location(0) position: vec3<f32>,
@@ -54,7 +60,7 @@ struct VertexOut {
 // même calcul que `shader.wgsl` (atténuation `1 − d/R`, choix d'ArchRust).
 fn point_lighting(p: vec3<f32>, n: vec3<f32>) -> vec3<f32> {
     var sum = vec3<f32>(0.0);
-    let count = min(u32(globals.point_count.x), 8u);
+    let count = min(u32(globals.point_count.x), 16u);
     for (var i = 0u; i < count; i = i + 1u) {
         let pr = globals.point_pos[i];
         let d = pr.xyz - p;
@@ -96,5 +102,13 @@ fn fs_main(in: VertexOut) -> @location(0) vec4<f32> {
     let dist = distance(in.world_pos, globals.camera_pos.xyz);
     let fog = clamp((dist - globals.fog_range.x) / max(globals.fog_range.y - globals.fog_range.x, 1.0), 0.0, globals.fog_range.z);
     let color = c * in.color.rgb * light;
-    return vec4<f32>(mix(color, globals.fog_color.rgb, fog), 1.0);
+    // Ombre projetée : second passage d'Archonia (`FUN_1406d31b0`, shader `DAT_140f99368`) par-dessus
+    // le sol brouillé, `destination × (1 − texture × facteur de brouillard × (N·L ≥ 0))`.
+    let suv = (globals.shadow_uv * vec4<f32>(in.world_pos, 1.0)).xy;
+    let shade = textureSample(t_shadow, s_shadow, suv).r;
+    let inside = all(suv >= vec2<f32>(0.0)) && all(suv <= vec2<f32>(1.0));
+    let facing = select(0.0, 1.0, dot(n, l) >= 0.0);
+    let fog_factor = 1.0 - clamp((dist - globals.fog_range.x) / max(globals.fog_range.y - globals.fog_range.x, 1.0), 0.0, 1.0);
+    let shadow = select(0.0, shade * fog_factor * facing, inside && globals.shadow_params.x > 0.5);
+    return vec4<f32>(mix(color, globals.fog_color.rgb, fog) * (1.0 - shadow), 1.0);
 }

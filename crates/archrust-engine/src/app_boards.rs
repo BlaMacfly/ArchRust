@@ -65,7 +65,13 @@ struct IdLine {
     /// Signature d'un joueur (Signature of Glory, AGPMCHARACTER champ 27, `board+0x182`) : ligne suivant la guilde
     /// (`FUN_140826450`), couleur `board+0x1fc` (−1 : blanc ; la couleur choisie d'Archonia n'est pas de l'épisode 8).
     signature: Option<String>,
+    /// Barres PV / PM du joueur (AgcmHPBar, option `VS_BARS`) : parts remplies de 0 à 1.
+    bars: Option<(f32, f32)>,
 }
+
+/// Barres d'AgcmHPBar (FUN_140828f60) : 120 × 7 px, fond `HP_Blank`, remplissage `HP_Bar` / `MP_Bar`
+/// (`TextBoard.ini` `[Textures5]`) sur `part × 120` px.
+const BAR_SIZE: [f32; 2] = [120.0, 7.0];
 
 /// Ce que la fermeture egui dessine, calculé avant l'emprunt du GPU.
 #[derive(Default)]
@@ -106,6 +112,12 @@ impl App {
             self.boards.occluded.retain(|_, (_, t)| now.duration_since(*t) < std::time::Duration::from_secs(5));
         }
         hidden
+    }
+
+    /// Hauteur du panneau d'un personnage au-dessus de ses pieds (`HEIGHT`, plus `RIDER_HEIGHT` à cheval) :
+    /// ancre des bulles de discussion (`app_balloon.rs`).
+    pub(super) fn boards_head_height(&mut self, cid: i32, tid: i32) -> f32 {
+        self.boards_template(tid).0 + self.ride_board_height(cid)
     }
 
     fn boards_template(&mut self, tid: i32) -> (f32, f32) {
@@ -267,7 +279,13 @@ impl App {
             let title = if player { self.titles.over_head_title(&name) } else { None };
             let charisma = if cid == me { self.titles.my_charisma_rank() } else { None };
             let signature = if player { self.consumables_signature(cid) } else { None };
-            view.ids.push(IdLine { anchor, name, color, guild, party: party.contains(&cid), title, charisma, signature });
+            let ratio = |v: Option<i32>, m: Option<i32>| match (v, m) {
+                (Some(v), Some(m)) if m > 0 => (v as f32 / m as f32).clamp(0.0, 1.0),
+                _ => 0.0,
+            };
+            let st = &self.hud.stats;
+            let bars = (cid == me && display.self_bars).then(|| (ratio(st.hp, st.max_hp), ratio(st.mp, st.max_mp)));
+            view.ids.push(IdLine { anchor, name, color, guild, party: party.contains(&cid), title, charisma, signature, bars });
         }
         for (cid, board, born) in &self.boards.dmg {
             let Some((foot, height)) = feet.get(cid) else { continue };
@@ -362,6 +380,22 @@ pub fn panel(ctx: &egui::Context, glue: &mut BoardsGlue, view: &BoardsView, hud:
             (g, pos)
         });
         let (signature, signature_at) = signature.map_or((None, None), |(g, p)| (Some(g), Some(p)));
+        // Barres PV / PM sous le nom (position sous l'ancre déduite : décalage `+0x24/+0x28` non relevé).
+        if let Some((hp, mp)) = line.bars {
+            let full = Rect::from_min_max(Pos2::ZERO, Pos2::new(1.0, 1.0));
+            let left = (line.anchor.x - BAR_SIZE[0] * 0.5 * SCALE).trunc();
+            for (i, (part, fill)) in [(hp, "HP_Bar.png"), (mp, "MP_Bar.png")].into_iter().enumerate() {
+                let top = line.anchor.y + 2.0 + i as f32 * (BAR_SIZE[1] + 1.0) * SCALE;
+                let r = Rect::from_min_size(Pos2::new(left, top), egui::vec2(BAR_SIZE[0], BAR_SIZE[1]) * SCALE);
+                if let Some((tex, _)) = hud.image(ctx, assets, "HP_Blank.png") {
+                    painter.image(tex, r, full, Color32::WHITE);
+                }
+                if let Some((tex, _)) = hud.image(ctx, assets, fill) {
+                    let w = r.width() * part;
+                    painter.image(tex, Rect::from_min_size(r.min, egui::vec2(w, r.height())), Rect::from_min_max(Pos2::ZERO, Pos2::new(part, 1.0)), Color32::WHITE);
+                }
+            }
+        }
         for (galley, pos) in [(Some(name), Some(at)), (title, title_at), (guild, guild_at), (signature, signature_at)] {
             let (Some(galley), Some(pos)) = (galley, pos) else { continue };
             painter.galley_with_override_text_color(pos + egui::vec2(1.0, 1.0), galley.clone(), shadow);

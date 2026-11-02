@@ -17,7 +17,7 @@ use crate::render::{DrawItem, Mesh, Renderer, TerrainMesh, TerrainVertex, TERRAI
 use crate::scene::{ensure_texture, patched_model_meshes};
 use archrust_crypto::{capi_crypt, KEY_TEXTURE};
 use archrust_data::magpack::MagPack;
-use archrust_data::rw::{Geometry, SectorGeometry, TextureDictionary};
+use archrust_data::rw::{Geometry, SectorGeometry};
 use glam::{Mat4, Vec3};
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
@@ -188,6 +188,49 @@ pub struct Terrain {
     blocking: HashMap<(i32, i32), SectorBlocking>,
     pub loads_per_frame: usize,
     pub last_center: Option<(i32, i32)>,
+    /// Sol grossier (`R{sx},{sy}.dff`) des secteurs entre le détail et l'horizon (`None` = absent).
+    rough: HashMap<(i32, i32), Option<Arc<TerrainMesh>>>,
+    /// Réglages `MapView` / `NaturalObj` (voir [`TerrainView`]).
+    pub view: TerrainView,
+    /// Eau et herbe des secteurs chargés.
+    pub water: crate::water::WaterWorld,
+    pub grass: crate::grass::GrassWorld,
+    lod: Option<archrust_data::lod::LodDistances>,
+    /// Secteurs donnés à l'eau et à l'herbe au dernier passage (centre, réglages).
+    extras_key: Option<((i32, i32), TerrainView, usize)>,
+    clock: Option<std::time::Instant>,
+    grass_clock_ms: f64,
+}
+
+/// Distances de vue d'Archonia appliquées au sol, à l'eau et à l'herbe.
+///
+/// `MapView` (`FUN_140711050` → `FUN_140537f60`) : sol détaillé (`D{sx},{sy}.dff`) sur 1 / 1 / 2 / 3
+/// secteurs autour du joueur, sol grossier (`R{sx},{sy}.dff`) jusqu'à 4 / 6 / 7 / 9 secteurs
+/// (zones carrées : forme déduite), facteur des distances LOD 0,5 / 0,8 / 1,3 / 1,8.
+/// `NaturalObj` : herbe (voir `grass.rs`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct TerrainView {
+    pub map_view: u8,
+    pub natural_obj: u8,
+}
+
+impl Default for TerrainView {
+    /// `MapView=1`, `NaturalObj=1` (valeurs par défaut d'ArchRust et de `COption.ini`).
+    fn default() -> Self {
+        TerrainView { map_view: 1, natural_obj: 1 }
+    }
+}
+
+impl TerrainView {
+    pub fn detail_radius(&self) -> i32 {
+        [1, 1, 2, 3][self.map_view.min(3) as usize]
+    }
+    pub fn rough_radius(&self) -> i32 {
+        [4, 6, 7, 9][self.map_view.min(3) as usize]
+    }
+    pub fn lod_factor(&self) -> f32 {
+        [0.5, 0.8, 1.3, 1.8][self.map_view.min(3) as usize]
+    }
 }
 
 /// Blocage d'un secteur d'après son `C{sx},{sy}.amf` : cellules de 400 unités au sol bloqué et
@@ -289,6 +332,14 @@ impl Terrain {
             blocking: HashMap::new(),
             loads_per_frame: 2,
             last_center: None,
+            rough: HashMap::new(),
+            view: TerrainView { map_view: (radius - 2).clamp(0, 3) as u8, ..Default::default() },
+            water: Default::default(),
+            grass: Default::default(),
+            lod: None,
+            extras_key: None,
+            clock: None,
+            grass_clock_ms: 0.0,
         }
     }
 
@@ -367,32 +418,11 @@ impl Terrain {
             ));
         }
         // 2. Géométrie du client.
-        let tile = tile_of(sx, sy);
         let sector = self.client_sector(assets, sx, sy)?;
         // Texture propre au secteur (dictionnaire R) : téléversée sous le nom du secteur.
         let r_name = format!("R{sx},{sy}");
         if renderer.texture(&r_name).is_none() {
-            if let Some(a) = self.tile(assets, 'a', tile) {
-                if let Some(Ok(txd_plain)) = a.unpack_named(&format!("{r_name}.dff")) {
-                    let txd_plain = if txd_plain.len() > 4 && txd_plain[0] == 0x16 {
-                        txd_plain
-                    } else {
-                        capi_crypt(KEY_TEXTURE, &txd_plain)
-                    };
-                    if let Ok(dict) = TextureDictionary::parse(&txd_plain) {
-                        if let Some(t) = dict.textures.first() {
-                            if let Ok(rgba) = t.to_rgba8() {
-                                renderer.upload_texture(
-                                    &r_name,
-                                    t.mips[0].width,
-                                    t.mips[0].height,
-                                    &rgba,
-                                );
-                            }
-                        }
-                    }
-                }
-            }
+            self.rough_sector(renderer, assets, sx, sy);
         }
         let mut geometry = sector.geometry;
         self.heights.insert((sx, sy), ground_field(sx, sy, &geometry));
@@ -412,38 +442,67 @@ impl Terrain {
         ))))
     }
 
+    /// `R{sx},{sy}.dff` du secteur (archive `a%06dx.ma2`) : téléverse sa texture sous le nom
+    /// `R{sx},{sy}` et rend la géométrie du sol grossier (voir `archrust_data::lod`).
+    fn rough_sector(&mut self, renderer: &mut Renderer, assets: &Assets, sx: i32, sy: i32) -> Option<SectorGeometry> {
+        let r_name = format!("R{sx},{sy}");
+        let a = self.tile(assets, 'a', tile_of(sx, sy))?;
+        let plain = a.unpack_named(&format!("{r_name}.dff"))?.ok()?;
+        let plain = if plain.len() > 4 && plain[0] == 0x16 { plain } else { capi_crypt(KEY_TEXTURE, &plain) };
+        let (dict, geometry) = archrust_data::lod::parse_rough_sector(&plain).inspect_err(|e| log::debug!("{r_name}.dff : {e}")).ok()?;
+        if renderer.texture(&r_name).is_none() {
+            if let Some(t) = dict.textures.first() {
+                if let Ok(rgba) = t.to_rgba8() {
+                    renderer.upload_texture(&r_name, t.mips[0].width, t.mips[0].height, &rgba);
+                }
+            }
+        }
+        geometry
+    }
+
+    /// Maillage du sol grossier d'un secteur (`None` : pas de `R` ou pas de géométrie).
+    fn load_rough(&mut self, renderer: &mut Renderer, assets: &Assets, sx: i32, sy: i32) -> Option<Arc<TerrainMesh>> {
+        let sector = self.rough_sector(renderer, assets, sx, sy)?;
+        Some(Arc::new(build_terrain_mesh(renderer, assets, &sector.geometry)))
+    }
+
     /// Charge progressivement les secteurs autour de `center`, décharge les lointains.
     /// Oublie les maillages des secteurs (leurs textures sont liées au GPU à la construction) : ils se
     /// reconstruisent au fil des images suivantes, avec les textures des packs rechargés.
     pub fn rebuild_meshes(&mut self) {
         self.sectors.clear();
+        self.rough.clear();
         self.failed.clear();
+        self.extras_key = None;
     }
 
+    /// Charge progressivement les secteurs autour de `center` comme Archonia (`MapView`) : sol
+    /// détaillé sur [`TerrainView::detail_radius`], sol grossier au-delà jusqu'à
+    /// [`TerrainView::rough_radius`] ; hauteurs et blocage sur `radius` (au moins le détail) ;
+    /// eau et herbe des secteurs chargés, remises au rendu (`renderer.world`).
     pub fn update(&mut self, renderer: &mut Renderer, assets: &Assets, center: Vec3) {
         let (cx, cy) = sector_of(center.x, center.z);
+        let detail = self.view.detail_radius();
+        let rough = self.view.rough_radius().max(detail);
+        let ground = self.radius.max(detail);
+        let near = |r: i32| move |&(sx, sy): &(i32, i32)| (sx - cx).abs() <= r && (sy - cy).abs() <= r;
         if self.last_center != Some((cx, cy)) {
             self.last_center = Some((cx, cy));
-            let r = self.radius + 2;
-            self.sectors
-                .retain(|&(sx, sy), _| (sx - cx).abs() <= r && (sy - cy).abs() <= r);
-            self.heights
-                .retain(|&(sx, sy), _| (sx - cx).abs() <= r && (sy - cy).abs() <= r);
-            self.blocking
-                .retain(|&(sx, sy), _| (sx - cx).abs() <= r && (sy - cy).abs() <= r);
-            self.failed
-                .retain(|&(sx, sy)| (sx - cx).abs() <= r && (sy - cy).abs() <= r);
+            let (keep_detail, keep_ground, keep_rough) = (near(detail + 1), near(ground + 2), near(rough + 1));
+            self.sectors.retain(|k, _| keep_detail(k));
+            self.heights.retain(|k, _| keep_ground(k));
+            self.blocking.retain(|k, _| keep_ground(k));
+            self.failed.retain(|k| keep_ground(k));
+            self.rough.retain(|k, _| keep_rough(k));
         }
+        let ring = |r: i32| {
+            let mut v: Vec<(i32, i32)> = (-r..=r).flat_map(|dy| (-r..=r).map(move |dx| (cx + dx, cy + dy))).collect();
+            v.sort_by_key(|&(sx, sy)| (sx - cx).abs().max((sy - cy).abs()));
+            v
+        };
         let mut budget = self.loads_per_frame;
-        // Du plus proche au plus lointain.
-        let mut wanted: Vec<(i32, i32)> = Vec::new();
-        for dy in -self.radius..=self.radius {
-            for dx in -self.radius..=self.radius {
-                wanted.push((cx + dx, cy + dy));
-            }
-        }
-        wanted.sort_by_key(|&(sx, sy)| (sx - cx).abs().max((sy - cy).abs()));
-        for (sx, sy) in wanted {
+        // 1. Sol détaillé, du plus proche au plus lointain.
+        for (sx, sy) in ring(detail) {
             if budget == 0 {
                 break;
             }
@@ -460,6 +519,82 @@ impl Terrain {
             }
             budget -= 1;
         }
+        // 2. Hauteurs et blocage au-delà du détail (personnages lointains, clics).
+        let mut ground_budget = self.loads_per_frame;
+        for (sx, sy) in ring(ground) {
+            if ground_budget == 0 {
+                break;
+            }
+            if self.heights.contains_key(&(sx, sy)) || self.failed.contains(&(sx, sy)) {
+                continue;
+            }
+            if !self.load_ground(assets, sx, sy) {
+                self.failed.insert((sx, sy));
+            }
+            ground_budget -= 1;
+        }
+        // 3. Sol grossier jusqu'à l'horizon ; il reste sous un secteur détaillé pas encore prêt.
+        let mut rough_budget = self.loads_per_frame * 2;
+        for (sx, sy) in ring(rough) {
+            if rough_budget == 0 {
+                break;
+            }
+            if self.rough.contains_key(&(sx, sy)) || (near(detail)(&(sx, sy)) && self.sectors.contains_key(&(sx, sy))) {
+                continue;
+            }
+            let mesh = self.load_rough(renderer, assets, sx, sy);
+            self.rough.insert((sx, sy), mesh);
+            rough_budget -= 1;
+        }
+        self.update_extras(renderer, assets, (cx, cy), detail, rough);
+    }
+
+    /// Eau (secteurs grossiers et détaillés) et herbe (détaillés), puis données de l'image.
+    fn update_extras(&mut self, renderer: &mut Renderer, assets: &Assets, (cx, cy): (i32, i32), detail: i32, rough: i32) {
+        let now = std::time::Instant::now();
+        let dt_ms = self.clock.map_or(0, |c| now.duration_since(c).as_millis().min(1000) as u32);
+        self.clock = Some(now);
+        if !assets.has_client() {
+            return;
+        }
+        let key = ((cx, cy), self.view, self.sectors.len());
+        if self.extras_key != Some(key) {
+            self.extras_key = Some(key);
+            if self.lod.is_none() {
+                let text = assets.read_file("ini/loddistancetype.txt").map(|raw| archrust_data::ini::decrypt_ini(&raw)).unwrap_or_default();
+                self.lod = Some(archrust_data::lod::LodDistances::parse(&text));
+            }
+            let mut wanted: HashMap<(i32, i32), bool> = HashMap::new();
+            for dy in -rough..=rough {
+                for dx in -rough..=rough {
+                    let k = (cx + dx, cy + dy);
+                    wanted.insert(k, dx.abs() <= detail && dy.abs() <= detail && self.sectors.contains_key(&k));
+                }
+            }
+            self.water.set_sectors(assets, &wanted);
+            let lod = self.lod.clone().unwrap_or_default();
+            let grass_on = self.grass.set_options(&lod, self.view.natural_obj, self.view.lod_factor());
+            let detailed: HashSet<(i32, i32)> = if grass_on { wanted.iter().filter(|(_, d)| **d).map(|(k, _)| *k).collect() } else { HashSet::new() };
+            self.grass.set_sectors(assets, &detailed);
+            for name in self.water.textures().into_iter().chain(self.grass.textures()) {
+                ensure_texture(renderer, assets, &name);
+            }
+        }
+        self.water.update(dt_ms);
+        self.grass_clock_ms = (self.grass_clock_ms + dt_ms as f64) % 3_600_000.0;
+        let (water, waves) = self.water.draw();
+        let directional = if renderer.light_color[3] > 0.0 {
+            [renderer.light_color[0], renderer.light_color[1], renderer.light_color[2]]
+        } else {
+            [1.0 - renderer.ambient[0], 1.0 - renderer.ambient[1], 1.0 - renderer.ambient[2]]
+        };
+        renderer.world = crate::world_render::WorldDraw {
+            water,
+            waves,
+            grass: self.grass.draw(),
+            grass_time_ms: self.grass_clock_ms as f32,
+            grass_color: crate::grass::grass_color(renderer.ambient, directional),
+        };
     }
 
     pub fn draw_items(&self) -> Vec<DrawItem> {
@@ -481,13 +616,24 @@ impl Terrain {
 
     /// Secteurs de sol du client, dessinés par le pipeline multi-couches.
     pub fn ground_meshes(&self) -> Vec<Arc<TerrainMesh>> {
+        let detail = self.view.detail_radius();
+        let near = |k: &(i32, i32)| self.last_center.is_none_or(|(cx, cy)| (k.0 - cx).abs() <= detail && (k.1 - cy).abs() <= detail);
+        let detailed = |k: &(i32, i32)| near(k) && matches!(self.sectors.get(k), Some(SectorMeshes::Ground(_)) | Some(SectorMeshes::Models(_)));
         self.sectors
-            .values()
-            .filter_map(|s| match s {
+            .iter()
+            .filter(|(k, _)| near(k))
+            .filter_map(|(_, s)| match s {
                 SectorMeshes::Ground(g) => Some(g.clone()),
                 SectorMeshes::Models(_) => None,
             })
+            // Sol grossier : au-delà du détail, ou en attendant qu'un secteur détaillé soit prêt.
+            .chain(self.rough.iter().filter(|(k, _)| !detailed(k)).filter_map(|(_, m)| m.clone()))
             .collect()
+    }
+
+    /// Secteurs de sol grossier chargés.
+    pub fn rough_count(&self) -> usize {
+        self.rough.values().flatten().count()
     }
 
     /// Hauteur du terrain sous (x, z), si le secteur est chargé.
@@ -825,6 +971,26 @@ mod tests {
         assert_eq!(t.clip_move(west, east, 0.0), east);
         let south = o + Vec3::new(0.0, 0.0, 2000.0);
         assert_eq!(t.clip_move(o + Vec3::new(800.0, 0.0, 2000.0), south, 0.0), south);
+    }
+
+    /// Avec les données du client (`ARCHRUST_GAME_DIR`) : `R325,389.dff` porte, après sa texture,
+    /// le sol grossier du secteur (17 × 17 sommets, 512 triangles, UV de 0 à 1, texture `R325,389`).
+    #[test]
+    fn rough_sector_geometry() {
+        let Some(dir) = std::env::var_os("ARCHRUST_GAME_DIR") else { return };
+        let assets = Assets::new(Some(dir.into()), &[]);
+        let pack = assets.magpack('a', tile_of(325, 389), "ma2").unwrap();
+        let plain = pack.unpack_named("R325,389.dff").unwrap().unwrap();
+        let plain = if plain[0] == 0x16 { plain } else { capi_crypt(KEY_TEXTURE, &plain) };
+        let (dict, geometry) = archrust_data::lod::parse_rough_sector(&plain).unwrap();
+        assert_eq!(dict.textures[0].mips[0].width, 128);
+        let g = geometry.expect("géométrie grossière").geometry;
+        assert_eq!((g.vertices.len(), g.triangles.len(), g.uv_sets.len()), (289, 512, 1));
+        let o = sector_origin(325, 389);
+        assert!(g.vertices.iter().all(|v| v.x >= o.x - 0.5 && v.x <= o.x + SECTOR_SIZE + 0.5));
+        assert!(g.materials.iter().any(|m| m.texture.as_ref().is_some_and(|t| t.name.eq_ignore_ascii_case("R325,389"))));
+        let v = TerrainView { map_view: 3, natural_obj: 1 };
+        assert_eq!((v.detail_radius(), v.rough_radius(), v.lod_factor()), (3, 9, 1.8));
     }
 
     /// Avec les données du client (`ARCHRUST_GAME_DIR`) : autour de Tullan, un pas vers une

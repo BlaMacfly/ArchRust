@@ -146,11 +146,17 @@ mod worldmap_glue;
 #[path = "app_effects.rs"]
 mod effects_glue;
 
+#[path = "app_stones.rs"]
+mod stones_glue;
+
 #[path = "app_consumables.rs"]
 mod consumables_glue;
 
 #[path = "app_social.rs"]
 mod social_glue;
+
+#[path = "app_sounds.rs"]
+mod sounds_glue;
 
 #[path = "app_hotkey.rs"]
 mod hotkey_glue;
@@ -167,6 +173,21 @@ mod titles_glue;
 #[path = "app_return_login.rs"]
 mod return_login_glue;
 
+#[path = "app_camera.rs"]
+mod camera_glue;
+
+#[path = "app_decals.rs"]
+mod decals_glue;
+
+#[path = "app_shadow.rs"]
+mod shadow_glue;
+
+#[path = "app_balloon.rs"]
+mod balloon_glue;
+
+#[path = "app_capture.rs"]
+mod capture_glue;
+
 /// Configuration du client.
 #[derive(Debug, Clone)]
 pub struct Config {
@@ -175,6 +196,9 @@ pub struct Config {
     pub addons_dir: PathBuf,
     /// Dossiers de patchs : un dossier avec `patch.toml` (ex. `free-assets/`) ou un dossier de patchs.
     pub patch_dirs: Vec<PathBuf>,
+    /// Dossier des données du serveur donné par `--server-data` ; `None` : `ARCHRUST_SERVER_DATA`, puis
+    /// `server-data/` à côté de `realmlist.wtf` (voir [`crate::server_data`]).
+    pub server_data: Option<PathBuf>,
     pub saved_dir: PathBuf,
     pub title: String,
     /// Modèle à afficher au démarrage pour vérifier le rendu (ex. `a0000005.ecl`), facultatif.
@@ -322,6 +346,8 @@ pub struct App {
     boards: boards_glue::BoardsGlue,
     /// Forgeron et état des objets convertis (renforcement, sockets, pierres), voir `app_convert.rs`.
     convert: convert_glue::ConvertGlue,
+    /// Effets des armes serties (pierres d'esprit, runes, renforcement), voir `app_stones.rs`.
+    stones: stones_glue::StonesGlue,
     /// Sphère d'alchimie : grille, recettes, prix et barre d'attente, voir `app_refinery.rs`.
     refinery: refinery_glue::RefineryGlue,
     /// Production : récolte, cuisine, alchimie, PNJ de production, voir `app_product.rs`.
@@ -364,6 +390,8 @@ pub struct App {
     consumables: consumables_glue::ConsumablesGlue,
     /// Actions sociales (`UI_SocialAction`, AGPMCHARACTER op 16, `SOCIAL_PC.txt`), voir `app_social.rs`.
     social: social_glue::SocialGlue,
+    /// Sons des personnages : animations, pas, compétences (voir `app_sounds.rs`).
+    sounds: sounds_glue::SoundsGlue,
     /// Touches d'Archonia (`[EventMap]`, `Ini/UI_Hotkey.ini`, `UI_Hotkey`) et fenêtre `UI_EXIT`, voir `app_hotkey.rs`.
     hotkey: hotkey_glue::HotkeyGlue,
     /// Inventaire Cash (`UI_CashInven`) et sac du familier (`UI_SubInventory`), voir `app_petbag.rs`.
@@ -380,13 +408,25 @@ pub struct App {
     worldmap: worldmap_glue::WorldMapGlue,
     /// Retour à la sélection des personnages (« Select Character » d'`UI_EXIT`), voir `app_return_login.rs`.
     return_login: return_login_glue::ReturnLoginGlue,
+    /// Caméra d'Archonia : `CamSetting.xml`, touches, modes F10 / F11 / F12, voir `app_camera.rs`.
+    cam: camera_glue::CameraGlue,
+    /// Ombres rondes sous les personnages et repère de destination au sol, voir `app_decals.rs`.
+    decals: decals_glue::DecalsGlue,
+    /// Ombres projetées des objets sur le sol (AgcmShadow2), voir `app_shadow.rs`.
+    shadow2: shadow_glue::ShadowGlue,
+    /// Bulles de discussion au-dessus des têtes (AgcmTextBoard), voir `app_balloon.rs`.
+    balloons: balloon_glue::BalloonGlue,
+    /// Capture d'écran (Impr. écran → `screen\SC….bmp`), voir `app_capture.rs`.
+    capture: capture_glue::CaptureGlue,
 }
 
 impl App {
     pub fn new(config: Config) -> Result<Self> {
         // Packs de ressources, avec les préférences du joueur (`saved-variables/packs.toml`).
         let pack_settings = archrust_patch::PackSettings::load(&config.saved_dir);
-        let assets = Arc::new(Assets::new(config.game_dir.clone(), &config.patch_dirs).with_pack_settings(&pack_settings));
+        // Données du serveur (`server-data/`) : tables de valeurs lues avant les packs et le client.
+        let server_data = crate::server_data::find_dir(config.server_data.as_deref(), config.game_dir.as_deref());
+        let assets = Arc::new(Assets::new(config.game_dir.clone(), &config.patch_dirs).with_pack_settings(&pack_settings).with_server_data(server_data.as_deref()));
         let packs = assets.pack_stack();
         // Comme sous WoW, les AddOns se chargent à l'entrée en jeu (voir `enter_world_addons`).
         let addons = Self::new_addon_manager(&config)?;
@@ -489,6 +529,7 @@ impl App {
             pvp: Default::default(),
             boards: Default::default(),
             convert: Default::default(),
+            stones: Default::default(),
             refinery: Default::default(),
             product: Default::default(),
             buddy: Default::default(),
@@ -510,6 +551,7 @@ impl App {
             morph: Default::default(),
             consumables: Default::default(),
             social: Default::default(),
+            sounds: Default::default(),
             hotkey: Default::default(),
             petbag: Default::default(),
             help: Default::default(),
@@ -518,6 +560,11 @@ impl App {
             cursor: Default::default(),
             worldmap: Default::default(),
             return_login: Default::default(),
+            cam: Default::default(),
+            decals: Default::default(),
+            shadow2: Default::default(),
+            balloons: Default::default(),
+            capture: Default::default(),
         })
     }
 
@@ -567,6 +614,8 @@ impl App {
             None if in_world => self.nature_music(),
             _ => None,
         };
+        // Ambiances de la tranche composée du ciel (région, zone locale, météo : `app_nature.rs`).
+        let nature_ambience = if in_world { self.nature_ambience_sets() } else { None };
         let cvar = |name: &str| {
             self.addons
                 .cvar(name)
@@ -578,15 +627,16 @@ impl App {
             None if in_world => cvar("worldMusic"),
             None => cvar("loginMusic"),
         };
-        // Ambiance : la première de la région (Archonia joue toutes celles des `EffectIndex`),
-        // sinon la CVar `worldAmbience`.
-        let ambience = if in_world {
-            self.zone_region
-                .as_ref()
-                .and_then(|z| z.ambience.first().cloned())
-                .or_else(|| cvar("worldAmbience"))
+        // Ambiances : tous les flux des `EffectIndex` de la tranche composée, joués ensemble comme
+        // Archonia (`FUN_140581fd0`) ; à défaut celles de la région, sinon la CVar `worldAmbience`.
+        let ambience: Vec<String> = if in_world {
+            let list = match nature_ambience {
+                Some(ids) => Zones::ambience_of_sets(&self.assets, &ids),
+                None => self.zone_region.as_ref().map(|z| z.ambience.clone()).unwrap_or_default(),
+            };
+            if list.is_empty() { cvar("worldAmbience").into_iter().collect() } else { list }
         } else {
-            None
+            Vec::new()
         };
         match playlist {
             Some(Some((path, generation))) => self.audio.play_music_once(Some(&path), generation),
@@ -594,7 +644,9 @@ impl App {
             Some(None) => self.audio.play_music(None),
             None => self.audio.play_music(music.as_deref()),
         }
-        self.audio.play_ambience(ambience.as_deref());
+        self.audio.play_ambiences(&ambience);
+        // Sons des personnages, pas et sons 3D (voir `app_sounds.rs`).
+        self.sounds_frame(dt);
         self.audio.update(dt);
     }
 
@@ -1150,6 +1202,8 @@ impl App {
             target,
             ..OrbitCamera::default()
         };
+        // Bornes et hauteurs de `CamSetting.xml` réappliquées à l'image suivante (`app_camera.rs`).
+        self.camera_reset();
     }
 
     /// Clic dans la scène de sélection : personnage le plus proche du rayon de la souris.
@@ -1385,6 +1439,8 @@ impl App {
         self.combat_observe(&ev);
         // Effets : montée de niveau, apprentissage, compétences, coups (voir `app_effects.rs`).
         self.effects_observe(&ev);
+        // Sons des compétences et des coups portés (voir `app_sounds.rs`).
+        self.sounds_observe(&ev);
         // Statut criminel et points de meurtrier (voir `app_pvp.rs`).
         self.pvp_observe(&ev);
         self.portal_observe(&ev);
@@ -1823,11 +1879,14 @@ impl App {
                 }
             }
             WorldEvent::Chat {
+                from_cid,
                 from,
                 message,
                 channel,
                 ..
             } => {
+                // Bulle au-dessus de la tête (discussion normale, `VH_BALOONCHAT`), voir `app_balloon.rs`.
+                self.balloon_chat(from_cid, channel, &message);
                 // Types AGPMCHATTING et cris de zone (0x4C) : classe, couleur et format d'Archonia
                 // (FUN_140511e20), filtres des AddOns, événement CHAT_MSG_* (voir `app_chat.rs`).
                 self.chat_received(channel, &from, &message);
@@ -1877,6 +1936,12 @@ impl App {
             ev @ (WorldEvent::Party(_) | WorldEvent::PartyManagement(_)) => self.on_party_event(ev),
             // Retour à la sélection des personnages : refus ou départ du monde (voir `app_return_login.rs`).
             WorldEvent::ReturnToLogin(e) => self.return_login_event(e),
+            // Compte connecté ailleurs (AGPMCHARACTER op 8, AgcmUILogin `0x1405a6350`) : boîte `LG_DUPLICATE_ACCOUNT`,
+            // dessinée par l'écran de connexion après le `Disconnected` qui suit.
+            WorldEvent::DisconnectedByAnotherUser => {
+                let text = portal_glue::ui_event_text(&self.assets, "LG_DUPLICATE_ACCOUNT");
+                self.ui.alert = Some(text).filter(|t| !t.is_empty());
+            }
             WorldEvent::Disconnected(why) => {
                 // Reconnexion échouée : boîte d'Archonia (`DisconnectedByServer`, `Action=4:0`), dessinée
                 // par l'écran de connexion ; sinon rien d'affiché (journal).
@@ -2263,11 +2328,8 @@ impl App {
         if let Some(p) = &mut self.player {
             let before = p.position;
             Self::step_entity(&self.terrain, &self.objects, &self.assets, p, dt, true);
-            if before != p.position {
-                self.camera.target = p.position + Vec3::new(0.0, 100.0, 0.0);
-            }
-            let terrain = &self.terrain;
-            self.camera.collide(dt, |x, z| terrain.height_at(x, z));
+            // Suivi, hauteur visée, touches et collision de la caméra : `camera_frame` (`app_camera.rs`).
+            self.cam.moved |= before != p.position;
             let arrived = (p.destination.x - p.position.x).abs() <= 1.0
                 && (p.destination.z - p.position.z).abs() <= 1.0;
             if self.walking && arrived {
@@ -2280,6 +2342,7 @@ impl App {
                 log::debug!("arrivé en {:?}", p.position);
             }
         }
+        self.camera_frame(dt);
         // `--exec` : plusieurs commandes possibles, séparées par `;` (ex. `/cam 300 90 10; /goto x y z`) ;
         // `/attendre 5` attend 5 s avant la suite, `/capture x.png` enregistre une capture et continue.
         if self.exec_at.is_some_and(|t| Instant::now() >= t) {
@@ -2656,8 +2719,16 @@ impl App {
         let object_distance = self.object_draw_distance();
         // Heure, ciel, brouillard, lumières et météo (`app_nature.rs`), après les CVars.
         self.update_nature(dt as f32);
-        // Effets d'Archonia : sons et triangles de l'image (voir `app_effects.rs`).
+        // Effets des armes serties (`app_stones.rs`), puis effets d'Archonia : sons et triangles de l'image
+        // (voir `app_effects.rs`).
+        self.stones_frame();
         self.effects_frame();
+        // Ombres rondes et repère de destination, ajoutés aux lots d'effets (voir `app_decals.rs`).
+        self.decals_frame();
+        // Ombres projetées des objets sur le sol (voir `app_shadow.rs`).
+        self.shadow_frame();
+        // Mode de fenêtre, résolution, V-Sync et gamma des options (voir `app_capture.rs`).
+        self.display_frame();
         self.update_audio(dt as f32);
         // Packs déposés dans assets/ ou patches/ en cours de jeu (`app_assets.rs`).
         self.watch_packs();
@@ -2668,6 +2739,10 @@ impl App {
         let combat_view = self.combat_view();
         // Noms, guildes, chiffres de dégâts et mentions au-dessus des personnages (`app_boards.rs`).
         let boards_view = self.boards_view();
+        // Bulles de discussion (`app_balloon.rs`).
+        let balloon_view = self.balloon_view();
+        // Repères des PNJ de la minicarte (`app_camera.rs`).
+        let minimap_icons = self.minimap_icons();
         let loot_items = self.combat_draw_items();
         // Objets portés (fenêtre du personnage, voir `app_items.rs`).
         let equipped = self.items_equipped();
@@ -2825,6 +2900,7 @@ impl App {
                         .map(|e| crate::hud::HudTarget { cid, name: e.name.clone(), hp: e.hp, is_player_character: e.is_player })
                 });
                 let hud_scene = crate::hud::HudScene {
+                    minimap_icons: minimap_icons.clone(),
                     target,
                     player: self.player.as_ref().map(|p| p.position),
                     camera_forward: {
@@ -2834,6 +2910,7 @@ impl App {
                 };
                 // Panneaux d'Archonia au-dessus des personnages, sous le HUD.
                 boards_glue::panel(ctx, &mut self.boards, &boards_view, &mut self.hud, &self.assets);
+                balloon_glue::panel(ctx, &balloon_view, &mut self.hud, &self.assets);
                 crate::hud::draw(ctx, &mut self.hud, &self.assets, &hud_scene);
                 // Les panneaux natifs sont des frames pilotables par les AddOns
                 // (`ChatFrame1:Hide()`, `ArchRustInfoFrame:Hide()`…).
@@ -3272,6 +3349,7 @@ impl ApplicationHandler for App {
                     if self.right_drag {
                         self.camera.rotate(dx, dy);
                     } else if self.middle_drag {
+                        self.cam.panned = true;
                         self.camera.pan(
                             dy * self.camera.distance * 0.002,
                             -dx * self.camera.distance * 0.002,
@@ -3304,9 +3382,16 @@ impl ApplicationHandler for App {
                     if self.hotkey_key(code, down, event.repeat) {
                         return;
                     }
+                    // Touches de caméra d'Archonia (flèches, pavé − / +, F10 / F11 / F12), voir `app_camera.rs`.
+                    if self.camera_key(code, down) {
+                        return;
+                    }
                 }
                 // Touches fixes (`HotkeyFlag=0`) et commandes propres à ArchRust, hors de la table.
                 match event.physical_key {
+                    // Impr. écran : capture `screen\SC%y%m%d-%H%M%S.bmp` (voir `app_capture.rs`) ; Windows
+                    // n'envoie que le relâchement de cette touche.
+                    PhysicalKey::Code(KeyCode::PrintScreen) if !down => self.capture_request(),
                     // Y : actions sociales (`Hotkey=0:21` « Emotes », `CBSocialActionToggleUI`, voir `app_social.rs`).
                     PhysicalKey::Code(KeyCode::KeyY) if down && !event.repeat && self.phase == Phase::InWorld => self.social.toggle(),
                     // Ctrl+M : `UI_SkillMacro` (`Hotkey=2:50`, ajout d'Archonia), ici le commutateur d'équipement (voir `app_itemset.rs`).

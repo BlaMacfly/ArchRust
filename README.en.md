@@ -103,6 +103,18 @@ folder; it sets the login screen's server. Without `realmlist.wtf`, ArchRust fal
 `ArchoniaTest.ini` (XML `IPInfo/ServerGroup/GroupName/IP`, first address). `--connect user:pass@/character`
 (no host) connects to that server; a host given to `--connect` still takes precedence.
 
+### Server data (`server-data/`)
+
+Displayed game values (tooltips, prices, requirements, masteries, titles, stats, auction categories…)
+must be the server's, not those of Archonia's tables. ArchCore writes them in the client's table
+format with `archcore export-client-tables <folder>` (server side, after each world import): `ini/`,
+one folder per language (`ini_fr/`, `ini_de/`…) and `tables.toml` (fingerprint). Put that folder as
+**`server-data/` next to `realmlist.wtf`** (executable folder, current folder or `Game`, in that
+order), or pass `--server-data <folder>` or `ARCHRUST_SERVER_DATA`. ArchRust reads tables there before
+resource packs and game data; no pack can disable it. Restart the client after a new export. If the
+server announces another fingerprint (or the folder is missing), a warning is written to the log.
+This folder is server-specific and never published (`.gitignore`). Details: `docs/FORMATS.md`.
+
 Login uses Archonia's windows: account entry (`UI_LG_IDPASSWORD`, "Confirm"), then world selection
 (`UI_SelectServer`: the login server's world list, "Connect" or a second click on a world), then character
 selection. The account is only sent on "Connect". `--connect` takes the first world. As in WoW, AddOn UI

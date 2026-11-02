@@ -17,6 +17,11 @@
 //!   (`UI_QueryPassword`) ; recherche d'un joueur (`UI_FindFriend`, « Whisper » met `/w nom ` dans la saisie,
 //!   `FUN_1406e6c00`) ; codes de résultat (`FUN_1406e6710`).
 //!
+//! Chuchotements (AGPMCHATTING ops 3 et 4, `0x140512bf0`, `0x140512d80`) : « `<nom> is blocking whispering.` »
+//! (`Chat_Block_Whisper_Msg`) et « `<nom> is not connected.` » (`Chat_Offline_Whisper_Target_Msg`) dans l'onglet
+//! système ; ops 1 / 2 : blocage de tous les chuchotements (attache+4, sans texte), demandé par
+//! `/chuchotementsoff` et `/chuchotementson` (aucune commande dans Archonia : envoyeurs sans appelant).
+//!
 //! Écarts : la liste des membres absente ne plante pas (liste vide) ; les raccourcis Z et X d'Archonia
 //! (`Hotkey=0:44`, `0:45`) restent le déplacement d'ArchRust ; `UI_FindFriend` s'ouvre par `/trouver [nom]`
 //! (l'appel d'Archonia à `FindUser_Open` n'est pas relevé).
@@ -68,6 +73,8 @@ struct CreateForm {
 
 #[derive(Default)]
 pub struct ChatGlue {
+    /// Tous les chuchotements reçus bloqués (AGPMCHATTING op 1 / 2 pour le joueur).
+    pub whispers_blocked: bool,
     rooms: [Option<Room>; channel::MAX_CHANNELS],
     create: Option<CreateForm>,
     /// `UI_EnterChatRoom` ouverte et son texte.
@@ -385,6 +392,28 @@ impl App {
     pub(super) fn on_channel_event(&mut self, ev: ChannelEvent) {
         let assets = self.assets.clone();
         let me = self.player.as_ref().map(|p| p.name.clone()).unwrap_or_default();
+        // Chuchotements : textes d'uimessage précédés du nom, onglet système.
+        let whisper = match &ev {
+            ChannelEvent::WhisperBlocked { name } => Some((name.clone(), "Chat_Block_Whisper_Msg")),
+            ChannelEvent::WhisperOffline { from, name } => {
+                let mine = self.player.as_ref().is_some_and(|p| p.cid == *from);
+                let known = mine || self.entities.iter().any(|e| e.cid == *from);
+                known.then(|| (name.clone(), "Chat_Offline_Whisper_Target_Msg"))
+            }
+            ChannelEvent::WhisperBlocking { cid, on } => {
+                log::info!("chuchotements du personnage {cid} : {}", if *on { "bloqués" } else { "permis" });
+                if self.player.as_ref().is_some_and(|p| p.cid == *cid) {
+                    self.chat.whispers_blocked = *on;
+                }
+                return;
+            }
+            _ => None,
+        };
+        if let Some((name, key)) = whisper {
+            let text = crate::hud::ui_message(&mut self.hud, &assets, key);
+            self.ui.push_chat_in(0x10, format!("{name}{text}"));
+            return;
+        }
         let glue = &mut self.chat;
         match ev {
             // FUN_1406e6240 : fenêtre libre, liste des membres.
@@ -453,6 +482,7 @@ impl App {
                     glue.info = Some(text);
                 }
             }
+            ChannelEvent::WhisperBlocking { .. } | ChannelEvent::WhisperBlocked { .. } | ChannelEvent::WhisperOffline { .. } => {}
         }
     }
 
@@ -479,6 +509,11 @@ impl App {
         if lower == "/trouver" {
             self.chat.find = Some(arg.to_string());
             self.chat.found = None;
+            return true;
+        }
+        // AGPMCHATTING op 1 / 2 : bloquer ou permettre tous les chuchotements reçus.
+        if lower == "/chuchotementsoff" || lower == "/chuchotementson" {
+            send(self.net.as_ref(), ChannelCommand::BlockWhisper(lower.ends_with("off")));
             return true;
         }
         false
