@@ -1236,8 +1236,9 @@ impl App {
         for e in events {
             match e {
                 NetEvent::Status(s) => {
+                    // État interne de la connexion : journal seulement (Archonia n'écrit rien).
+                    log::info!("connexion : {s}");
                     self.ui.status = s.clone();
-                    self.ui.push_chat(format!("[système] {s}"));
                 }
                 NetEvent::Error(e) => {
                     // Écrans de connexion : messages d'Archonia (`LG_CONNECT_FAILED_LOGIN_SERVER` avant la
@@ -1252,8 +1253,8 @@ impl App {
                         self.ui.alert = Some(text).filter(|t| !t.is_empty());
                     }
                     self.ui.worlds.clear();
+                    log::warn!("connexion : erreur : {e}");
                     self.ui.status = format!("erreur : {e}");
-                    self.ui.push_chat(format!("[erreur] {e}"));
                     self.ui.characters.clear();
                     self.ui.creation = None;
                     self.leave_login_scene();
@@ -1262,7 +1263,7 @@ impl App {
                     return;
                 }
                 NetEvent::Worlds(w) => {
-                    self.ui.push_chat(format!("[système] mondes : {}", w.iter().map(|w| w.name.as_str()).collect::<Vec<_>>().join(", ")));
+                    log::info!("mondes : {}", w.iter().map(|w| w.name.as_str()).collect::<Vec<_>>().join(", "));
                     // Monde présélectionné : le dernier choisi s'il est encore là, sinon le premier.
                     if !self.ui.selected_world.as_ref().is_some_and(|n| w.iter().any(|x| &x.name == n)) {
                         self.ui.selected_world = w.first().map(|x| x.name.clone());
@@ -1845,8 +1846,7 @@ impl App {
                 self.options_enter_world();
                 // Courrier non lu déjà reçu : `YouHaveMail` (voir `app_mail.rs`).
                 self.mail_enter_world();
-                self.ui
-                    .push_chat(format!("[système] {} entités en vue", self.entities.len()));
+                log::info!("{} entités en vue à l'entrée en jeu", self.entities.len());
                 if let Some(cmds) = &self.config.exec_on_enter {
                     self.exec_queue = cmds.split(';').map(str::trim).filter(|c| !c.is_empty()).map(String::from).collect();
                     self.exec_at = Some(Instant::now() + std::time::Duration::from_millis(1500));
@@ -1878,8 +1878,11 @@ impl App {
             // Retour à la sélection des personnages : refus ou départ du monde (voir `app_return_login.rs`).
             WorldEvent::ReturnToLogin(e) => self.return_login_event(e),
             WorldEvent::Disconnected(why) => {
-                // Reconnexion échouée : message d'Archonia (`DisconnectedByServer`).
-                let why = self.reconnect_failed().unwrap_or(why);
+                // Reconnexion échouée : boîte d'Archonia (`DisconnectedByServer`, `Action=4:0`), dessinée
+                // par l'écran de connexion ; sinon rien d'affiché (journal).
+                if let Some(text) = self.reconnect_failed() {
+                    self.ui.alert = Some(text);
+                }
                 self.party_reset();
                 self.guild_reset();
                 self.buddy_reset();
@@ -1887,7 +1890,7 @@ impl App {
                 self.trade_reset();
                 self.auction_reset();
                 self.itemset_reset();
-                self.ui.push_chat(format!("[système] déconnecté : {why}"));
+                log::info!("déconnecté : {why}");
                 self.ui.status = format!("déconnecté : {why}");
                 self.phase = Phase::Login;
                 self.net = None;
@@ -2142,8 +2145,9 @@ impl App {
             "/quit" => self.exit = true,
             // Combat : /attaquer, /ramasser, /ressusciter (voir `app_combat.rs`).
             _ if self.combat_slash(cmd, arg) => {}
-            // Oubli des compétences chez le maître : /oublier (voir `app_consumables.rs`).
-            _ if self.consumables_slash(cmd) => {}
+            // Oubli des compétences chez le maître : /oublier ; /go, /nick, /merchant, /safekeeper (objets d'usage 24 et 26)
+            // envoyés au serveur (voir `app_consumables.rs`).
+            _ if self.consumables_slash(cmd, text) => {}
             // Actions sociales : /greet, /clap… /sit down (titres de `SocialAction.txt`, voir `app_social.rs`).
             _ if self.social_slash(cmd, arg) => {}
             // Objets : /perso, /utiliser, /porter, /ranger, /detruire, /retour (voir `app_items.rs`).
@@ -2887,7 +2891,8 @@ impl App {
                 ride_glue::item_requests(&mut self.ride, &self.items, &mut item_requests, &mut self.hud, &self.assets, &mut self.ui);
                 // Passeports métamorphosé, objet d'oubli des compétences évolué (voir `app_morph.rs`).
                 // Orbe et Gem of origin (refus du mort d'abord, confirmation), voir `app_consumables.rs`.
-                consumables_glue::item_requests(&mut self.consumables, &self.items, &mut item_requests, &mut self.hud, &self.assets, &mut self.ui);
+                let convert_states = &self.convert.states;
+                consumables_glue::item_requests(&mut self.consumables, &self.items, &|iid| convert_states.get(&iid).map_or(0, |c| c.filled.len()), &mut item_requests, &mut self.hud, &self.assets, &mut self.ui);
                 morph_glue::item_requests(&mut self.morph, &self.items, &self.auction.item_flags, &mut item_requests, &mut self.hud, &self.assets, &mut self.ui);
                 // Fabrication, PNJ et compétences de production, barre de la récolte.
                 product_glue::panel(ctx, &mut self.product, &self.items, &mut self.hud, &self.assets, self.net.as_ref(), &mut self.ui);
@@ -2896,7 +2901,7 @@ impl App {
                 // Entrée « Trade » du menu et fenêtres de l'échange (voir `app_trade.rs`).
                 self.buddy.trade_menu = trade_frame.menu;
                 buddy_glue::panel(ctx, &mut self.buddy, player_target, &mut self.hud, &self.assets, self.net.as_ref(), &mut self.ui);
-                trade_glue::panel(ctx, &mut self.trade, &trade_frame, self.buddy.trade_chosen.take(), &self.items, &mut self.hud, &self.assets, self.net.as_ref(), &mut self.ui);
+                trade_glue::panel(ctx, &mut self.trade, &trade_frame, self.buddy.trade_chosen.take(), &self.items, (&self.auction.item_flags, &self.petbag.cash), &mut self.hud, &self.assets, self.net.as_ref(), &mut self.ui);
                 mail_glue::panel(ctx, &mut self.mail, &self.items, &player_name, &mut self.hud, &self.assets, self.net.as_ref(), &mut self.ui);
                 // Maison des ventes (« Sell » de l'inventaire compris) et commutateur d'équipement.
                 let player_pos = self.player.as_ref().map(|p| p.position);

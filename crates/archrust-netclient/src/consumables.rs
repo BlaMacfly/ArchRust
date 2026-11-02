@@ -13,13 +13,19 @@
 //! AGPMSKILL op 1 (1 identifiant)                compétence retirée (FUN_1402f8d20) ; voir `skills::SkillEvent::Removed`
 //! 0x3B op 8 (2 CID, sans événement)             client → serveur : oubli des compétences chez le maître (FUN_1402b88e0)
 //! 0x3B op 9 (5 résultat)                        réponse (rappel 0xd → FUN_1405dcc40) : 0 réussi, 1 échec, 2 pas de place
+//! AGPMSKILL op 13 (1 identifiant, 2 base)       client → serveur : Return Orb, remise à zéro d'une compétence (`Skill_Rollback`,
+//!                                               FUN_14069dd20 → FUN_14033dd30) ; l'IID de l'orbe n'est pas envoyé
+//! AGPMITEMCONVERT op 12 (1 CID, 2 IID, 3 IID)   client → serveur : Release of Agreement (usage 28) glissé sur un équipement
+//!                                               (FUN_1406d2300 → FUN_140318610) : champ 2 l'équipement, champ 3 l'objet
+//! AGPMCHARACTER op 0 / 1 champ 27 (CHAR[16])    signature (Signature of Glory, `/nick`) : `+0xf1` du personnage
+//!                                               (FUN_140175bb0), dessinée sur sa plaque de nom (FUN_140826450)
 //! ```
 //!
 //! L'op 1 d'AGPMCHARACTER ne touche pas au champ 19 (FUN_140176730 ne le reçoit pas) : seuls l'ajout (op 0) et
 //! l'op 23 le posent.
 
-use archrust_protocol::packet::{sparse, Value};
-use archrust_protocol::schema::{main, packet_type, Schema};
+use archrust_protocol::packet::{build_mini, sparse, Value};
+use archrust_protocol::schema::{main, mini, packet_type, Schema};
 
 /// Opérations d'AgpmItem propres à ce module.
 pub mod item_op {
@@ -30,6 +36,7 @@ pub mod item_op {
 /// Opérations d'AgpmCharacter propres à ce module.
 pub mod character_op {
     pub const ADD: i64 = 0;
+    pub const UPDATE: i64 = 1;
     pub const UPDATE_SKILLINIT_STRING: i64 = 23;
 }
 
@@ -49,6 +56,13 @@ pub mod init_result {
 
 /// Champ « skill init » d'AGPMCHARACTER.
 pub const SKILL_INIT_FIELD: usize = 19;
+/// Champ « signature » d'AGPMCHARACTER (CHAR[16]).
+pub const SIGNATURE_FIELD: usize = 27;
+
+/// Opération d'AgpmSkill de la Return Orb (`REQUEST_SKILL_ROLLBACK`).
+pub const SKILL_ROLLBACK: i8 = 13;
+/// Opération d'AgpmItemConvert du Release of Agreement (`SOCKET_INITIALIZE`).
+pub const SOCKET_INIT: i8 = 12;
 
 /// Recharge de l'orbe de résurrection, constante du client (op 18 : début = maintenant + restant − 900 000).
 pub const REVERSE_ORB_REUSE_MS: u64 = 900_000;
@@ -64,6 +78,8 @@ pub enum ConsumableEvent {
     SkillInit { cid: i32, value: String },
     /// Résultat de l'oubli des compétences chez le maître (0x3B op 9, champ 5).
     SkillInitResult { result: i32 },
+    /// Signature d'un personnage (AgpmCharacter op 0 ou 1, champ 27) ; vide : aucune.
+    Signature { cid: i32, text: String },
 }
 
 /// Demandes du client.
@@ -71,6 +87,10 @@ pub enum ConsumableEvent {
 pub enum ConsumableCommand {
     /// Oublier toutes les compétences chez le maître (0x3B op 8, champ 2 = CID, champ 1 nul).
     SkillInitialize,
+    /// Return Orb : remettre à zéro la compétence d'identifiant `id` (AGPMSKILL op 13).
+    SkillRollback { id: i32 },
+    /// Release of Agreement `item` glissé sur l'équipement `equip` (AGPMITEMCONVERT op 12).
+    SocketInit { equip: i32, item: i32 },
 }
 
 fn int(values: &[Option<Value>], i: usize) -> Option<i64> {
@@ -84,6 +104,16 @@ pub fn skill_init_of(ptype: u8, values: &[Option<Value>]) -> Option<ConsumableEv
     }
     let value = values.get(SKILL_INIT_FIELD).and_then(Option::as_ref).and_then(Value::as_text)?;
     Some(ConsumableEvent::SkillInit { cid: int(values, 1)? as i32, value })
+}
+
+/// Signature (champ 27) d'un paquet AgpmCharacter op 0 ou 1 qui la porte. Archonia ne recopie qu'une chaîne non
+/// vide (`strncpy` sous condition, FUN_140175bb0) : une chaîne vide est rendue telle quelle, au moteur d'en juger.
+pub fn signature_of(ptype: u8, values: &[Option<Value>]) -> Option<ConsumableEvent> {
+    if ptype != packet_type::CHARACTER || !matches!(int(values, 0)?, character_op::ADD | character_op::UPDATE) {
+        return None;
+    }
+    let text = values.get(SIGNATURE_FIELD).and_then(Option::as_ref).and_then(Value::as_text)?;
+    Some(ConsumableEvent::Signature { cid: int(values, 1)? as i32, text })
 }
 
 /// Paquet AgpmItem (ops 5, 18), AgpmCharacter (op 23) ou 0x3B (op 9) traduit, sinon `None`. L'op 0
@@ -119,6 +149,17 @@ pub fn command_packet(cmd: &ConsumableCommand, me: i32) -> (&'static Schema, Vec
         ConsumableCommand::SkillInitialize => {
             let s = main::EVENT_SKILL_MASTER;
             (s, sparse(s, &[(0, Value::I8(master_op::SKILL_INITIALIZE)), (2, Value::I32(me))]))
+        }
+        ConsumableCommand::SkillRollback { id } => {
+            // Mini « base » du propriétaire : type du personnage (`+0x8`, 3) et CID (FUN_14033dd30).
+            let b = mini::SKILL_BASE;
+            let base = Value::Packet(build_mini(b, &[Some(Value::I8(3)), Some(Value::I32(me))]).unwrap_or_default());
+            let s = main::SKILL;
+            (s, sparse(s, &[(0, Value::I8(SKILL_ROLLBACK)), (1, Value::I32(*id)), (2, base)]))
+        }
+        ConsumableCommand::SocketInit { equip, item } => {
+            let s = main::ITEM_CONVERT;
+            (s, sparse(s, &[(0, Value::I8(SOCKET_INIT)), (1, Value::I32(me)), (2, Value::I32(*equip)), (3, Value::I32(*item))]))
         }
     }
 }
@@ -159,6 +200,34 @@ mod tests {
         // Op 4 (objet utilisé) : laissée à `world`.
         let v = roundtrip(main::ITEM, &[(0, Value::U8(4)), (3, Value::I32(842)), (4, Value::I32(42))]);
         assert_eq!(translate(0x04, &v), None);
+    }
+
+    #[test]
+    fn return_orb_et_release_of_agreement() {
+        let (s, v) = command_packet(&ConsumableCommand::SkillRollback { id: 77 }, 42);
+        let back = decode_packet(s, &build_packet(s, &v).unwrap()).unwrap().values;
+        assert_eq!((s.id, int(&back, 0), int(&back, 1)), (0x05, Some(13), Some(77)));
+        let base = back[2].as_ref().and_then(Value::as_bytes).unwrap();
+        let (_, b) = archrust_protocol::packet::decode_mini(mini::SKILL_BASE, base).unwrap();
+        assert_eq!((int(&b, 0), int(&b, 1)), (Some(3), Some(42)));
+        assert!(back[4].is_none(), "ni TID ni IID de l'orbe");
+
+        let (s, v) = command_packet(&ConsumableCommand::SocketInit { equip: 900, item: 901 }, 42);
+        let back = decode_packet(s, &build_packet(s, &v).unwrap()).unwrap().values;
+        assert_eq!((s.id, int(&back, 0), int(&back, 1), int(&back, 2), int(&back, 3)), (0x16, Some(12), Some(42), Some(900), Some(901)));
+    }
+
+    #[test]
+    fn signature_du_personnage() {
+        let v = roundtrip(main::CHARACTER, &[(0, Value::I8(1)), (1, Value::I32(42)), (27, Value::Str(b"Gloire".to_vec()))]);
+        assert_eq!(signature_of(0x02, &v), Some(ConsumableEvent::Signature { cid: 42, text: "Gloire".into() }));
+        let v = roundtrip(main::CHARACTER, &[(0, Value::I8(0)), (1, Value::I32(42)), (27, Value::Str(b"0123456789abcdef".to_vec()))]);
+        assert_eq!(signature_of(0x02, &v), Some(ConsumableEvent::Signature { cid: 42, text: "0123456789abcdef".into() }));
+        // Sans champ 27, ou autre opération : rien.
+        let v = roundtrip(main::CHARACTER, &[(0, Value::I8(1)), (1, Value::I32(42))]);
+        assert_eq!(signature_of(0x02, &v), None);
+        let v = roundtrip(main::CHARACTER, &[(0, Value::I8(23)), (1, Value::I32(42)), (27, Value::Str(b"x".to_vec()))]);
+        assert_eq!(signature_of(0x02, &v), None);
     }
 
     #[test]

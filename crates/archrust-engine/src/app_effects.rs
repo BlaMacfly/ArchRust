@@ -18,11 +18,16 @@
 //! sol, objets (`effect/clump/K*.ECL`), sons ; animations couleur, échelle, rotation (vitesse en
 //! degrés par seconde, cumulée comme FUN_1408f4020), déplacement linéaire, coordonnées de texture
 //! (image par paliers, FUN_1408f45b0), spline (`effect/animation/*.ESP`, position seulement).
+//! Animation RtAnim des objets (animation 7, `AgcdEffCtrl_Obj` FUN_140834f50, FUN_1408f43e0) : la
+//! première animation 7 de la base nomme un clip `effect/animation/*.EAN` (clés HAnim), posé sur la
+//! hiérarchie du modèle (peau comprise) et joué au temps de la base, bouclé sur la durée du clip ;
+//! fichier ou hiérarchie absents : base arrêtée. Les bases rattachées à un nœud HAnim de l'objet
+//! suivent ce nœud animé.
 //! Mélanges : `sky_render::EffectBlend`. Systèmes de particules (types 1 et 2) : `effect_particles.rs`.
 //! Traînées (type 3) : `effect_particles.rs`.
 //!
 //! Dépendances (FUN_1408386d0) : une base enfant est posée sur le repère animé de sa base parente
-//! (`RwFrameAddChild`), ou sur un nœud HAnim du modèle de l'objet parent ; l'échelle animée du parent
+//! (`RwFrameAddChild`), ou sur un nœud HAnim du modèle de l'objet parent (dans sa pose RtAnim) ; l'échelle animée du parent
 //! passe aux enfants. Une traînée enfant (710 des 713) prend le repère du contrôleur parent avec ses
 //! hauteurs h1/h2 ; une traînée indépendante d'un jeu sans drapeau 0x400 prend le repère du jeu avec
 //! 70 / −20 codés en dur (aucun cas) ; avec 0x400, bords sur les nœuds HAnim 702 (haut) et 701 (bas)
@@ -56,6 +61,7 @@ use crate::assets::Assets;
 use crate::render::{EffectDraw, Vertex};
 use crate::sky_render::EffectBlend;
 use archrust_data::effset::{anim_kind, base_kind, set_flag, AnimKeys, Attach, EffAnim, EffBase, EffectSetData, Spline, TailParams, LIGHT_RADIUS, TAIL_DEFAULT_BOTTOM, TAIL_DEFAULT_TOP, TAIL_NODE_BOTTOM, TAIL_NODE_TOP};
+use archrust_data::ean::HAnimSample;
 use archrust_data::rw::Clump;
 use archrust_netclient::skills::{learn_result, SkillEvent};
 use archrust_netclient::WorldEvent;
@@ -169,6 +175,14 @@ fn base_light(base: &EffBase, tb: u32, frame: Mat4) -> Option<EffectLight> {
     let has_scale = base.anims.iter().any(|a| a.kind == anim_kind::SCALE);
     let radius = if has_scale { st.scale.x * LIGHT_RADIUS } else { LIGHT_RADIUS };
     (radius > 0.0).then(|| EffectLight { position: frame.w_axis.truncate(), radius, color: [st.color[0], st.color[1], st.color[2]] })
+}
+
+/// Pose du modèle d'un objet d'effet (type 4) : celle du fichier (sans animation RtAnim), celle de
+/// son animation RtAnim, ou base arrêtée (animation ou hiérarchie introuvable, FUN_140834f50).
+enum ObjectPose {
+    Static,
+    Posed(Vec<HAnimSample>),
+    Stopped,
 }
 
 #[derive(Default)]
@@ -447,12 +461,56 @@ impl EffectsGlue {
         out
     }
 
-    /// Matrice (espace du modèle) du nœud HAnim `node` du modèle d'un objet d'effet, dans la pose
-    /// du fichier (les animations RtAnim des objets ne sont pas jouées).
-    fn clump_node(&mut self, assets: &Assets, base: &EffBase, node: u32) -> Option<Mat4> {
+    /// Animation RtAnim d'un objet d'effet à l'instant `tb` de sa base, comme `AgcdEffCtrl_Obj`
+    /// (FUN_140834f50) : la **première** animation de type 7 de la base donne le fichier
+    /// `effect\animation\<fichier>` (`.EAN`, clés HAnim comme ceux des personnages), lu par
+    /// RtAnimAnimationRead, posé sur la hiérarchie HAnim du clone du modèle (drapeaux 0x3000 : les
+    /// repères des nœuds suivent, donc les bases rattachées à un nœud aussi) ; fichier absent ou
+    /// modèle sans hiérarchie : le contrôle passe à l'état 3 (base arrêtée). Chaque image
+    /// (FUN_1408f43e0) : temps courant de l'interpolateur = `tb × 0,001` s (FUN_14037a9b0), le
+    /// clip bouclant sur sa propre durée (FUN_14037a7d0) ; la durée et le mode de boucle de
+    /// l'animation ne servent qu'au test de fin de FUN_1408ec780 (mode 0 seul, absent des données).
+    fn object_pose(&mut self, assets: &Assets, base: &EffBase, tb: u32) -> ObjectPose {
+        let Some(file) = base.anims.iter().find(|a| a.kind == anim_kind::RT_ANIM).and_then(|a| match &a.keys {
+            AnimKeys::File(f) => Some(f.clone()),
+            _ => None,
+        }) else {
+            return ObjectPose::Static;
+        };
+        let Some(clump) = base.clump.as_ref().and_then(|(f, _)| self.clump(assets, f)) else { return ObjectPose::Stopped };
+        if !clump.frames.iter().any(|f| f.hanim.as_ref().is_some_and(|h| !h.nodes.is_empty())) {
+            return ObjectPose::Stopped;
+        }
+        match crate::animation::load_clip_in(assets, "effect/animation", &file) {
+            Some(clip) => ObjectPose::Posed(clip.sample(tb as f32 * 0.001)),
+            None => ObjectPose::Stopped,
+        }
+    }
+
+    /// Repères (espace du modèle) des cadres du modèle d'un objet d'effet à l'instant `tb` de sa
+    /// base : pose RtAnim (voir [`EffectsGlue::object_pose`]) ou pose du fichier ; `None` si la base
+    /// est arrêtée.
+    fn object_frames(&mut self, assets: &Assets, base: &EffBase, tb: u32) -> Option<(Arc<Clump>, Vec<Mat4>, Option<Vec<HAnimSample>>)> {
         let clump = self.clump(assets, &base.clump.as_ref()?.0)?;
+        match self.object_pose(assets, base, tb) {
+            ObjectPose::Static => {
+                let world = clump.world_matrices();
+                Some((clump, world, None))
+            }
+            ObjectPose::Posed(pose) => {
+                let world = clump.world_matrices_with_pose(&pose);
+                Some((clump, world, Some(pose)))
+            }
+            ObjectPose::Stopped => None,
+        }
+    }
+
+    /// Matrice (espace du modèle) du nœud HAnim `node` du modèle d'un objet d'effet, dans sa pose
+    /// animée à l'instant `tb` de sa base (pose du fichier sans animation RtAnim).
+    fn clump_node(&mut self, assets: &Assets, base: &EffBase, node: u32, tb: u32) -> Option<Mat4> {
+        let (clump, world, _) = self.object_frames(assets, base, tb)?;
         let i = clump.frames.iter().position(|f| f.hanim.as_ref().is_some_and(|h| h.node_id == node))?;
-        clump.world_matrices().get(i).copied()
+        world.get(i).copied()
     }
 
     /// Repère (monde) sur lequel la base `i` est posée : celui de sa base parente (et du nœud HAnim
@@ -462,7 +520,10 @@ impl EffectsGlue {
         let parent = self.base_frame(assets, inst, root, t, a.parent, frames);
         match a.node {
             // Nœud absent du modèle : Archonia arrête le jeu ; ici repère de l'objet (repli).
-            Some(node) => parent * self.clump_node(assets, &inst.set.bases[a.parent], node).unwrap_or(Mat4::IDENTITY),
+            Some(node) => {
+                let pb = &inst.set.bases[a.parent];
+                parent * self.clump_node(assets, pb, node, t.saturating_sub(pb.delay)).unwrap_or(Mat4::IDENTITY)
+            }
             None => parent,
         }
     }
@@ -525,6 +586,12 @@ impl App {
 
     fn effects_tid_of(&self, cid: i32) -> Option<i32> {
         self.player.as_ref().filter(|p| p.cid == cid).or_else(|| self.entities.iter().find(|e| e.cid == cid)).map(|e| e.tid)
+    }
+
+    /// Effets d'un objet utilisé (données `AgcmEventEffect` de son modèle, feux d'artifice de l'usage 22 : voir
+    /// `app_consumables.rs`) sur le personnage `cid`, au niveau « interface » d'`OP_Effect`.
+    pub(super) fn effects_play_item(&mut self, cid: i32, placed: &[Placed]) {
+        self.effects_play_on(cid, placed, Class::Ui);
     }
 
     /// Joue les effets `placed` sur le personnage `cid`.
@@ -823,12 +890,15 @@ impl App {
                         }
                     }
                     base_kind::OBJECT => {
-                        let Some((file, _)) = &base.clump else { continue };
-                        let Some(clump) = self.effects.clump(&assets, file) else { continue };
-                        let world = clump.world_matrices();
+                        // Pose RtAnim de l'objet (ou du fichier) ; base arrêtée si l'animation manque.
+                        let Some((clump, world, pose)) = self.effects.object_frames(&assets, base, tb) else { continue };
                         for atomic in &clump.atomics {
                             let Some(g) = clump.geometries.get(atomic.geometry as usize) else { continue };
                             let mm = m * world.get(atomic.frame as usize).copied().unwrap_or(Mat4::IDENTITY);
+                            // Géométrie skinnée sur la hiérarchie animée (RpSkinAtomicSetHAnimHierarchy de
+                            // FUN_140834f50) : sommets déformés dans l'espace de son cadre.
+                            let skinned = pose.as_ref().filter(|_| g.skin.is_some()).and_then(|p| clump.deform_geometry_positions(atomic.geometry as usize, p).ok());
+                            let positions = skinned.as_deref().unwrap_or(&g.vertices);
                             let uv0 = g.uv_sets.first();
                             // Triangles (matériau, sommets) : liste du modèle, sinon ses maillages binaires
                             // (bandes déroulées comme `scene.rs`).
@@ -851,7 +921,7 @@ impl App {
                                 let tex = g.materials.get(material).and_then(|mat| mat.texture.as_ref()).map(|t| t.name.clone()).filter(|n| !n.is_empty()).or_else(|| texture.clone());
                                 let out = batches.entry((tex, blend)).or_default();
                                 for vi in verts {
-                                    let Some(p) = g.vertices.get(vi) else { continue };
+                                    let Some(p) = positions.get(vi) else { continue };
                                     out.push(Vertex {
                                         position: mm.transform_point3(*p).to_array(),
                                         normal: [0.0, 1.0, 0.0],
@@ -1046,6 +1116,67 @@ mod tests {
             s.bases.iter().enumerate().filter(|(i, b)| b.kind == base_kind::TAIL && at[*i].is_some()).count()
         });
         assert_eq!(dependent.sum::<usize>(), 710);
+    }
+
+    /// Avec les données du client : animations RtAnim des objets d'effet (`effect/animation/*.EAN`).
+    /// Relevé : 436 animations de type 7, toutes sur des objets ; chacune se lit, son modèle a une
+    /// hiérarchie HAnim d'autant de nœuds que le clip a de pistes, et la pose change avec le temps.
+    /// Jeu 14 (`K0000e00.ECL` + `F0000e00.EAN`) : les bases rattachées aux nœuds 990 à 993 suivent
+    /// l'animation.
+    #[test]
+    fn effect_objects_play_their_rtanim() {
+        let Some(dir) = std::env::var_os("ARCHRUST_GAME_DIR") else { return };
+        let assets = Assets::new(Some(std::path::PathBuf::from(dir)), &[]);
+        let mut glue = EffectsGlue::default();
+        let sets = assets.effect_sets();
+        let (mut total, mut posed, mut stopped) = (0, 0, Vec::new());
+        for s in sets.iter() {
+            let Some(d) = sets.decode(s.id) else { continue };
+            for b in &d.bases {
+                let n = b.anims.iter().filter(|a| a.kind == anim_kind::RT_ANIM).count();
+                if n == 0 {
+                    continue;
+                }
+                assert_eq!(b.kind, base_kind::OBJECT, "jeu {}", s.id);
+                total += n;
+                match glue.object_pose(&assets, b, 0) {
+                    ObjectPose::Posed(pose) => {
+                        let clump = glue.clump(&assets, &b.clump.as_ref().unwrap().0).unwrap();
+                        let nodes = clump.frames.iter().filter_map(|f| f.hanim.as_ref()).map(|h| h.nodes.len()).max().unwrap_or(0);
+                        assert_eq!(pose.len(), nodes, "jeu {} : pistes / nœuds", s.id);
+                        posed += 1;
+                    }
+                    ObjectPose::Stopped => stopped.push(s.id),
+                    ObjectPose::Static => unreachable!(),
+                }
+            }
+        }
+        assert_eq!(total, 436);
+        assert!(stopped.is_empty(), "objets sans animation ou hiérarchie : {stopped:?}");
+        assert_eq!(posed, 436);
+        // Jeu 14 (`K0000e00.ECL`, peau sur 14 nœuds) : les nœuds 990, 991 et 993 des dépendances sont
+        // fixes dans `F0000e00.EAN` (deux clés), les nœuds 995 à 1003 bougent à partir de 4 s ; la
+        // peau suit la pose, et une base enfant suit le repère animé de son nœud.
+        let set = glue.set(&assets, 14).expect("jeu 14");
+        let attach = set.attachments().unwrap();
+        let (child, a) = attach.iter().enumerate().find_map(|(i, a)| a.filter(|a| a.node.is_some()).map(|a| (i, a))).expect("dépendance sur nœud");
+        let parent = &set.bases[a.parent];
+        let n0 = glue.clump_node(&assets, parent, 996, 0).expect("nœud 996");
+        let n1 = glue.clump_node(&assets, parent, 996, 5000).expect("nœud 996");
+        assert!(!n0.abs_diff_eq(n1, 1e-2), "nœud 996 immobile");
+        let (clump, _, pose) = glue.object_frames(&assets, parent, 5000).expect("objet");
+        let gi = clump.atomics[0].geometry as usize;
+        let moved = clump.deform_geometry_positions(gi, pose.as_ref().expect("pose")).unwrap();
+        assert!(moved.iter().zip(&clump.geometries[gi].vertices).any(|(a, b)| (*a - *b).length() > 0.5), "peau immobile");
+        let node = a.node.unwrap();
+        let n = set.bases.len();
+        let inst = Instance { set: set.clone(), born: Instant::now(), anchor: Anchor::Character(0), last: (Vec3::ZERO, 0.0), offset: Vec3::ZERO, scale: 1.0, sounded: vec![false; n], life: 1000, node: 0, delay: 0, permanent: false, emitters: vec![None; n], trails: vec![None; n], attach };
+        let t = parent.delay + 5000;
+        let mut frames = vec![None; n];
+        let pm = glue.base_frame(&assets, &inst, Mat4::IDENTITY, t, a.parent, &mut frames);
+        let at = glue.attach_frame(&assets, &inst, Mat4::IDENTITY, t, child, &mut frames);
+        let nm = glue.clump_node(&assets, parent, node, 5000).expect("nœud de la dépendance");
+        assert!(at.abs_diff_eq(pm * nm, 1e-3));
     }
 
     /// Avec les données du client (`ARCHRUST_GAME_DIR`) : les modèles qui jouent les traînées à deux

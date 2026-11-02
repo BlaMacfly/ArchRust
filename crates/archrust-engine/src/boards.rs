@@ -443,6 +443,11 @@ pub const ID_FONT: &str = "Georgia";
 pub const ID_FONT_SIZE: f32 = 11.0;
 /// Écart vertical entre le nom et la ligne de guilde (`0x140e4a060`).
 pub const LINE_GAP: f32 = 6.0;
+/// Hauts des lignes 1, 2 et 3 au-dessus du haut du nom, moins la hauteur de police (`FUN_1408270a0` : `+0xF4`,
+/// `+0xF8`, `+0xFC`) : la signature (`FUN_140826450`) prend la ligne qui suit le titre et la guilde dessinés.
+pub const SIGNATURE_GAPS: [f32; 3] = [6.0, 20.0, 34.0];
+/// Couleur de la signature : `board+0x1fc` = −1 (blanc) sans couleur choisie (`+0x104` du personnage).
+pub const SIGNATURE_COLOR: u32 = 0xFFFF_FFFF;
 /// Ombre du texte : décalage d'un pixel, alpha au plus 0xB8 (`FUN_1404f0f80`).
 pub const SHADOW_ALPHA: u8 = 0xB8;
 

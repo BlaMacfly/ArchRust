@@ -27,8 +27,10 @@
 //! l'échelle `s` de la selle sort de [0,5 ; 2] (voir [`rider_on_saddle`]). La monture rejoue chaque
 //! type d'animation lancé sur le cavalier (`FUN_1404be4f0`, `Animator::follow`). `RIDER_HEIGHT` (270
 //! pour 567) ne sert qu'à hausser le panneau du nom (voir `app_boards.rs`).
-//! Montures glTF (patchs `[[models]]`, `.glb` du client comme 5808) : affichées sans squelette, le
-//! cavalier posé à 60 % de `HEIGHT` (le nœud `RideNode` d'Archonia n'est pas relevé).
+//! Montures glTF (patchs `[[models]]`, `.glb` du client comme 5748 à 5777) : peau et animations du glTF
+//! jouées comme celles des montures d'origine (voir [`GltfMount`]) ; noms des nœuds lus comme Archonia
+//! (FUN_140769280, table DAT_140d70270 : `RideNode`, `rideNode`, `Mount` → ID HAnim 20, `Bone_<n>` → n),
+//! le cavalier posé sur le nœud 20 comme sur une selle d'origine ; sans ce nœud, à 60 % de `HEIGHT`.
 
 use super::App;
 use crate::animation::{AnimType, Animator};
@@ -171,6 +173,132 @@ struct MountModel {
     saddle_bind: Option<Mat4>,
     /// `HEIGHT` : repli du cavalier sans squelette.
     height: f32,
+    /// Monture glTF (`.glb` du client ou patch `[[models]]`) : squelette, clips et nœud de selle.
+    gltf: Option<GltfMount>,
+}
+
+/// Monture glTF animée. Les variantes de `charactertemplateanimation.ini` nomment ses animations
+/// (`[5748]` : `0:0:0:IDLE`, `0:0:1:ROAR`, `2:0:0:RUN`…, comme les `.glb` du client) ; une variante
+/// `fichier.ean` (patch remplaçant un `.ecl` d'origine) cherche l'animation nommée `fichier` (convention
+/// d'ArchRust). Même suivi que les montures d'origine ([`Animator::follow`]) ; peau déformée sur le
+/// CPU, au plus 30 fois par seconde. Nœud de selle : ID HAnim 20 d'après son nom
+/// ([`crate::gltf_model::hanim_id`] : `RideNode`, `Saddle_20`…).
+struct GltfMount {
+    model: Arc<crate::assets::PatchedModel>,
+    /// (instance, maillage GPU propre, matrice de repos `S(échelle) × nœud`).
+    parts: Vec<(usize, Arc<Mesh>, Mat4)>,
+    set: crate::animation::AnimationSet,
+    anim: Option<usize>,
+    kind: u32,
+    followed: u32,
+    time: f32,
+    since_update: f32,
+    seed: u32,
+    /// Pose courante (repère du glTF, sans l'échelle du manifeste).
+    globals: Vec<Mat4>,
+    ride_node: Option<usize>,
+    /// Repère du squelette ([`crate::gltf_model::GltfModel::skeleton_space`]) : celui de la monture.
+    space: Mat4,
+}
+
+impl GltfMount {
+    fn new(renderer: &mut crate::render::Renderer, assets: &Assets, tid: i32, model: Arc<crate::assets::PatchedModel>, seed: u32) -> GltfMount {
+        let parts = crate::gltf_model::upload_instances(renderer, &model.model, &model.texture_prefix(), model.scale);
+        let globals = model.model.node_matrices(None, 0.0);
+        let ride_node = model.model.hanim_node(NODE_SADDLE);
+        let space = model.model.skeleton_space();
+        let g = GltfMount { set: crate::animation::AnimationSet::for_tid(assets, tid, 0, false), parts, anim: None, kind: u32::MAX, followed: u32::MAX, time: 0.0, since_update: f32::MAX, seed: seed.max(1), globals, ride_node, space, model };
+        // Peau au repos dans le repère de la scène (règle glTF), même sans animation jouée.
+        g.write_skins(renderer);
+        g
+    }
+
+    fn write_skins(&self, renderer: &crate::render::Renderer) {
+        for (index, mesh, _) in &self.parts {
+            let Some(inst) = self.model.model.instances.get(*index) else { continue };
+            if let Some(v) = inst.skin.and_then(|skin| self.model.model.skinned_vertices(inst.mesh, skin, &self.globals)) {
+                renderer.write_vertices(mesh, &v);
+            }
+        }
+    }
+
+    /// Repère de la monture → repère glTF : échelle du manifeste × repère du squelette.
+    fn root(&self) -> Mat4 {
+        Mat4::from_scale(Vec3::splat(if self.model.scale > 0.0 { self.model.scale } else { 1.0 })) * self.space
+    }
+
+    fn roll(&mut self) -> f32 {
+        let mut x = self.seed;
+        x ^= x << 13;
+        x ^= x >> 17;
+        x ^= x << 5;
+        self.seed = x;
+        (x >> 8) as f32 / (1u32 << 24) as f32
+    }
+
+    /// Animation glTF de la variante tirée pour le type `kind`.
+    fn pick(&mut self, kind: u32) -> Option<usize> {
+        let roll = self.roll();
+        let file = self.set.pick(kind, roll)?.file.clone();
+        self.model.model.animation(&file)
+    }
+
+    /// Comme [`Animator::follow`] : le type lancé sur le cavalier l'est sur la monture, sauf si elle joue
+    /// déjà ce type d'attente, de marche ou de course ; sans animation pour lui, elle garde la sienne. Les
+    /// types ponctuels (attaque, coup, mort) se figent sur leur dernière pose.
+    fn follow(&mut self, renderer: &crate::render::Renderer, dt: f32, kind: u32, max_hz: f32) {
+        let looping = |k: u32| k <= AnimType::Run as u32;
+        if kind != self.followed {
+            self.followed = kind;
+            if !(looping(kind) && self.kind == kind) {
+                if let Some(i) = self.pick(kind) {
+                    (self.anim, self.kind, self.time, self.since_update) = (Some(i), kind, 0.0, f32::MAX);
+                }
+            }
+        }
+        let Some(duration) = self.anim.and_then(|i| self.model.model.animations.get(i)).map(|a| a.duration) else { return };
+        self.time += dt;
+        if !looping(self.kind) {
+            self.time = self.time.min((duration - 1e-3).max(0.0));
+        } else if self.time >= duration && duration > 0.0 {
+            self.time -= duration;
+            // Fin d'un cycle d'attente : nouveau tirage parmi les variantes (IDLE / ROAR).
+            if self.kind == AnimType::Wait as u32 {
+                if let Some(i) = self.pick(self.kind) {
+                    self.anim = Some(i);
+                }
+            }
+        }
+        self.since_update += dt;
+        if self.since_update < 1.0 / max_hz {
+            return;
+        }
+        self.since_update = 0.0;
+        self.globals = self.model.model.node_matrices(self.anim, self.time);
+        self.write_skins(renderer);
+    }
+
+    /// Maillages et matrices (repère de la monture) : peau déjà dans le repère de la scène glTF, autres
+    /// nœuds suivant leur matrice animée.
+    fn meshes(&self) -> Vec<(Arc<Mesh>, Mat4)> {
+        let root = self.root();
+        self.parts
+            .iter()
+            .map(|(index, mesh, rest)| {
+                let m = match self.model.model.instances.get(*index) {
+                    Some(i) if i.skin.is_some() => root,
+                    Some(i) => self.globals.get(i.node_index).map_or(*rest, |g| root * *g),
+                    None => *rest,
+                };
+                (mesh.clone(), m)
+            })
+            .collect()
+    }
+
+    /// Nœud de selle (repère de la monture), dans la pose courante.
+    fn saddle(&self) -> Option<Mat4> {
+        Some(self.root() * *self.globals.get(self.ride_node?)?)
+    }
 }
 
 /// Monture d'un personnage.
@@ -211,7 +339,8 @@ impl RideGlue {
     pub fn rider_matrix(&self, cid: i32, base: Mat4) -> Mat4 {
         let Some(m) = self.mounts.get(&cid).and_then(|m| m.model.as_ref()) else { return base };
         let world = mount_world(base, m.scale);
-        match m.animator.as_ref().and_then(|a| a.node_matrix(NODE_SADDLE)).or(m.saddle_bind) {
+        let saddle = m.animator.as_ref().and_then(|a| a.node_matrix(NODE_SADDLE)).or(m.saddle_bind).or_else(|| m.gltf.as_ref().and_then(|g| g.saddle()));
+        match saddle {
             Some(saddle) => rider_on_saddle(world * saddle),
             None => base * Mat4::from_translation(Vec3::new(0.0, m.height * 0.6, 0.0)),
         }
@@ -406,20 +535,33 @@ impl App {
                     continue;
                 }
                 let fallback = gpu.marker.clone();
-                let meshes = entity_meshes(&mut gpu.renderer, &assets, m.tid, Head::default(), &fallback).unwrap_or_default();
                 let seed = ((LOCAL_CID_BASE + cid.rem_euclid(1_000_000)) as u32).wrapping_mul(0x9e37_79b9) | 1;
+                // Monture glTF (un seul modèle, glTF) : maillages propres, animations et selle du glTF.
+                let gltf_model = match files.as_slice() {
+                    [f] => assets.patched_model(&format!("character/{f}")).and_then(|r| r.ok()),
+                    _ => None,
+                };
+                let gltf = gltf_model.map(|pm| GltfMount::new(&mut gpu.renderer, &assets, m.tid, pm, seed));
+                let meshes = match &gltf {
+                    Some(g) => g.meshes(),
+                    None => entity_meshes(&mut gpu.renderer, &assets, m.tid, Head::default(), &fallback).unwrap_or_default(),
+                };
                 // La monture n'est pas un joueur : ensemble 0.
                 let animator = Animator::new(&assets, m.tid, &meshes, seed, 0, false);
                 let height = column(&assets, "charactertemplateclient.ini", m.tid, "HEIGHT").unwrap_or(200.0);
                 let scale = column(&assets, "charactertemplateclient.ini", m.tid, "SCALE").filter(|s| *s > 0.0).unwrap_or(1.0);
                 let saddle_bind = animator.as_ref().and_then(|a| a.node_matrix(NODE_SADDLE));
-                log::info!("monture TID {} : {} maillage(s), animée : {}, selle : {}", m.tid, meshes.len(), animator.is_some(), saddle_bind.is_some());
-                m.model = Some(MountModel { meshes, animator, scale, saddle_bind, height });
+                log::info!("monture TID {} : {} maillage(s), animée : {}, selle : {}, glTF : {}", m.tid, meshes.len(), animator.is_some(), saddle_bind.is_some(), gltf.as_ref().map(|g| format!("{} animation(s), selle {}", g.model.model.animations.len(), g.ride_node.is_some())).unwrap_or_else(|| "non".into()));
+                m.model = Some(MountModel { meshes, animator, scale, saddle_bind, height, gltf });
             }
             let Some(model) = m.model.as_mut() else { continue };
+            let kind = kinds.get(cid).copied().unwrap_or(AnimType::Wait as u32);
             if let Some(a) = model.animator.as_mut() {
-                let kind = kinds.get(cid).copied().unwrap_or(AnimType::Wait as u32);
                 a.follow(&assets, &gpu.renderer, dt, kind, 30.0);
+            }
+            if let Some(g) = model.gltf.as_mut() {
+                g.follow(&gpu.renderer, dt, kind, 30.0);
+                model.meshes = g.meshes();
             }
         }
     }
@@ -534,5 +676,27 @@ mod tests {
         let set = crate::animation::AnimationSet::for_tid(&assets, 1, 4, true);
         assert!(set.by_type.get(&0).is_some_and(|v| v.iter().any(|x| x.file == "a0001040.ean")));
         assert!(d.skills.values().any(|(auto, _)| *auto), "Normal Attack : auto_attack");
+    }
+
+    /// Avec les données du client : monture glTF 5748 (`a0001674.glb`) — les variantes de
+    /// `charactertemplateanimation.ini` nomment ses animations (attente IDLE ou ROAR, course RUN),
+    /// le nœud `Saddle_20` porte le cavalier : selle à ≈ 281 unités, cavalier droit.
+    #[test]
+    fn monture_gltf_du_client() {
+        let Some(dir) = std::env::var_os("ARCHRUST_GAME_DIR") else { return };
+        let assets = Assets::new(Some(dir.into()), &[]);
+        assert_eq!(models_for_tid(&assets, 5748), vec!["a0001674.ecl".to_string()]);
+        let pm = assets.patched_model("character/a0001674.ecl").unwrap().unwrap();
+        let set = crate::animation::AnimationSet::for_tid(&assets, 5748, 0, false);
+        let name = |kind: u32, roll: f32| set.pick(kind, roll).and_then(|v| pm.model.animation(&v.file)).map(|i| pm.model.animations[i].name.clone());
+        assert_eq!(name(AnimType::Wait as u32, 0.0).as_deref(), Some("IDLE"));
+        assert_eq!(name(AnimType::Wait as u32, 0.99).as_deref(), Some("ROAR"));
+        assert_eq!(name(AnimType::Run as u32, 0.0).as_deref(), Some("RUN"));
+        let ride = pm.model.hanim_node(NODE_SADDLE).unwrap();
+        let rest = pm.model.node_matrices(None, 0.0);
+        let rider = rider_on_saddle(mount_world(Mat4::IDENTITY, 1.0) * pm.model.skeleton_space() * rest[ride]);
+        let seat = rider.w_axis.truncate();
+        assert!((seat.y - 281.0).abs() < 1.0, "selle : {seat:?}");
+        assert!(rider.y_axis.truncate().normalize().y > 0.9, "cavalier droit : {:?}", rider.y_axis);
     }
 }

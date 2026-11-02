@@ -131,7 +131,8 @@ pub enum NpcCommand {
     QuestWindow(i32),
     /// Prendre une quête (auprès d'un PNJ, ou depuis le journal).
     QuestAccept { npc: Option<i32>, tid: i32 },
-    /// Terminer une quête, avec la récompense choisie.
+    /// Terminer une quête : `reward` (champ 7) = rang de la récompense au choix parmi les `SelectItemN`
+    /// renseignés, à partir de 0, -1 sans choix (Archonia FUN_140655330 → FUN_1404f5540 → FUN_14033e790).
     QuestComplete { npc: Option<i32>, tid: i32, reward: i32 },
     /// Abandonner une quête.
     QuestAbandon(i32),

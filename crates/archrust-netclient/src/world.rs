@@ -767,6 +767,8 @@ pub fn extra_events(p: &Incoming) -> Vec<WorldEvent> {
     if p.op() == Some(crate::consumables::character_op::ADD) {
         out.extend(p.packet.as_ref().and_then(|packet| crate::consumables::skill_init_of(p.packet_type, &packet.values)).map(WorldEvent::Consumable));
     }
+    // Signature (AGPMCHARACTER op 0 ou 1, champ 27), voir `consumables`.
+    out.extend(p.packet.as_ref().and_then(|packet| crate::consumables::signature_of(p.packet_type, &packet.values)).map(WorldEvent::Consumable));
     // Options d'un objet (AGPMITEM op 0, champ 20), à part de l'objet lui-même.
     if p.packet_type == packet_type::ITEM {
         out.extend(p.packet.as_ref().and_then(|packet| crate::convert::options_of(&packet.values)).map(WorldEvent::Convert));

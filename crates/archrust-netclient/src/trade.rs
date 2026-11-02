@@ -21,6 +21,11 @@
 //!
 //! Les objets proposés passent par AGPMITEM statut 6 (grille d'échange, 1 × 3 × 4) : op 2 pour les siens, op 0
 //! (propriétaire = l'autre) pour ceux de l'autre.
+//!
+//! Grille Ex (`CONTROL_PT_Grid_Ex`, une colonne de 3 cases) : op 9 genre 2 avec un Marvel Scroll of Release (usage
+//! 35) de l'inventaire Cash ; le serveur le retire de l'inventaire Cash (AGPMITEM op 1) et le renvoie au statut 14
+//! (`TRADE_OPTION_GRID`, op 0). Un objet lié se propose sur la grille ordinaire avec le genre 1. Échange fait :
+//! parchemin consommé ; annulé : rendu à l'inventaire Cash.
 
 use crate::items::Grid;
 use archrust_protocol::packet::{build_mini, decode_mini, sparse, Value};
@@ -51,6 +56,16 @@ pub mod op {
 
 /// Statut AGPMITEM d'un objet de la grille d'échange.
 pub const STATUS_TRADE_GRID: i8 = 6;
+/// Statut AGPMITEM d'un objet de la grille Ex (`TRADE_OPTION_GRID`, Marvel Scroll of Release).
+pub const STATUS_TRADE_OPTION_GRID: i8 = 14;
+/// Champ 8 de l'op 9 : grille ordinaire, objet lié sur la grille ordinaire, grille Ex (`FUN_1407bf0f0`).
+pub mod grid_kind {
+    pub const NORMAL: i32 = 0;
+    pub const BOUND: i32 = 1;
+    pub const EX: i32 = 2;
+}
+/// Grille Ex : 1 sac de 3 lignes × 1 colonne (`CONTROL_PT_Grid_Ex`, 54 × 158, cases de 50 + 2).
+pub const GRID_EX: (i16, i16, i16) = (1, 3, 1);
 /// Grille d'échange : 1 sac de 3 lignes × 4 colonnes (`CONTROL_PT_Grid`, 210 × 158, cases de 50 + 2).
 pub const GRID: (i16, i16, i16) = (1, 3, 4);
 /// Champ 8 de l'op 0 : échange fait (`FUN_140661c10`, `PTMSG_TradeComplete`).
@@ -215,6 +230,11 @@ mod tests {
         let v = roundtrip(s, &command_packet(&TradeCommand::Add { iid: 9001, from: [1, 2, 3], to: [0, 1, 2], kind: 0 }, 42).1);
         assert_eq!((int(&v, 0), int(&v, 1), int(&v, 3), int(&v, 8)), (Some(9), Some(42), Some(9001), Some(0)));
         assert_eq!((grid(&v, 6), grid(&v, 7)), (Some([1, 2, 3]), Some([0, 1, 2])));
+        // Marvel Scroll de l'inventaire Cash sur la grille Ex (genre 2), objet lié sur la grille ordinaire (genre 1).
+        let v = roundtrip(s, &command_packet(&TradeCommand::Add { iid: 77, from: [0, 0, 0], to: [0, 0, 0], kind: grid_kind::EX }, 42).1);
+        assert_eq!((int(&v, 0), int(&v, 3), int(&v, 8)), (Some(9), Some(77), Some(2)));
+        let v = roundtrip(s, &command_packet(&TradeCommand::Add { iid: 78, from: [0, 0, 1], to: [0, 2, 3], kind: grid_kind::BOUND }, 42).1);
+        assert_eq!((int(&v, 8), grid(&v, 7)), (Some(1), Some([0, 2, 3])));
         let v = roundtrip(s, &command_packet(&TradeCommand::Remove { iid: 9001, status: 2, from: [0, 1, 2], to: [0, 0, 0] }, 42).1);
         assert_eq!((int(&v, 0), int(&v, 3), int(&v, 5)), (Some(10), Some(9001), Some(2)));
         assert_eq!((grid(&v, 6), grid(&v, 7)), (Some([0, 1, 2]), Some([0, 0, 0])));

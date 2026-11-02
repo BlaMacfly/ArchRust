@@ -850,7 +850,7 @@ pub fn panel(
         if confirmed {
             match net {
                 Some(net) => send_resurrect(net, glue, ui),
-                None => ui.push_chat("[combat] hors ligne"),
+                None => log::info!("résurrection : hors ligne"),
             }
         }
     } else {

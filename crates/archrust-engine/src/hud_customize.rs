@@ -1,6 +1,6 @@
 //! Coiffeur d'Archonia (AgcmUICustomize) : fenêtres `UI_Customizing` (listes `CustomizeHairList` /
 //! `CustomizeFaceList` de six lignes sur `CustomizeListBar.png`, textes de la coiffure, du visage et du total,
-//! aperçu `CustomizePreview` avec rotation et zoom, boutons « Purchase », « Reset », « Cancel ») et
+//! aperçu `CustomizePreview` (raster hors écran du personnage cloné, voir `app_customize.rs`) avec rotation et zoom, boutons « Purchase », « Reset », « Cancel ») et
 //! `UI_CustomizeBuyConfirm` (« Cost : %d Gold »).
 //!
 //! Tout vient d'`UI_1024X768.ini` (fond `Customizing_Base.png`, libellés d'`ini_fr`) ; les demandes reviennent
@@ -31,6 +31,9 @@ pub struct CustomizeView<'a> {
     pub total_text: &'a str,
     /// « Purchase » actif (`CustomizeIsActiveBuy`).
     pub can_buy: bool,
+    /// Raster de l'aperçu hors écran (`AgcmCustomizeRender`, voir `app_customize.rs`), dessiné dans le
+    /// contrôle de type 16 « CustomizePreview » (`CONTROL_4835`, 209 × 370).
+    pub preview: Option<egui::TextureId>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -91,7 +94,13 @@ pub fn draw_customizing(ctx: &egui::Context, hud: &mut HudState, assets: &Assets
                 "CONTROL_25735" => edit_box_aligned(painter, r, view.hair_text, font, egui::Align::LEFT),
                 "CONTROL_7163" => edit_box_aligned(painter, r, view.face_text, font, egui::Align::LEFT),
                 "CONTROL_9217" => edit_box_aligned(painter, r, view.total_text, font, egui::Align::LEFT),
-                // Aperçu : cadre `CustomizePreview.png` (le personnage est montré dans le monde, voir `app_customize.rs`).
+                // Aperçu : raster du personnage cloné (fond transparent), sous les boutons et l'étiquette.
+                "CONTROL_4835" => {
+                    if let Some(tex) = view.preview {
+                        painter.image(tex, r, Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0)), Color32::WHITE);
+                    }
+                }
+                // Étiquette `CustomizePreview.png` posée sur l'aperçu.
                 "CONTROL_31341" => {
                     if let Some((_, t)) = c.textures.first() {
                         control_image(ctx, hud, assets, painter, r, c.size, t, 1.0);

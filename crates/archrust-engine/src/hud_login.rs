@@ -79,7 +79,8 @@ pub fn draw_char_select(
     slots: &[CharSlotView],
     selected: Option<usize>,
     busy: bool,
-    status: &str,
+    // État de la connexion tenu par ArchRust : pas affiché, Archonia n'a pas de ligne d'état ici.
+    _status: &str,
     delete_confirm: bool,
     out: &mut Vec<SelectUi>,
 ) {
@@ -156,10 +157,6 @@ pub fn draw_char_select(
                         shadow_text(&painter, tr.center(), Align2::CENTER_CENTER, &text, font, color);
                     }
                 }
-            }
-            if !status.is_empty() {
-                let at = lay.origin + Vec2::new(512.0, 540.0) * s;
-                shadow_text(&painter, at, Align2::CENTER_CENTER, status, font * 1.1, Color32::from_rgb(255, 210, 120));
             }
         });
     if delete_confirm {
@@ -266,7 +263,7 @@ fn state_button(ctx: &egui::Context, ui: &mut egui::Ui, hud: &mut HudState, asse
 ///   (`LG_RotateLeftStart` … `LG_RotateStop`).
 /// - **Zoom** : bouton `LoginZoomIn` / `LoginZoomOut`.
 /// - **Retour** et **Créer**.
-pub fn draw_char_create(ctx: &egui::Context, hud: &mut HudState, assets: &Assets, c: &mut crate::ui::CreationUi, busy: bool, status: &str, out: &mut Vec<CreateUi>) {
+pub fn draw_char_create(ctx: &egui::Context, hud: &mut HudState, assets: &Assets, c: &mut crate::ui::CreationUi, busy: bool, _status: &str, out: &mut Vec<CreateUi>) {
     let Some(w) = window(hud, assets, "UI_LG_CHARCREATE") else { return };
     let screen = ctx.screen_rect();
     let lay = Screen1024::new(screen);
@@ -408,10 +405,6 @@ pub fn draw_char_create(ctx: &egui::Context, hud: &mut HudState, assets: &Assets
                         }
                     }
                 }
-            }
-            if !status.is_empty() {
-                let at = lay.origin + Vec2::new(512.0, 690.0) * s;
-                shadow_text(&painter, at, Align2::CENTER_CENTER, status, font * 1.1, Color32::from_rgb(255, 210, 120));
             }
         });
 }

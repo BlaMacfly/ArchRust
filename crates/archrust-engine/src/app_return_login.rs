@@ -81,10 +81,7 @@ impl App {
     pub(super) fn return_login_event(&mut self, ev: ReturnLoginEvent) {
         match ev {
             // Archonia n'affiche rien (aucun module n'écoute le rappel de l'op 2).
-            ReturnLoginEvent::Refused => {
-                log::info!("retour à la sélection refusé par le serveur");
-                self.ui.push_chat("[système] retour à la sélection des personnages refusé par le serveur.");
-            }
+            ReturnLoginEvent::Refused => log::info!("retour à la sélection refusé par le serveur"),
             ReturnLoginEvent::Leaving => self.return_login_leave(),
         }
     }

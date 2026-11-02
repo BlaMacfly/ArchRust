@@ -1098,11 +1098,28 @@ cadre mobile (type 7, 24 o, FUN_140903780) : u32 MFrmType (0 secousse, 1 spline)
   jour (FUN_14083cbc0) ne traite que le type 1 et tue le contrôleur sinon, les 165 cadres des
   données sont de type 0 et la secousse FUN_1409038c0 n'est appelée nulle part → ArchRust ne
   rend rien (fidèle)
+RtAnim des objets (animation 7, AgcdEffAnim_RtAnim : vtable 0x140d8fa58, lecture FUN_1408f2d80 =
+  en-tête + char[64] fichier en +0x28) : 436 animations, toutes sur des objets (boucle 1 : 374,
+  2 : 45, 3 : 17), fichiers `effect/animation/*.EAN` (77 clips, format HAnim des personnages).
+  Création du contrôle d'objet (AgcdEffCtrl_Obj, FUN_140834f50) : clone du modèle, **première**
+  animation 7 de la base → `EFFECT\ANIMATION\<fichier>` (RtAnimAnimationRead), hiérarchie HAnim du
+  clone (FUN_1404db0b0), peau liée à elle (RpSkinAtomicSetHAnimHierarchy), drapeaux |= 0x3000
+  (matrices des cadres mises à jour : les bases rattachées à un nœud suivent), SetCurrentAnim puis
+  Attach ; un échec (fichier, hiérarchie) met le contrôle à l'état 3 (base arrêtée).
+  Mise à jour (FUN_1408f43e0) : FUN_1408ec780(boucle, t, durée) ne sert qu'au test de fin (mode 0,
+  aucun cas) ; puis RtAnimInterpolatorSetCurrentTime(t × 0,001 s) (FUN_14037a9b0) et
+  RpHAnimHierarchyUpdateMatrices ; l'interpolateur boucle sur la durée du clip (FUN_14037a7d0), la
+  durée de l'animation de la base n'intervient pas. Pas de vitesse propre. `t` = temps de la base
+  (déduit, comme les autres animations). Ex. jeu 14 : `K0000e00.ECL` + `F0000e00.EAN` (10 s,
+  14 pistes, nœuds 995–1003 animés après 4 s, nœuds des dépendances 990/991/993 fixes)
 ```
 
+ArchRust (`app_effects.rs`, `EffectsGlue::object_pose`) : pose du clip à `t_base / 1000` s, mondes
+des cadres et peau déformée dans cette pose, nœuds des dépendances lus dans la même pose.
+
 Pas encore rendus : lumières projecteurs (aucune dans les données), repère libre des bases
-(drapeaux 0x28/0x40), animations RtAnim des objets d'effet, effets des objets équipés (0x40 sur les
-objets), conditions 0x2, 0x8, 0x10, 0x20, 0x80, ailes et capes des colliers.
+(drapeaux 0x28/0x40), effets des objets équipés (0x40 sur les objets), conditions 0x2, 0x8, 0x10,
+0x20, 0x80, ailes et capes des colliers.
 
 ## Production (récolte, cuisine, alchimie)
 
@@ -1219,8 +1236,16 @@ avec l'autre pour propriétaire) ; grille de 1 × 3 × 4.
 Dans ArchRust (`archrust-netclient/src/trade.rs`, `app_trade.rs`, `hud_trade.rs`) : entrée « Trade » de
 `UI_TargetCharacterMenu` (`CONTROL_32674`, cachée sur soi, au palier de meurtrier 2 de l'un des deux et sous
 métamorphose sauf l'ArchLord), `UI_PrivateTradeRequest` (sysstr 520), `UI_PrivateTradeYesNo` (sysstr 519),
-`UI_PrivateTrade` (glisser du sac vers sa grille, de sa grille vers le sac), `UI_PrivateTrade_Money`. Ni grilles
-Ex ni pièces Chantra (inconnues d'ArchCore).
+`UI_PrivateTrade` (glisser du sac vers sa grille, de sa grille vers le sac), `UI_PrivateTrade_Money`. Pas de pièces
+Chantra (inconnues d'ArchCore).
+
+**Grille Ex et Marvel Scroll of Release** (usage 35, `PT_MoveItem` `FUN_1407bf0f0`) : objet proposé depuis les
+statuts 2, 13, 15 ou 51 ; sur `CONTROL_PT_Grid_Ex` (1 × 3 × 1) seul un objet d'usage 35 passe, pas deux du même TID,
+op 9 genre **2** ; le serveur le retire de l'inventaire Cash (AGPMITEM op 1) et le renvoie en **statut 14**
+(`TRADE_OPTION_GRID`, op 0, la référence le pose en 1, 1, 1) ; objet lié (drapeaux `BOUND_MASK` du champ 19) sur la
+grille ordinaire : genre **1**, refusé (`Item_TradeFailForBoundItem`) sans parchemin sur la grille Ex ou s'il y a
+déjà un objet lié ; objet Chantra entamé : `Item_TradeFailForUsingCashItem`. Échange fait : parchemin consommé
+(op 1) ; annulé : rendu à l'inventaire Cash (op 0 statut 51). Le parchemin ne se reprend pas.
 
 ## Usure et réparation
 
@@ -1259,7 +1284,23 @@ Le cadre 0 du cheval `a0000237.ecl` porte 64° autour de Y et (32,1 ; 5,5 ; −5
 cadres 0 décalés de plusieurs milliers d'unités) et les effets gardent `world_matrices`. Animation de la
 monture (`FUN_1404be4f0`) : chaque type lancé sur le cavalier l'est sur la monture (clip `[type][0]`), sauf si
 elle joue déjà ce type d'attente, de marche ou de course ; sans clip, elle garde le sien (cheval 567 : pas de
-marche). Montures glTF : sans squelette, cavalier à 60 % de `HEIGHT` (nœud `RideNode` non relevé).
+marche).
+
+**Montures glTF** (`.glb` du client : 5748 à 5777, `a0001674.glb`…, ou patch `[[models]]`) :
+- noms des nœuds → ID HAnim (observé, FUN_140769280, table DAT_140d70270 de paires nom / ID terminée par
+  −1) : `Head`… ; `RideNode`, `rideNode`, `Mount` → **20** (selle) ; puis `Bone_<n>` → n (0 à 255). Les `.glb`
+  du client nomment la selle `Saddle_20` : ArchRust lit aussi un suffixe `_<n>` (règle d'Archonia non
+  retrouvée, déduite) ;
+- animations : les variantes de `charactertemplateanimation.ini` nomment les animations du glTF (observé
+  dans les données : `[5748]` `0:0:0:IDLE` taux 95, `0:0:1:ROAR` taux 5, `2:0:0:RUN`, `3:0:0:ATTACK`,
+  `5:0:0:DEATH`) ; une variante `x.ean` (patch remplaçant un `.ecl`) cherche l'animation `x` (convention
+  ArchRust). Suivi du cavalier comme `Animator::follow` ; peau (`JOINTS_0`/`WEIGHTS_0`, 92 articulations)
+  déformée sur le CPU à 30 Hz ; canaux T/R/S linéaires, paliers, spline cubique lue par ses valeurs ;
+- repère : celui de l'armature (inverse du parent de l'articulation racine). Les `.glb` du client y sont
+  en centimètres, Y vers le haut (hauteur 433 ≈ `RIDER_HEIGHT` 430 ; selle à 280,9 = rayon 280,98 de
+  `BOUNDING_SPHERE`), alors que le nœud d'armature porte 0,01 × rotation d'axes (déduit des données) ;
+- cavalier : `rider_on_saddle(monde_monture × repère × nœud 20)`, la même correction `Ry(90°) × Rz(90°)`
+  que les selles d'origine (cavalier droit sur `Saddle_20`) ; sans nœud 20, à 60 % de `HEIGHT`.
 
 ## Objets en main
 
@@ -1402,6 +1443,17 @@ Relevés dans Archonia (`chat.rs`, `customize.rs`, `wanted.rs` d'`archrust-netcl
   coiffure` ; op 0 demande, 1 accord, 2 achat (-1 : inchangé) ; aucun résultat : le changement revient par
   AGPMCHARACTER op 1 champs 20/21 ≥ 0. Table `charactercustomizelist.txt` (`Type`, `Number`, `Sell Name`,
   `Case` 0/1 coiffeur, `CharacterTID`, `UseLevel`, `Price(Money)`).
+- **Aperçu du coiffeur** (`AgcmCustomizeRender`, observé) : rendu **hors écran** dans un raster 209 × 370
+  (`FUN_1406f89a0`) montré par le contrôle de type 16 `CustomizePreview` (`CONTROL_4835` d'`UI_Customizing`,
+  285,80, 209 × 370), pas une caméra du monde. Clone du clump du modèle (`FUN_1406f7f00`, sans l'équipement
+  porté — déduit), première animation du modèle, visage et coiffure essayés posés sur le clone
+  (`FUN_1406f9710` / `FUN_1406f9a30`) ; fond noir alpha 0 ; fenêtre de vue 0,5 × 0,5·370/209 ; ambiante
+  0,22, directionnelle 0,7 (sauf `color.txt`). `CUSTOMIZE_REVIEW` de `charactertemplatecustomize.ini` (TID 96 :
+  `0:162.1:35.7:0:76.0:139.8`) = points proche et lointain ; distance initiale `loin.z` ; œil
+  `(d·sin θ, y, d·cos θ)`, `y = proche.y + |d − proche.z| / |loin.z − proche.z| × (loin.y − proche.y)`, regard
+  horizontal (`FUN_1406f9430`) ; boutons tenus (`FUN_1406f8d50`) : `θ ± 0,12°/ms`, `d ∓ 0,12/ms` bornée par
+  `proche.z` et `loin.z` ; lumière directionnelle vers `(−sin(θ+45°), −0,5, −cos(θ+45°))`. ArchRust :
+  `Renderer::render_offscreen`, texture egui native (`app_customize.rs`) ; plans de coupe 1 / 10 000 (choix).
 - **AgpmWantedCriminal 0x46** (drapeaux 2) : `INT8 op, INT32 CID, INT32 page, INT32 rang, INT32 résultat /
   drapeau / genre, PACKET` ; mini (drapeaux 2) `CHAR[33] nom, INT64 montant, INT32 niveau, INT32 TID, INT32
   en ligne`. Ops : 0/1 tableau (fonction 32), 2 mise à prix (0 réussite, 1 prime de base, 2 or, 3 déjà),
@@ -1562,6 +1614,30 @@ Relevés dans Archonia (`consumables.rs`, `skills.rs` d'`archrust-netclient` ; `
   chaîne « skill init » est vide ; op 9 `{5 résultat i8}` : 0 boîte `Skill_SkillInitialize_Success`, 1 boîte
   `Skill_SkillInitialize_Failed`, 2 boîte `sysstr` 748. Aucun contrôle d'`UI_1024X768.ini` n'appelle
   `Skill_TreeInitialize` : ArchRust passe par `/oublier`.
+- **Return Orb (usage 13)** : « Reset Selected » de `UI_Skill` (`CONTROL_12212`), `UI_SkillHighLevel`, `UI_HeroicSkill` et
+  des fenêtres du Scion, actif si la compétence choisie est remboursable (`FUN_1402bcc70` / `FUN_1402bd5f0` : apprise,
+  pas l'attaque normale ni une production ; liste : prix du niveau 1 non nul ; arbre : exigée par aucune autre case
+  apprise, ConditionD des autres encore remplie sans elle) et qu'une orbe est au statut 2 ou 51. Boîte
+  `Skill_RollbackConfirm` (liste, Combo) ou `Skill_Init_Confirm_Message` (héroïque, Scion), puis **AGPMSKILL op 13**
+  `{1 identifiant de la compétence (pas le TID), 2 mini SKILL_BASE (3, CID)}`, sans IID de l'orbe. Réponse attendue :
+  op 1 (retrait) et les points (AGPMCHARACTER facteurs).
+- **Secret Safe (usage 21)** : refus local si AGPMCHARACTER champ 23 (pages en plus) ≥ 3 → boîte `BankSlotFull` ;
+  sinon op 3.
+- **Feux d'artifice (usage 22)** : à l'op 4 (soi ou un voisin, champ 4 = utilisateur), effets et sons du modèle
+  (`ItemTemplateAll.ini`, `AGCMEVENTEFFECT_EFFECT_DATA*` « condition:EID:x:y:z:échelle:nœud:délai » et
+  `…_SOUND_DATA*` « condition:fichier » ; feux : EID 5002, `IS0023.WAV`) joués sur l'utilisateur. Le serveur doit
+  diffuser l'op 4 aux voisins.
+- **Fortune Manual (usage 25)** : allumé = statut 51, usage 25, `SubType` 0, mini Cash « en cours d'utilisation »
+  (`FUN_14030c3d0`) ; seul l'affichage de `UI_CashInven` en dépend côté client.
+- **Release of Agreement (usage 28)** : glissé sur un équipement du sac (`ItemType` 0, au moins une pierre sertie,
+  `Kind` 1, 4, 8, 16, 64 ou arme hors lance), sinon boîte `Item_Not_Socket_Initializable` ; boîte
+  `Item_Socket_Init_Confirm` (les deux boîtes anglaises d'Archonia, `FUN_1407c18f0`, ne sont pas reprises), puis
+  **AGPMITEMCONVERT op 12** `{1 CID, 2 IID de l'équipement, 3 IID de l'objet}`. Réponse attendue : op 0 (état de
+  l'objet) et le décompte de l'objet.
+- **Usages 24 et 26** : `/go nom`, `/nick texte` (sysstr 661), `/merchant` (662), `/safekeeper` (663) partent tels
+  quels en discussion (AgpmChatting). Signature : **AGPMCHARACTER champ 27** `CHAR[16]` à l'op 0 et à l'op 1 (chaîne
+  vide ignorée, comme `FUN_140175bb0`), dessinée en blanc sur la plaque d'un joueur, ligne après le titre et la guilde
+  (`FUN_140826450`, hauts à ancre − h − 6 / 20 / 34).
 
 ## Rappel de groupe, actions sociales et boutique des Shrines
 
@@ -1762,6 +1838,22 @@ op 11 SKILL_SELECT   0x50  @4C compétence (ajout d'Archonia, codé, ignoré par
   objectif) et op 9 du titre actif (au joueur et aux voisins, et à l'observateur quand un porteur entre en vue) ;
   réponses 6.1 (+ 6.3), 6.3 à chaque compteur, 6.5 puis 1 à l'achèvement, 3 puis 9 au changement, 8 (et 9 bUse=0)
   à la suppression ; op 10 à la demande de dialogue d'un « <Title Manager> ».
+
+## Récompenses de quête (AGPMQUEST 0x13, op 2)
+
+Texte de la quête (`QuestMainText_Display2`, FUN_140658ae0) : après l'argent et l'expérience, une balise
+`<ITEM::nombre::TID::emplacements::renforcement::x::choix>` par objet donné (`Gift_ItemA` à `D`,
+FUN_140657bf0), puis, s'il y en a, « </n></n> » + sysstr 837 et une balise `choix = 1` par `SelectItemN`
+renseigné. Colonnes : `…_Count`, `…_Tid` (« TID;x;y », lecture « %d;%d;%d »), `…_Upgrade_Slot`,
+`…_Upgrade_Intensify`. `AgcUIQuestText` dessine chaque balise en case `Quest_Slot.png` avec l'icône et le
+nombre (« %d », 0xFFFF9999, en bas à droite) ; un objet à choisir se clique (cadre `Quest_ActiveBox.png`, un
+seul) et retient son rang parmi les objets choisissables, **à partir de 0** (+0x38, -1 sinon ; LAB_14088c840).
+
+« Terminer » (FUN_140655330) : cases libres du sac < objets donnés → `QuestInventoryMainFull_Message` ;
+récompenses au choix sans choix → uimessage `QuestSelectItem` (notice) ; sinon op 2, champ 4 TID, champ 7 =
+rang choisi (-1 sans choix). ArchCore (`world/quests.rs`, `complete`) lit aujourd'hui le champ 7 à partir de 1
+(`choice - 1`, 0 et -1 → premier choix) : il devra le lire à partir de 0 et refuser un rang hors des choix
+quand la quête en a.
 
 ## Inconnues
 

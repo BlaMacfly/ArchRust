@@ -17,9 +17,21 @@
 //!   `Customize_FaceChangeFormat` / `Customize_HairChangeFormat` avec le nom pris dans les listes de la dernière
 //!   ouverture (`FUN_1406bd820`).
 //!
-//! Écart : ArchRust ne sait pas dessiner un personnage dans une fenêtre ; l'aperçu (`CustomizePreview`) applique
-//! la sélection au modèle du joueur dans le monde (rendu à la fermeture), et les boutons de rotation et de zoom
-//! tournent et rapprochent la caméra autour de lui.
+//! Aperçu (`AgcmCustomizeRender`, contrôle `CONTROL_4835` de type 16 « CustomizePreview », 209 × 370) : un
+//! **rendu hors écran** d'un clone du modèle du joueur, pas le personnage du monde (qui ne change qu'après
+//! l'achat) :
+//! * raster 209 × 370 (`FUN_1406f89a0`), fond noir transparent (`FUN_14038d3b0`, alpha 0), caméra à part
+//!   (fenêtre de vue 0,5 × 0,5·370/209, `FUN_1406f9dc0`) ; clone du clump du modèle sans l'équipement porté,
+//!   première animation du modèle (attente) ; visage et coiffure essayés posés sur ce clone (`FUN_1406f9710`,
+//!   `FUN_1406f9a30`, appelés par `CustomizeSelectFace` / `CustomizeSelectHair`) ;
+//! * caméra (`FUN_1406f9430`) : `CUSTOMIZE_REVIEW` de `charactertemplatecustomize.ini` = deux points `proche`
+//!   et `loin` (x, y, z ; x inutilisé) ; distance `d` (au départ `loin.z`) ; angle `θ` (au départ 0) ;
+//!   œil = (d·sin θ, y, d·cos θ) autour du modèle, regard horizontal sur son axe, hauteur
+//!   `y = proche.y + |d − proche.z| / |loin.z − proche.z| × (loin.y − proche.y)` ;
+//! * boutons tenus (`FUN_1406f8d50`, 0,12 par ms) : rotation gauche `θ += 0,12·dt`, droite `θ −= 0,12·dt`
+//!   (degrés), zoom avant `d −= 0,12·dt` jusqu'à `proche.z`, arrière `d += 0,12·dt` jusqu'à `loin.z` ;
+//! * lumières : ambiante 0,22, directionnelle 0,7, dirigée vers `−(sin(θ + 45°), 0,5, cos(θ + 45°))`.
+//! Le rendu est fait chaque image tant que la fenêtre est ouverte (`AgcmUICustomize` OnIdle `FUN_1406be590`).
 
 use super::App;
 use crate::assets::Assets;
@@ -122,10 +134,129 @@ pub struct CustomizeGlue {
     transformed: bool,
     /// Listes de la dernière ouverture (noms des messages de changement).
     last_lists: (Vec<Entry>, Vec<Entry>),
-    /// Tête à montrer sur le modèle du joueur (aperçu), rotation et zoom de l'image.
+    /// Tête essayée (aperçu hors écran), boutons de rotation et de zoom tenus cette image.
     preview: Option<Head>,
     rotate: f32,
     zoom: f32,
+    /// Aperçu hors écran (`AgcmCustomizeRender`) : raster, modèle cloné, caméra.
+    render: Option<PreviewRender>,
+}
+
+/// Raster de l'aperçu (`FUN_1406f89a0` : 209 × 370).
+pub const PREVIEW_SIZE: (u32, u32) = (209, 370);
+/// Vitesse de rotation (degrés) et de zoom (unités) par milliseconde (`FUN_1406f8d50`).
+const PREVIEW_STEP_PER_MS: f32 = 0.12;
+/// Lumières de l'aperçu (`FUN_1406f8d50`, sans `color.txt`) : ambiante et directionnelle.
+const PREVIEW_AMBIENT: f32 = 0.22;
+const PREVIEW_DIRECTIONAL: f32 = 0.7;
+/// Plans de coupe de la caméra de l'aperçu : choix d'ArchRust (valeurs passées en registres flottants
+/// à `FUN_14038d2b0` / `FUN_14038d2e0`, non relevées).
+const PREVIEW_NEAR: f32 = 1.0;
+const PREVIEW_FAR: f32 = 10_000.0;
+
+/// `CUSTOMIZE_REVIEW` d'un modèle (`charactertemplatecustomize.ini`, six flottants séparés par `:`) : point
+/// proche (visage) et point lointain (corps), `loin.z` relevé d'une unité s'il égale `proche.z`
+/// (`FUN_1406f9dc0`).
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Review {
+    pub near: Vec3,
+    pub far: Vec3,
+}
+
+impl Review {
+    pub fn parse(value: &str) -> Review {
+        let v: Vec<f32> = value.split(':').map(|s| s.trim().parse().unwrap_or(0.0)).collect();
+        let at = |i: usize| v.get(i).copied().unwrap_or(0.0);
+        let near = Vec3::new(at(0), at(1), at(2));
+        let mut far = Vec3::new(at(3), at(4), at(5));
+        if (far.z - near.z).abs() < 1e-4 {
+            far.z = near.z + 1.0;
+        }
+        Review { near, far }
+    }
+
+    pub fn for_tid(assets: &Assets, tid: i32) -> Review {
+        let value = (|| {
+            let t = assets.table("ini", "charactertemplatecustomize.ini").ok()?;
+            let key = t.section("")?.entries.iter().find(|(_, v)| v.eq_ignore_ascii_case("CUSTOMIZE_REVIEW")).map(|(k, _)| k.clone())?;
+            t.section(&tid.to_string())?.get(&key).map(str::to_owned)
+        })();
+        Review::parse(value.as_deref().unwrap_or(""))
+    }
+}
+
+/// Caméra de l'aperçu : angle `θ` (degrés, `+0x1768`) et distance `d` (`+0x177c`).
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct PreviewCamera {
+    pub angle: f32,
+    pub distance: f32,
+}
+
+impl PreviewCamera {
+    pub fn new(review: &Review) -> PreviewCamera {
+        PreviewCamera { angle: 0.0, distance: review.far.z }
+    }
+
+    /// Une image (`FUN_1406f8d50`) : `rotate` −1 rotation gauche (état 1), +1 droite (état 2) ; `zoom` +1
+    /// avant (état 3), −1 arrière (état 4) ; `dt_ms` écoulées. Les bornes de l'angle sont celles
+    /// d'Archonia (à droite, un angle négatif devient `360 − θ`).
+    pub fn step(&mut self, review: &Review, rotate: f32, zoom: f32, dt_ms: f32) {
+        let s = dt_ms * PREVIEW_STEP_PER_MS;
+        if rotate < 0.0 {
+            self.angle += s;
+            if self.angle >= 360.0 {
+                self.angle -= 360.0;
+            }
+        } else if rotate > 0.0 {
+            self.angle -= s;
+            if self.angle < 0.0 {
+                self.angle = 360.0 - self.angle;
+            }
+        } else if zoom > 0.0 {
+            self.distance = (self.distance - s).max(review.near.z);
+        } else if zoom < 0.0 {
+            self.distance = (self.distance + s).min(review.far.z);
+        }
+    }
+
+    /// Œil et point visé (repère du modèle, cadre 0 à l'identité), comme `FUN_1406f9430`.
+    pub fn eye_target(&self, review: &Review) -> (Vec3, Vec3) {
+        let d = self.distance;
+        let (s, c) = self.angle.to_radians().sin_cos();
+        let t = (d - review.near.z).abs() / (review.far.z - review.near.z).abs();
+        let y = t * (review.far.y - review.near.y) + review.near.y;
+        (Vec3::new(d * s, y, d * c), Vec3::new(0.0, y, 0.0))
+    }
+
+    /// Direction **vers** la lumière directionnelle : opposée à `(−sin(θ + 45°), −0,5, −cos(θ + 45°))`.
+    pub fn light_towards(&self) -> Vec3 {
+        let (s, c) = (self.angle.to_radians() + std::f32::consts::FRAC_PI_4).sin_cos();
+        Vec3::new(s, 0.5, c).normalize()
+    }
+
+    /// Vue-projection (profondeur inversée comme la scène) : fenêtre de vue 0,5 × 0,5·h/w.
+    pub fn view_proj(&self, review: &Review) -> Mat4 {
+        let (w, h) = (PREVIEW_SIZE.0 as f32, PREVIEW_SIZE.1 as f32);
+        let fov_y = 2.0 * (0.5 * h / w).atan();
+        let (eye, target) = self.eye_target(review);
+        Mat4::perspective_rh(fov_y, w / h, PREVIEW_FAR, PREVIEW_NEAR) * Mat4::look_at_rh(eye, target, Vec3::Y)
+    }
+}
+
+/// Aperçu hors écran : raster et texture egui (gardés d'une ouverture à l'autre), modèle cloné.
+struct PreviewRender {
+    target: crate::render::OffscreenTarget,
+    texture: egui::TextureId,
+    model: Option<PreviewModel>,
+}
+
+struct PreviewModel {
+    tid: i32,
+    head: Head,
+    review: Review,
+    camera: PreviewCamera,
+    meshes: Vec<(std::sync::Arc<crate::render::Mesh>, Mat4)>,
+    animator: Option<crate::animation::Animator>,
 }
 
 impl CustomizeGlue {
@@ -134,8 +265,11 @@ impl CustomizeGlue {
     }
 
     fn close(&mut self) {
-        if let Some(o) = self.open.take() {
-            self.preview = Some(o.original);
+        // Le modèle de l'aperçu est libéré (`FUN_1406f87c0` à la fermeture) ; le raster reste.
+        self.open = None;
+        self.preview = None;
+        if let Some(r) = self.render.as_mut() {
+            r.model = None;
         }
         self.confirm = false;
     }
@@ -182,7 +316,7 @@ pub fn panel(ctx: &egui::Context, glue: &mut CustomizeGlue, hud: &mut HudState, 
         }
         let hairs: Vec<String> = o.hairs.iter().map(|e| e.name.clone()).collect();
         let faces: Vec<String> = o.faces.iter().map(|e| e.name.clone()).collect();
-        let view = CustomizeView { hairs: &hairs, faces: &faces, hair: o.hair, face: o.face, first_hair: o.first_hair, first_face: o.first_face, hair_text: &hair_text, face_text: &face_text, total_text: &total_text, can_buy };
+        let view = CustomizeView { hairs: &hairs, faces: &faces, hair: o.hair, face: o.face, first_hair: o.first_hair, first_face: o.first_face, hair_text: &hair_text, face_text: &face_text, total_text: &total_text, can_buy, preview: glue.render.as_ref().filter(|r| r.model.is_some()).map(|r| r.texture) };
         let mut out = Vec::new();
         crate::hud::draw_customizing(ctx, hud, assets, &view, &mut out);
         for r in out {
@@ -335,23 +469,51 @@ impl App {
         }
     }
 
-    /// À chaque image : fermeture en s'éloignant, aperçu sur le modèle, rotation et zoom de la caméra.
+    /// À chaque image : fermeture en s'éloignant ; aperçu hors écran (modèle cloné avec la tête essayée,
+    /// rotation et zoom de sa caméra, animation d'attente), voir l'en-tête du module.
     pub(super) fn customize_frame(&mut self, dt: f32) {
         if let (Some(me), Some(o)) = (self.player.as_ref().map(|p| p.position), self.customize.open.as_ref()) {
             if Vec3::new(me.x - o.at.x, 0.0, me.z - o.at.z).length() > CLOSE_MOVE {
                 self.customize.close();
             }
         }
-        if let Some(head) = self.customize.preview.take() {
-            self.set_player_head(head);
-        }
         let (rotate, zoom) = (std::mem::take(&mut self.customize.rotate), std::mem::take(&mut self.customize.zoom));
-        if rotate != 0.0 {
-            self.camera.rotate(rotate.signum() * 400.0 * dt, 0.0);
+        let (Some(head), Some(tid)) = (self.customize.preview.filter(|_| self.customize.open.is_some()), self.player.as_ref().map(|p| p.tid)) else { return };
+        let assets = self.assets.clone();
+        let Some(gpu) = self.gpu.as_mut() else { return };
+        let render = self.customize.render.get_or_insert_with(|| {
+            let target = gpu.renderer.create_offscreen(PREVIEW_SIZE.0, PREVIEW_SIZE.1);
+            let texture = gpu.egui_renderer.register_native_texture(&gpu.renderer.device, &target.view, wgpu::FilterMode::Linear);
+            PreviewRender { target, texture, model: None }
+        });
+        // Nouveau visage ou nouvelle coiffure : clone reconstruit, caméra gardée.
+        if render.model.as_ref().is_none_or(|m| m.tid != tid || m.head != head) {
+            let camera = render.model.as_ref().filter(|m| m.tid == tid).map(|m| m.camera);
+            let fallback = gpu.player_marker.clone();
+            let meshes = crate::scene::entity_meshes(&mut gpu.renderer, &assets, tid, head, &fallback).unwrap_or_else(|err| {
+                log::warn!("aperçu du coiffeur (TID {tid}) : {err:#}");
+                vec![(fallback.clone(), Mat4::IDENTITY)]
+            });
+            let animator = crate::animation::Animator::new(&assets, tid, &meshes, 1, 0, true);
+            let review = Review::for_tid(&assets, tid);
+            render.model = Some(PreviewModel { tid, head, review, camera: camera.unwrap_or_else(|| PreviewCamera::new(&review)), meshes, animator });
         }
-        if zoom != 0.0 {
-            self.camera.zoom(zoom.signum() * 3.0 * dt);
+        let Some(m) = render.model.as_mut() else { return };
+        m.camera.step(&m.review, rotate, zoom, dt * 1000.0);
+        if let Some(a) = m.animator.as_mut() {
+            a.update(&assets, &gpu.renderer, dt, false, false, 30.0);
         }
+        let items: Vec<crate::render::DrawItem> = m
+            .meshes
+            .iter()
+            .filter_map(|(mesh, local)| {
+                let model = crate::worn::piece_model(mesh, Mat4::IDENTITY, *local, false, m.animator.as_ref())?;
+                Some(crate::render::DrawItem { mesh: mesh.clone(), model, tint: [1.0; 4], character: true })
+            })
+            .collect();
+        let (eye, _) = m.camera.eye_target(&m.review);
+        let light = (m.camera.light_towards(), [PREVIEW_AMBIENT, PREVIEW_AMBIENT, PREVIEW_AMBIENT, 1.0], [PREVIEW_DIRECTIONAL, PREVIEW_DIRECTIONAL, PREVIEW_DIRECTIONAL, 1.0]);
+        gpu.renderer.render_offscreen(&render.target, m.camera.view_proj(&m.review), eye, &items, light, wgpu::Color::TRANSPARENT);
     }
 }
 
@@ -387,6 +549,36 @@ Face\t0\tType 1\t0\t1\t1\t0\t0\r\n";
         assert_eq!(requirement(None, face), (3000, 0));
     }
 
+    /// Caméra de l'aperçu (`FUN_1406f8d50`, `FUN_1406f9430`) avec le `CUSTOMIZE_REVIEW` du chevalier (TID 96).
+    #[test]
+    fn camera_de_l_apercu() {
+        let r = Review::parse("0:162.100693:35.700043:0:75.999413:139.799347");
+        assert_eq!((r.near.y, r.near.z, r.far.z), (162.100693, 35.700043, 139.799347));
+        // Points confondus : `loin.z` relevé d'une unité.
+        assert_eq!(Review::parse("0:0:0:0:0:0").far.z, 1.0);
+        let mut c = PreviewCamera::new(&r);
+        assert_eq!(c.distance, r.far.z);
+        // Au départ : devant le modèle (+Z), à la hauteur du point lointain, regard horizontal.
+        let (eye, target) = c.eye_target(&r);
+        assert!((eye - Vec3::new(0.0, r.far.y, r.far.z)).length() < 1e-3 && target == Vec3::new(0.0, r.far.y, 0.0));
+        // Rotation gauche tenue 500 ms : 60° ; droite 1 s depuis 60° : −60° → 360 − (−60) = 420 (Archonia).
+        c.step(&r, -1.0, 0.0, 500.0);
+        assert!((c.angle - 60.0).abs() < 1e-3);
+        c.step(&r, 1.0, 0.0, 1000.0);
+        assert!((c.angle - 420.0).abs() < 1e-3);
+        // Zoom avant jusqu'au point proche (hauteur du visage), arrière jusqu'au point lointain.
+        c.step(&r, 0.0, 1.0, 10_000.0);
+        assert_eq!(c.distance, r.near.z);
+        assert!((c.eye_target(&r).0.y - r.near.y).abs() < 1e-3);
+        c.step(&r, 0.0, -1.0, 100.0);
+        assert!((c.distance - (r.near.z + 12.0)).abs() < 1e-3);
+        c.step(&r, 0.0, -1.0, 10_000.0);
+        assert_eq!(c.distance, r.far.z);
+        // Lumière à 45° de la caméra, plongeante (vers la lumière : y > 0).
+        let l = PreviewCamera { angle: 0.0, distance: 1.0 }.light_towards();
+        assert!((l - Vec3::new(1.0, 0.70710677, 1.0).normalize()).length() < 1e-5);
+    }
+
     /// Avec les données du client (`ARCHRUST_GAME_DIR`) : 749 lignes, chevaliers 58 coiffures / 24 visages.
     #[test]
     fn table_du_client() {
@@ -395,5 +587,7 @@ Face\t0\tType 1\t0\t1\t1\t0\t0\r\n";
         let t = parse_table(&super::super::npc_glue::client_text_in(&assets, "ini", "charactercustomizelist.txt"));
         assert_eq!(t.iter().filter(|e| e.tid == 96 && e.kind == 1).count(), 58);
         assert_eq!(t.iter().filter(|e| e.tid == 96 && e.kind == 2).count(), 24);
+        let r = Review::for_tid(&assets, 96);
+        assert!((r.near.y - 162.1).abs() < 0.01 && (r.far.z - 139.8).abs() < 0.01, "{r:?}");
     }
 }

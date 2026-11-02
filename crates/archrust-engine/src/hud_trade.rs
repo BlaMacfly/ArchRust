@@ -15,9 +15,11 @@
 //!   (`PT_Accept`), « No » et croix (`PT_Reject`) ;
 //! * `UI_PrivateTrade_Money` : montant `CONTROL_PT_SendGhelldEdit`, « Confirm » (`PT_UpdateMoney`), « Cancel ».
 //!
-//! Écarts : les grilles Ex (`CONTROL_PT_Grid_Ex`, objets de genre 0x23) restent vides et « Coins » inactif
-//! (pièces Chantra inconnues d'ArchCore, `UI_PrivateTrade_Cash` non reprise). Les demandes reviennent au moteur
-//! en [`TradeUi`] (voir `app_trade.rs`).
+//! * grilles Ex `CONTROL_PT_Grid_Ex` (la sienne, dépôt `PT_MoveItem` : Marvel Scroll of Release, usage 0x23) et
+//!   `CONTROL_PTC_Grid_Ex` (celle de l'autre), une colonne de 3 cases ; objets au statut 14 (`TRADE_OPTION_GRID`).
+//!
+//! Écart : « Coins » inactif (pièces Chantra inconnues d'ArchCore, `UI_PrivateTrade_Cash` non reprise). Les
+//! demandes reviennent au moteur en [`TradeUi`] (voir `app_trade.rs`).
 
 use super::items_ui::icon as item_icon;
 use super::npc_ui::{frame, window};
@@ -29,6 +31,8 @@ pub(super) const TRADE_WINDOWS: [&str; 4] = ["UI_PrivateTrade", "UI_PrivateTrade
 /// Lignes et colonnes de la grille d'échange (`CONTROL_PT_Grid` 210 × 158, ArchCore `TRADE_GRID`).
 const GRID_ROWS: i16 = 3;
 const GRID_COLS: i16 = 4;
+/// Grilles Ex (`CONTROL_PT_Grid_Ex` 54 × 158) : une colonne.
+const GRID_EX_COLS: i16 = 1;
 /// Texte rouge des statuts « appuyé » (`Status2=…:-4980736`).
 const PRESSED_TEXT: u32 = 0xFF_B4_00_00;
 
@@ -48,6 +52,9 @@ pub struct TradeView<'a> {
     pub peer: &'a str,
     pub mine: &'a [TradeSlot],
     pub theirs: &'a [TradeSlot],
+    /// Grilles Ex (Marvel Scroll of Release), case = rang d'arrivée.
+    pub mine_ex: &'a [TradeSlot],
+    pub theirs_ex: &'a [TradeSlot],
     pub my_gold: i64,
     pub peer_gold: i64,
     pub my_cash: i64,
@@ -75,6 +82,8 @@ pub enum TradeUi {
     Gold,
     /// Objet lâché sur la case `cell` de sa grille d'échange (`PT_MoveItem`).
     Offer { drag: ItemDrag, cell: [i16; 3] },
+    /// Objet lâché sur la case `cell` de sa grille Ex (`PT_MoveItem`, `CONTROL_PT_Grid_Ex`).
+    OfferEx { drag: ItemDrag, cell: [i16; 3] },
 }
 
 /// Texture (indice de `Texture=`) et couleur du texte des statuts de `CONTROL_PTC_LOCK`
@@ -109,22 +118,23 @@ fn pressed(ctx: &egui::Context, hud: &mut HudState, assets: &Assets, painter: &e
 #[allow(clippy::too_many_arguments)]
 fn trade_grid(ctx: &egui::Context, ui: &mut egui::Ui, hud: &mut HudState, assets: &Assets, painter: &egui::Painter, layout: &Layout, origin: Pos2, c: &UiControl, items: &[TradeSlot], mine: bool, font: f32, out: &mut Vec<TradeUi>) {
     let s = layout.scale;
+    let ex = c.name.ends_with("_Grid_Ex");
     let [gx, gy, cw, ch] = c.grid.unwrap_or([2.0, 2.0, 50.0, 50.0]);
-    let cols = (((c.size[0] + gx) / (cw + gx)).floor() as i16).clamp(1, GRID_COLS);
+    let cols = (((c.size[0] + gx) / (cw + gx)).floor() as i16).clamp(1, if ex { GRID_EX_COLS } else { GRID_COLS });
     let rows = (((c.size[1] + gy) / (ch + gy)).floor() as i16).clamp(1, GRID_ROWS);
     let dragging = egui::DragAndDrop::payload::<ItemDrag>(ctx).map(|p| *p);
     for row in 0..rows {
         for col in 0..cols {
             let cell = layout.rect(origin, [c.pos[0] + col as f32 * (cw + gx), c.pos[1] + row as f32 * (ch + gy)], [cw, ch]);
             let sense = if mine { egui::Sense::click_and_drag() } else { egui::Sense::hover() };
-            let resp = ui.interact(cell, egui::Id::new(("trade-cell", mine, row, col)), sense);
+            let resp = ui.interact(cell, egui::Id::new(("trade-cell", mine, ex, row, col)), sense);
             if let Some(item) = items.iter().find(|i| i.grid == [0, row, col]) {
                 let lifted = dragging.is_some_and(|d| d.iid == item.iid);
                 item_icon(ctx, hud, assets, painter, cell, Some(item.tid), if lifted { Color32::from_white_alpha(70) } else { Color32::WHITE });
                 if item.count > 1 && !lifted {
                     shadow_text(painter, cell.right_bottom() - Vec2::new(3.0, 2.0) * s, Align2::RIGHT_BOTTOM, &item.count.to_string(), font, Color32::WHITE);
                 }
-                if mine && resp.dragged() {
+                if mine && !ex && resp.dragged() {
                     resp.dnd_set_drag_payload(ItemDrag { iid: item.iid, tid: item.tid, worn: false, bank: false });
                 }
                 if dragging.is_none() {
@@ -136,7 +146,8 @@ fn trade_grid(ctx: &egui::Context, ui: &mut egui::Ui, hud: &mut HudState, assets
                 continue;
             }
             if let Some(drag) = resp.dnd_release_payload::<ItemDrag>() {
-                out.push(TradeUi::Offer { drag: *drag, cell: [0, row, col] });
+                let cell = [0, row, col];
+                out.push(if ex { TradeUi::OfferEx { drag: *drag, cell } } else { TradeUi::Offer { drag: *drag, cell } });
             }
             let target = dragging.is_some() && resp.contains_pointer();
             if resp.hovered() || target {
@@ -159,6 +170,10 @@ pub fn draw_private_trade(ctx: &egui::Context, hud: &mut HudState, assets: &Asse
                 "CONTROL_PT_Grid" | "CONTROL_PTC_Grid" => {
                     let mine = c.name == "CONTROL_PT_Grid";
                     trade_grid(ctx, ui, hud, assets, painter, layout, origin, c, if mine { view.mine } else { view.theirs }, mine, font, out);
+                }
+                "CONTROL_PT_Grid_Ex" | "CONTROL_PTC_Grid_Ex" => {
+                    let mine = c.name == "CONTROL_PT_Grid_Ex";
+                    trade_grid(ctx, ui, hud, assets, painter, layout, origin, c, if mine { view.mine_ex } else { view.theirs_ex }, mine, font, out);
                 }
                 "CONTROL_PT_NameStatic" => control_text(painter, r, c, view.me, font, None),
                 "CONTROL_PT_ClientNameStatic" => control_text(painter, r, c, view.peer, font, None),

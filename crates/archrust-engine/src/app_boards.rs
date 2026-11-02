@@ -62,6 +62,9 @@ struct IdLine {
     /// `FUN_1408270a0` ne le dessine pas : gardé sans dessin, comme Archonia.
     #[allow(dead_code)]
     charisma: Option<(i32, String)>,
+    /// Signature d'un joueur (Signature of Glory, AGPMCHARACTER champ 27, `board+0x182`) : ligne suivant la guilde
+    /// (`FUN_140826450`), couleur `board+0x1fc` (−1 : blanc ; la couleur choisie d'Archonia n'est pas de l'épisode 8).
+    signature: Option<String>,
 }
 
 /// Ce que la fermeture egui dessine, calculé avant l'emprunt du GPU.
@@ -263,7 +266,8 @@ impl App {
             // Titre (op 9) des personnages joueurs ; rang de charisme connu pour le joueur seulement (CHA).
             let title = if player { self.titles.over_head_title(&name) } else { None };
             let charisma = if cid == me { self.titles.my_charisma_rank() } else { None };
-            view.ids.push(IdLine { anchor, name, color, guild, party: party.contains(&cid), title, charisma });
+            let signature = if player { self.consumables_signature(cid) } else { None };
+            view.ids.push(IdLine { anchor, name, color, guild, party: party.contains(&cid), title, charisma, signature });
         }
         for (cid, board, born) in &self.boards.dmg {
             let Some((foot, height)) = feet.get(cid) else { continue };
@@ -350,7 +354,15 @@ pub fn panel(ctx: &egui::Context, glue: &mut BoardsGlue, view: &BoardsView, hud:
             let fill = Color32::from_rgba_unmultiplied(c.r(), c.g(), c.b(), (PARTY_FRAME >> 24) as u8);
             painter.rect_filled(Rect::from_min_size(at, name.size()).expand(1.0), 0.0, fill);
         }
-        for (galley, pos) in [(Some(name), Some(at)), (title, title_at), (guild, guild_at)] {
+        // Signature : ligne suivante (nom 0, titre, guilde), hauts à `ancre − h − 6 / 20 / 34` (`+0xF4…+0xFC`).
+        let index = title.is_some() as usize + guild.is_some() as usize;
+        let signature = line.signature.as_ref().zip(boards::SIGNATURE_GAPS.get(index)).map(|(text, gap)| {
+            let g = painter.layout_no_wrap(text.clone(), font.clone(), boards::font_color(boards::SIGNATURE_COLOR));
+            let pos = Pos2::new((line.anchor.x - g.size().x * 0.5 * SCALE).trunc(), at.y - height - gap * SCALE);
+            (g, pos)
+        });
+        let (signature, signature_at) = signature.map_or((None, None), |(g, p)| (Some(g), Some(p)));
+        for (galley, pos) in [(Some(name), Some(at)), (title, title_at), (guild, guild_at), (signature, signature_at)] {
             let (Some(galley), Some(pos)) = (galley, pos) else { continue };
             painter.galley_with_override_text_color(pos + egui::vec2(1.0, 1.0), galley.clone(), shadow);
             painter.galley(pos, galley, Color32::WHITE);

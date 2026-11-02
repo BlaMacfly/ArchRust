@@ -19,20 +19,31 @@
 //!   ops 17 / 19 (`PT_ClientLock` / `Unlock`), 20 (`PT_ActiveReadyToExchange` : « Lock » inactif, « Trade » actif),
 //!   22 (`PT_ClientReadyToExchange`) ;
 //! * or (`PT_UpdateMoney` `FUN_1407bf970`) : envoyé seulement s'il est positif, borné à l'or porté ; ops 23 / 24 ;
-//! * op 25 : `Option_Trade_Off_User` dans la discussion.
+//! * op 25 : `Option_Trade_Off_User` dans la discussion ;
+//! * contrôles de `PT_MoveItem` (`FUN_1407bf0f0`) : objet du sac, du sac du familier, de l'inventaire Cash (statuts 2,
+//!   13, 15, 51) ; grille Ex : usage 35 (Marvel Scroll of Release) seulement, pas deux du même TID → genre 2 ; grille
+//!   ordinaire : objet lié (drapeaux d'état `BOUND_MASK`, AGPMITEM champ 19) → genre 1, refusé par
+//!   `Item_TradeFailForBoundItem` s'il y a déjà un objet lié sur la grille ou aucun parchemin sur la grille Ex, et
+//!   sans message s'il est lié définitivement (`FUN_1401c2b30`, D) ; objet Chantra déjà entamé (mini Cash : en cours
+//!   d'utilisation, en pause ou champ 3 ≥ 1, D pour `+0x508`) → `Item_TradeFailForUsingCashItem` ; objets de la
+//!   grille Ex : AGPMITEM statut 14, qu'on ne reprend pas (comme la référence, qui ne les rend qu'à l'annulation).
 //!
 //! Écarts : ArchCore met le demandeur au champ 1 de l'op 3 (Archonia le lit au champ 2) : le champ 1 est pris quand
 //! le champ 2 est le joueur lui-même. L'op 18 reçue remet « Lock » à l'état relâché (ArchCore déverrouille aussi le
 //! partenaire ; Archonia laisserait le bouton enfoncé). Le `%s` d'`Option_Trade_Off_User` (laissé sans argument
 //! par Archonia) reçoit le nom de la cible. Les refus d'objet lié, utilisé ou non échangeable sont laissés au
-//! serveur ; ni grilles Ex, ni pièces Chantra, ni sons ; le statut d'action de la cible (+0x6ae) n'est pas testé.
+//! serveur ; ni pièces Chantra, ni sons ; le statut d'action de la cible (+0x6ae) n'est pas testé. `NotTradeThisItem`
+//! (objet non échangeable, `FUN_1401a93d0`) n'a pas de texte dans uimessage : refus laissé au serveur.
 
 use super::App;
 use crate::assets::Assets;
 use crate::hud::{HudState, ItemUi, TradeSlot, TradeUi, TradeView};
 use crate::net::NetLink;
 use crate::ui::UiState;
-use archrust_netclient::trade::{TradeCommand, TradeEvent, RESULT_DONE, STATUS_TRADE_GRID};
+use super::consumables_glue::ItemRow;
+use archrust_netclient::auction::item_flag;
+use archrust_netclient::pet_bag::{in_use, CashState};
+use archrust_netclient::trade::{grid_kind, TradeCommand, TradeEvent, RESULT_DONE, STATUS_TRADE_GRID, STATUS_TRADE_OPTION_GRID};
 use archrust_netclient::world::ItemRecord;
 use archrust_netclient::Command;
 use std::collections::{BTreeMap, HashMap};
@@ -44,6 +55,10 @@ const MURDERER_REFUSES: usize = 1;
 /// Statuts de départ de `CONTROL_PTC_LOCK` et `CONTROL_PTC_ReadyToExchange` (`DefaultIDs=-1:0`, `-1:2`).
 const PEER_LOCK_START: usize = 0;
 const PEER_READY_START: usize = 2;
+/// Statuts d'où un objet peut être proposé (`FUN_1407bf0f0` : 2, et le masque 0x800000000a000 : 13, 15, 51).
+const OFFER_STATUS: [i8; 4] = [2, 13, 15, 51];
+/// Usage du Marvel Scroll of Release (`PRIVATE_TRADE_OPTION`, 0x23).
+const USE_PRIVATE_TRADE_OPTION: i64 = 35;
 
 #[derive(Default)]
 pub struct TradeGlue {
@@ -56,6 +71,13 @@ pub struct TradeGlue {
     /// Objets de la grille d'échange : les siens et ceux de l'autre (IID → objet, statut 6).
     mine: BTreeMap<i32, ItemRecord>,
     theirs: BTreeMap<i32, ItemRecord>,
+    /// Grilles Ex (statut 14) : les siens et ceux de l'autre.
+    mine_ex: BTreeMap<i32, ItemRecord>,
+    theirs_ex: BTreeMap<i32, ItemRecord>,
+    /// Usage et type Cash des objets (itemdatatable.txt).
+    rows: Option<HashMap<i32, ItemRow>>,
+    /// Boîte d'information (`Item_TradeFailFor*`, `Action=4:0`).
+    info: Option<String>,
     my_gold: i64,
     peer_gold: i64,
     my_cash: i64,
@@ -105,6 +127,8 @@ impl TradeGlue {
         self.confirm = None;
         self.peer = Some(peer);
         self.theirs.clear();
+        self.mine_ex.clear();
+        self.theirs_ex.clear();
         (self.my_gold, self.peer_gold, self.my_cash, self.peer_cash) = (0, 0, 0, 0);
         (self.locked, self.lock_enabled, self.ready_enabled, self.ready_pressed) = (false, true, false, false);
         (self.peer_lock, self.peer_ready) = (PEER_LOCK_START, PEER_READY_START);
@@ -118,7 +142,13 @@ impl TradeGlue {
         self.peer = None;
         self.money = None;
         self.theirs.clear();
+        self.mine_ex.clear();
+        self.theirs_ex.clear();
         (self.my_gold, self.peer_gold, self.my_cash, self.peer_cash) = (0, 0, 0, 0);
+    }
+
+    fn rows(&mut self, assets: &Assets) -> &HashMap<i32, ItemRow> {
+        self.rows.get_or_insert_with(|| super::consumables_glue::parse_items(&super::npc_glue::client_text_in(assets, "ini", "itemdatatable.txt")))
     }
 
     /// Objet AGPMITEM vu par l'échange ; vrai s'il ne concerne pas l'inventaire (objet de l'autre). Les siens
@@ -126,7 +156,19 @@ impl TradeGlue {
     pub fn take_item(&mut self, item: &ItemRecord, me: i32) -> bool {
         if item.operation == 1 {
             self.mine.remove(&item.id);
-            return self.theirs.remove(&item.id).is_some();
+            let ex = self.mine_ex.remove(&item.id).is_some() | self.theirs_ex.remove(&item.id).is_some();
+            return self.theirs.remove(&item.id).is_some() || ex;
+        }
+        // Grille Ex (statut 14) : jamais dans l'inventaire.
+        if item.status == Some(STATUS_TRADE_OPTION_GRID) {
+            let theirs = item.owner_cid.is_some_and(|o| o != me);
+            let list = if theirs { &mut self.theirs_ex } else { &mut self.mine_ex };
+            list.entry(item.id).or_insert_with(|| item.clone()).count = item.count.or(Some(1));
+            return true;
+        }
+        if item.status.is_some() && (self.mine_ex.remove(&item.id).is_some() || self.theirs_ex.remove(&item.id).is_some()) {
+            // Parchemin rendu à l'inventaire Cash (échange annulé).
+            return false;
         }
         if item.status == Some(STATUS_TRADE_GRID) {
             let theirs = item.owner_cid.is_some_and(|o| o != me) && !self.mine.contains_key(&item.id);
@@ -144,6 +186,15 @@ impl TradeGlue {
             self.mine.remove(&item.id);
         }
         false
+    }
+
+    /// Grille Ex : case = rang d'arrivée (la référence pose le parchemin en 1, 1, 1).
+    fn ex_slots(list: &BTreeMap<i32, ItemRecord>, assets: &Assets) -> Vec<TradeSlot> {
+        let mut out = Self::slots(list, assets);
+        for (i, s) in out.iter_mut().enumerate() {
+            s.grid = [0, i as i16, 0];
+        }
+        out
     }
 
     fn slots(list: &BTreeMap<i32, ItemRecord>, assets: &Assets) -> Vec<TradeSlot> {
@@ -167,6 +218,58 @@ pub fn item_requests(glue: &TradeGlue, requests: &mut Vec<ItemUi>, net: Option<&
         }
         false
     });
+}
+
+/// Décision de `PT_MoveItem` (`FUN_1407bf0f0`) pour un objet lâché sur sa grille d'échange.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum OfferCheck {
+    /// Op 9 avec ce genre de grille (champ 8).
+    Send(i32),
+    /// Refus sans message.
+    Silent,
+    /// Refus avec la boîte de cet événement.
+    Event(&'static str),
+}
+
+/// Ce qu'il faut savoir d'un objet proposé.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct OfferItem {
+    pub status: i8,
+    pub tid: i32,
+    pub row: ItemRow,
+    /// Drapeaux d'état (AGPMITEM champ 19).
+    pub flags: u32,
+    /// Objet Chantra entamé (mini Cash).
+    pub cash_used: bool,
+}
+
+/// Contrôles de `FUN_1407bf0f0` : `ex` = lâché sur la grille Ex ; `grid_bound` = un objet lié est déjà sur sa
+/// grille ; `ex_tids` = TID des parchemins de sa grille Ex.
+pub fn offer_check(item: OfferItem, ex: bool, grid_bound: bool, ex_tids: &[i32]) -> OfferCheck {
+    if !OFFER_STATUS.contains(&item.status) {
+        return OfferCheck::Silent;
+    }
+    let bound = item.flags & item_flag::BOUND_MASK != 0;
+    let kind = if ex {
+        if item.row.item_type != 1 || item.row.use_type != USE_PRIVATE_TRADE_OPTION || ex_tids.contains(&item.tid) {
+            return OfferCheck::Silent;
+        }
+        grid_kind::EX
+    } else if bound {
+        if grid_bound || ex_tids.is_empty() {
+            return OfferCheck::Event("Item_TradeFailForBoundItem");
+        }
+        grid_kind::BOUND
+    } else {
+        grid_kind::NORMAL
+    };
+    if item.row.cash && item.cash_used {
+        return OfferCheck::Event("Item_TradeFailForUsingCashItem");
+    }
+    if !ex && bound && item.flags & item_flag::BOUND_FOREVER != 0 {
+        return OfferCheck::Silent;
+    }
+    OfferCheck::Send(kind)
 }
 
 /// État lu avant l'image (le moteur est emprunté pendant le dessin) : joueur, entrée « Trade », refus.
@@ -205,7 +308,19 @@ fn request(glue: &mut TradeGlue, f: &TradeFrame, target: i32, name: String, asse
 
 /// Fenêtres de l'échange ; `chosen` : « Trade » choisi dans le menu du joueur ciblé.
 #[allow(clippy::too_many_arguments)]
-pub fn panel(ctx: &egui::Context, glue: &mut TradeGlue, f: &TradeFrame, chosen: Option<(i32, String)>, items: &HashMap<i32, ItemRecord>, hud: &mut HudState, assets: &Assets, net: Option<&NetLink>, ui: &mut UiState) {
+/// `flags` : drapeaux d'état des objets (AGPMITEM champ 19, `app_auction.rs`) ; `cash` : mini Cash (`app_petbag.rs`).
+pub fn panel(
+    ctx: &egui::Context,
+    glue: &mut TradeGlue,
+    f: &TradeFrame,
+    chosen: Option<(i32, String)>,
+    items: &HashMap<i32, ItemRecord>,
+    (flags, cash): (&HashMap<i32, u32>, &HashMap<i32, CashState>),
+    hud: &mut HudState,
+    assets: &Assets,
+    net: Option<&NetLink>,
+    ui: &mut UiState,
+) {
     if let Some((target, name)) = chosen {
         request(glue, f, target, name, assets, net, ui);
     }
@@ -238,13 +353,21 @@ pub fn panel(ctx: &egui::Context, glue: &mut TradeGlue, f: &TradeFrame, chosen: 
             }
         }
     }
+    if let Some(text) = glue.info.clone() {
+        if crate::hud::info_box(ctx, hud, assets, &text) {
+            glue.info = None;
+        }
+    }
     let Some((_, peer)) = glue.peer.clone() else { return };
     let (mine, theirs) = (TradeGlue::slots(&glue.mine, assets), TradeGlue::slots(&glue.theirs, assets));
+    let (mine_ex, theirs_ex) = (TradeGlue::ex_slots(&glue.mine_ex, assets), TradeGlue::ex_slots(&glue.theirs_ex, assets));
     let view = TradeView {
         me: &f.me,
         peer: &peer,
         mine: &mine,
         theirs: &theirs,
+        mine_ex: &mine_ex,
+        theirs_ex: &theirs_ex,
         my_gold: glue.my_gold,
         peer_gold: glue.peer_gold,
         my_cash: glue.my_cash,
@@ -282,11 +405,23 @@ pub fn panel(ctx: &egui::Context, glue: &mut TradeGlue, f: &TradeFrame, chosen: 
                 ui.show_inventory = false;
             }
             TradeUi::Gold => glue.money = Some(0),
-            TradeUi::Offer { drag, cell } => {
-                // Objet du sac seulement (statut 2 chez ArchRust ; 13, 15 et 51 aussi chez Archonia).
-                let from = items.get(&drag.iid).filter(|i| !drag.worn && !drag.bank && i.status == Some(2)).and_then(|i| i.grid);
-                if let (Some(from), false) = (from, glue.mine.contains_key(&drag.iid)) {
-                    send(TradeCommand::Add { iid: drag.iid, from, to: cell, kind: 0 });
+            TradeUi::Offer { drag, cell } | TradeUi::OfferEx { drag, cell } => {
+                let ex = matches!(a, TradeUi::OfferEx { .. });
+                let Some(item) = items.get(&drag.iid).filter(|_| !drag.worn && !drag.bank) else { continue };
+                if glue.mine.contains_key(&drag.iid) || glue.mine_ex.contains_key(&drag.iid) {
+                    continue;
+                }
+                let tid = item.template_id.unwrap_or(drag.tid);
+                let row = glue.rows(assets).get(&tid).copied().unwrap_or_default();
+                let used = cash.get(&item.id).is_some_and(|c| matches!(c.in_use, Some(in_use::YES | in_use::PAUSED)) || c.field3.unwrap_or(0) >= 1);
+                let offer = OfferItem { status: item.status.unwrap_or(-1), tid, row, flags: flags.get(&item.id).copied().unwrap_or(0), cash_used: used };
+                let grid_bound = glue.mine.keys().any(|iid| flags.get(iid).is_some_and(|f| f & item_flag::BOUND_MASK != 0));
+                let ex_tids: Vec<i32> = glue.mine_ex.values().filter_map(|i| i.template_id).collect();
+                match offer_check(offer, ex, grid_bound, &ex_tids) {
+                    // Case d'origine (l'inventaire Cash n'en a pas : 0, 0, 0).
+                    OfferCheck::Send(kind) => send(TradeCommand::Add { iid: drag.iid, from: item.grid.unwrap_or([0, 0, 0]), to: cell, kind }),
+                    OfferCheck::Silent => {}
+                    OfferCheck::Event(key) => glue.info = Some(glue.event(assets, key)).filter(|t| !t.is_empty()),
                 }
             }
         }
@@ -421,6 +556,46 @@ mod tests {
         assert!(g.theirs.is_empty());
         // Objet sans rapport.
         assert!(!g.take_item(&item(9, 2, Some(2), Some(1)), 1));
+    }
+
+    #[test]
+    fn grille_ex_et_objets_lies() {
+        let marvel = ItemRow { item_type: 1, use_type: USE_PRIVATE_TRADE_OPTION, cash: true, ..Default::default() };
+        let sword = ItemRow::default();
+        let scroll = OfferItem { status: 51, tid: 11256, row: marvel, ..Default::default() };
+        // Parchemin sur la grille Ex : genre 2, un seul de chaque TID.
+        assert_eq!(offer_check(scroll, true, false, &[]), OfferCheck::Send(grid_kind::EX));
+        assert_eq!(offer_check(scroll, true, false, &[11256]), OfferCheck::Silent);
+        assert_eq!(offer_check(OfferItem { tid: 14560, ..scroll }, true, false, &[11256]), OfferCheck::Send(grid_kind::EX));
+        // Autre objet sur la grille Ex : rien.
+        assert_eq!(offer_check(OfferItem { status: 2, tid: 190, row: sword, ..Default::default() }, true, false, &[]), OfferCheck::Silent);
+        // Objet lié : genre 1 avec un parchemin posé, un seul par échange.
+        let bound = OfferItem { status: 2, tid: 190, row: sword, flags: 1, cash_used: false };
+        assert_eq!(offer_check(bound, false, false, &[]), OfferCheck::Event("Item_TradeFailForBoundItem"));
+        assert_eq!(offer_check(bound, false, false, &[11256]), OfferCheck::Send(grid_kind::BOUND));
+        assert_eq!(offer_check(bound, false, true, &[11256]), OfferCheck::Event("Item_TradeFailForBoundItem"));
+        assert_eq!(offer_check(OfferItem { flags: 1 | item_flag::BOUND_FOREVER, ..bound }, false, false, &[11256]), OfferCheck::Silent);
+        // Objet ordinaire ; Chantra entamé ; statut d'origine.
+        let plain = OfferItem { flags: 0, ..bound };
+        assert_eq!(offer_check(plain, false, true, &[]), OfferCheck::Send(grid_kind::NORMAL));
+        assert_eq!(offer_check(OfferItem { status: 51, row: ItemRow { cash: true, ..sword }, cash_used: true, ..plain }, false, false, &[]), OfferCheck::Event("Item_TradeFailForUsingCashItem"));
+        assert_eq!(offer_check(OfferItem { status: 3, ..plain }, false, false, &[]), OfferCheck::Silent, "porté");
+        assert_eq!(offer_check(OfferItem { status: 13, ..plain }, false, false, &[]), OfferCheck::Send(0));
+    }
+
+    #[test]
+    fn parchemin_de_la_grille_ex() {
+        let mut g = TradeGlue::default();
+        // Retiré de l'inventaire Cash (op 1), puis renvoyé au statut 14 : jamais dans l'inventaire.
+        assert!(!g.take_item(&item(70, 1, None, Some(1)), 1));
+        assert!(g.take_item(&item(70, 0, Some(STATUS_TRADE_OPTION_GRID), Some(1)), 1));
+        assert!(g.mine_ex.contains_key(&70));
+        assert!(g.take_item(&item(71, 0, Some(STATUS_TRADE_OPTION_GRID), Some(2)), 1));
+        assert!(g.theirs_ex.contains_key(&71));
+        // Échange fait : consommé (op 1) ; annulé : rendu à l'inventaire Cash.
+        assert!(g.take_item(&item(71, 1, None, Some(2)), 1));
+        assert!(!g.take_item(&item(70, 0, Some(51), Some(1)), 1));
+        assert!(g.mine_ex.is_empty() && g.theirs_ex.is_empty());
     }
 
     #[test]

@@ -224,8 +224,20 @@ impl RefineryGlue {
             let line = format!("{rname} {n}{}", d.sys(11));
             text.push_str(&if have.get(tid).copied().unwrap_or(0) < *n { format!("<HFF0000>{line}<HFFFFFF>___") } else { format!("{line}___") });
         }
-        let price = format!("{}: {} Gold", d.sys(3), r.price);
-        text.push_str(&if money < r.price { format!("<HFF0000>{price}<HFFFFFF>___") } else { format!("{price}___") });
+        // « %s: %s Gold » (« Gold » écrit en dur dans Archonia), prix groupé par des points
+        // (FUN_1407496f0) ; pas de ligne pour une recette gratuite.
+        if r.price > 0 {
+            let digits = r.price.to_string();
+            let mut grouped = String::new();
+            for (i, ch) in digits.chars().enumerate() {
+                if i > 0 && (digits.len() - i) % 3 == 0 {
+                    grouped.push('.');
+                }
+                grouped.push(ch);
+            }
+            let price = format!("{}: {grouped} Gold", d.sys(3));
+            text.push_str(&if money < r.price { format!("<HFF0000>{price}<HFFFFFF>___") } else { format!("{price}___") });
+        }
         (text, merged)
     }
 

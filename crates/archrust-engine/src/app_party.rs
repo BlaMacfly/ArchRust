@@ -143,7 +143,8 @@ impl App {
         log::info!("[groupe] {}", notice.message(&self.party.state));
         // Messages de l'[EventMap] d'Archonia : boîtes `PartyRecv*` (`Action=4:0`), lignes système
         // `PartyChangeLeader`, `PartyOptionUI_RecvInviteNoLoginMember` (`Action=4:3`) ; `Option_Party_Off_User`
-        // d'uimessage. Arrivée, départ d'un membre et changements de répartition : rien (non relevé).
+        // d'uimessage. Arrivée, départ d'un membre et changements de répartition : Archonia n'écrit rien
+        // (aucun événement ni clé uimessage ; seuls les bonus `Party_Add_*`, non calculés ici).
         let assets = self.assets.clone();
         let mut event = |key: &str| super::portal_glue::ui_event_cached(&mut self.party.events, &assets, key);
         let (boxed, text) = match &notice {
@@ -167,7 +168,8 @@ impl App {
                 archrust_netclient::party::mgmt::FAILED_FULL => (true, event("PartyRecvMemberFull")),
                 archrust_netclient::party::mgmt::FAILED_NOT_LEADER => (true, event("PartyRecvNotLeader")),
                 archrust_netclient::party::mgmt::FAILED_NO_LOGIN => (false, super::guild_glue::fill_braces(&event("PartyOptionUI_RecvInviteNoLoginMember"), name)),
-                archrust_netclient::party::mgmt::FAILED_REFUSE => (false, notice.message(&self.party.state)),
+                // FUN_1405e45f0 : uimessage `Option_Party_Off_User` (« %s bloque… ») en ligne système.
+                archrust_netclient::party::mgmt::FAILED_REFUSE => (false, crate::hud::ui_message(&mut self.hud, &assets, "Option_Party_Off_User").replacen("%s", name, 1)),
                 _ => (true, event("PartyRecvOperationFailed")),
             },
             _ => (false, String::new()),
@@ -176,6 +178,13 @@ impl App {
             self.party.info = Some(text).filter(|t| !t.is_empty());
         } else {
             self.hud.push_system(&text);
+        }
+        // Groupe créé ou rejoint (FUN_1405e30a0) : uimessage `Party_Create_Message` puis `Party_Create_Message_2`.
+        if let PartyNotice::Joined = &notice {
+            for key in ["Party_Create_Message", "Party_Create_Message_2"] {
+                let line = crate::hud::ui_message(&mut self.hud, &self.assets, key);
+                self.hud.push_system(&line);
+            }
         }
         // `PartyOpenRequestRecallUI` : `UI_ConfirmRecall` (dessinée par `panel` tant que la demande attend) et son son.
         if let PartyNotice::RecallRequested(_) = &notice {

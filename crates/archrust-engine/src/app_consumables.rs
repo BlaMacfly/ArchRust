@@ -29,6 +29,29 @@
 //!   (AGPMCHARACTER champ 19) est vide ; réponse op 9 (`FUN_1405dcc40`) : 0 boîte `Skill_SkillInitialize_Success`,
 //!   1 boîte `Skill_SkillInitialize_Failed`, 2 boîte `sysstr` 748.
 //!
+//! * **Return Orb** (usage 13, EP8) : bouton « Reset Selected » de `UI_Skill`, `UI_SkillHighLevel` et des fenêtres
+//!   héroïques et du Scion, voir `app_skills.rs` (`Skill_ActiveRollbackButton` FUN_1405da000 : compétence
+//!   remboursable FUN_1402bcc70 / FUN_1402bd5f0 et orbe dans l'inventaire, FUN_140315d80, ou l'inventaire Cash,
+//!   FUN_14030d8d0) ; confirmation puis AGPMSKILL op 13 (identifiant de la compétence, sans l'IID de l'orbe) ;
+//! * **Secret Safe** (usage 21) : refus local si les pages de banque en plus (AGPMCHARACTER champ 23, `+0x6d8`)
+//!   sont ≥ 3 (`FUN_1403148b0`) → boîte `BankSlotFull` ; sinon op 3 ;
+//! * **feux d'artifice** (usage 22) : à l'op 4, pour soi comme pour les voisins, les données `AgcmEventEffect` du
+//!   modèle de l'objet (`ItemTemplateAll.ini` : `AGCMEVENTEFFECT_EFFECT_DATA*` et `…_SOUND_DATA*`, EID 5002 et
+//!   IS0023.WAV pour les quinze feux) sont jouées sur l'utilisateur ; la condition qui les déclenche dans Archonia
+//!   n'est pas relevée (D : toutes les données du modèle) ;
+//! * **Fortune Manual** (usage 25) : allumé = objet de l'inventaire Cash d'usage 25, `SubType` 0, « en cours
+//!   d'utilisation » (`+0x4f4` = 1, champ 0 du mini Cash ; `FUN_14030c3d0`), affiché comme tel par `UI_CashInven`
+//!   (`app_petbag.rs`) ; aucun autre affichage dans Archonia (FUN_14017fad0 n'en fait rien de visible) ;
+//! * **Release of Agreement** (usage 28) : glissé sur un équipement du sac (`Inventory_MoveItem` FUN_1407bc460) ;
+//!   `FUN_14032dfc0` : `ItemType` 0, au moins une pierre sertie, `Kind` 1, 4, 8, 16, 64, ou arme (2) hors lance
+//!   (`Type` 17), sinon boîte `Item_Not_Socket_Initializable` ; confirmation puis AGPMITEMCONVERT op 12 (CID,
+//!   IID de l'équipement, IID de l'objet). Archonia demande deux confirmations en anglais codées en dur
+//!   (FUN_1407c18f0, ajout d'Archonia) : ArchRust montre la seule boîte de l'épisode 8, `Item_Socket_Init_Confirm`
+//!   d'uimessage ;
+//! * **Signature of Glory** (usage 26) : AGPMCHARACTER champ 27 (CHAR[16], `+0xf1`) d'un joueur, dessinée sur sa
+//!   plaque de nom (FUN_140826450, voir `app_boards.rs`) ; `/nick`, `/go`, `/safekeeper`, `/merchant` (sysstr 661 à
+//!   663, usages 24 et 26) partent tels quels dans la discussion, comme toute commande inconnue du client.
+//!
 //! Choix d'ArchRust : aucun contrôle d'`UI_1024X768.ini` n'appelle `Skill_TreeInitialize` ; l'oubli chez le maître
 //! se demande par `/oublier` (`/skillinit`). Écarts : le drapeau `+0x218 & 8` qui fait préférer un orbe de
 //! l'inventaire, le bit 0x2000 de la compétence exclu du compte de `FUN_1402ba630` et la recharge des cases
@@ -37,7 +60,7 @@
 
 use super::App;
 use crate::assets::Assets;
-use crate::hud::{HudState, ItemUi};
+use crate::hud::{HudState, ItemDrag, ItemUi};
 use crate::net::NetLink;
 use crate::ui::UiState;
 use archrust_netclient::consumables::{init_result, ConsumableCommand, ConsumableEvent, REVERSE_ORB_REUSE_MS};
@@ -50,10 +73,24 @@ use std::time::{Duration, Instant};
 
 /// Usages (`Type` d'itemdatatable, objets d'`ItemType` 1).
 const USE_SKILL_SCROLL: i64 = 12;
+/// Return Orb (`SKILLROLLBACK_SCROLL`).
+const USE_SKILL_ROLLBACK: i64 = 13;
 const USE_REVERSE_ORB: i64 = 14;
 /// Rappel de groupe (`RECALL_PARTY` : Summoning Orb, Bead of Summoning…).
 const USE_RECALL_PARTY: i64 = 15;
 const USE_SKILL_INIT: i64 = 27;
+/// Secret Safe (`ADD_BANK_SLOT`), feux d'artifice (`USE_EFFECT`), Fortune Manual (`LUCKY_SCROLL`), Release of
+/// Agreement (`SOCKET_INIT`).
+const USE_ADD_BANK_SLOT: i64 = 21;
+const USE_EFFECT: i64 = 22;
+const USE_LUCKY_SCROLL: i64 = 25;
+const USE_SOCKET_INIT: i64 = 28;
+/// Pages de banque en plus au-delà desquelles le Secret Safe est refusé (`FUN_1403148b0` : `+0x6d8` ≥ 3).
+const SECRET_SAFE_MAX_PAGES: i32 = 3;
+/// Genres reçus par `FUN_14032dfc0` (masque 0x8000000000008089 sur `Kind` − 1), arme (2) hors lance (`Type` 17).
+const SOCKET_INIT_KINDS: [i64; 5] = [1, 4, 8, 16, 64];
+const KIND_WEAPON: i64 = 2;
+const WEAPON_LANCE: i64 = 17;
 /// Statuts AgpmItem parcourus par `FUN_1401c7660`.
 const STATUS_INVENTORY: i8 = 2;
 const STATUS_SUB_INVENTORY: i8 = 13;
@@ -62,6 +99,10 @@ const STATUS_CASH_INVENTORY: i8 = 51;
 const REGION_RESURRECTION: i64 = 0x100;
 /// Sûreté (bits 2-3 du `Type`) où seul un orbe Cash sert.
 const SAFETY_ORB_CASH_ONLY: i64 = 2;
+/// Commandes des objets d'usage 24 et 26 : `/go` (texte libre, absent de sysstr) et sysstr 661 `/nick`, 662
+/// `/merchant`, 663 `/safekeeper`.
+const JUMP_COMMAND: &str = "/go";
+const ITEM_COMMANDS: [u32; 3] = [661, 662, 663];
 /// « The Skill Reset failed because you do not have enough room to store your Refund. »
 const SYSSTR_NO_ROOM: u32 = 748;
 
@@ -82,6 +123,9 @@ pub struct ItemRow {
     /// Premier `Use skill id` (`+0x460`) et `Use skill level` (`+0x488`).
     pub skill_tid: i32,
     pub skill_level: i32,
+    /// `Kind` (`+0x3cc`) et `SubType`.
+    pub kind: i64,
+    pub sub_type: i64,
 }
 
 impl ItemRow {
@@ -116,6 +160,7 @@ pub fn parse_items(text: &str) -> HashMap<i32, ItemRow> {
     let col = |name: &str| cols.iter().position(|c| c.eq_ignore_ascii_case(name));
     let (tid, item_type, use_type, level, cash) = (col("TID"), col("ItemType"), col("Type"), col("Level"), col("Cash"));
     let (interval, count, time, skill, skill_level) = (col("Use Interval"), col("Apply Effect Count"), col("Apply Effect Time"), col("Use skill id"), col("Use skill level"));
+    let (kind, sub_type) = (col("Kind"), col("SubType"));
     for line in lines {
         let cells: Vec<&str> = line.split('\t').collect();
         let cell = |c: Option<usize>| c.and_then(|i| cells.get(i)).map(|v| v.trim()).unwrap_or("");
@@ -140,6 +185,8 @@ pub fn parse_items(text: &str) -> HashMap<i32, ItemRow> {
                 effect_time_ms: num(time).max(0) as u64,
                 skill_tid: num(skill) as i32,
                 skill_level: num(skill_level) as i32,
+                kind: num(kind),
+                sub_type: num(sub_type),
             },
         );
     }
@@ -210,11 +257,14 @@ pub enum UseCheck {
     NoOwnSkill,
     /// Gem of origin : boîte `SkillInitConfirm` avant l'envoi.
     Confirm,
+    /// Secret Safe avec trois pages en plus : boîte `BankSlotFull` (« Cannot expand storage. »).
+    BankSlotFull,
 }
 
 /// Contrôle d'une utilisation : `evolution_lock` = Dragon Scion d'une autre classe que Scion (refus laissé à
-/// `app_morph.rs`, qui l'affiche) ; `region_type` comme [`orb_active`].
-pub fn use_check(row: ItemRow, dead: bool, evolution_lock: bool, paid_skills: usize, region_type: Option<i64>) -> UseCheck {
+/// `app_morph.rs`, qui l'affiche) ; `region_type` comme [`orb_active`] ; `bank_pages` : pages de banque en plus
+/// (AGPMCHARACTER champ 23).
+pub fn use_check(row: ItemRow, dead: bool, evolution_lock: bool, paid_skills: usize, region_type: Option<i64>, bank_pages: i32) -> UseCheck {
     if row.item_type != 1 {
         return UseCheck::Send;
     }
@@ -225,8 +275,57 @@ pub fn use_check(row: ItemRow, dead: bool, evolution_lock: bool, paid_skills: us
         USE_SKILL_INIT if evolution_lock => UseCheck::Send,
         USE_SKILL_INIT if paid_skills < 1 => UseCheck::NoOwnSkill,
         USE_SKILL_INIT => UseCheck::Confirm,
+        USE_ADD_BANK_SLOT if bank_pages >= SECRET_SAFE_MAX_PAGES => UseCheck::BankSlotFull,
         _ => UseCheck::Send,
     }
+}
+
+/// Return Orb de l'inventaire (statut 2, grille à couches de `FUN_140315d80`) ou de l'inventaire Cash (51,
+/// `FUN_14030d8d0`), comme le contrôle de `Skill_ActiveRollbackButton`.
+pub fn has_return_orb(items: &HashMap<i32, ItemRecord>, rows: &HashMap<i32, ItemRow>) -> bool {
+    items.values().any(|i| {
+        matches!(i.status, Some(STATUS_INVENTORY | STATUS_CASH_INVENTORY)) && i.template_id.and_then(|t| rows.get(&t)).is_some_and(|r| r.item_type == 1 && r.use_type == USE_SKILL_ROLLBACK)
+    })
+}
+
+/// Fortune Manual allumé (`FUN_14030c3d0`) : objet de l'inventaire Cash d'usage 25, `SubType` 0, « en cours
+/// d'utilisation » ; le plus petit IID s'il y en a plusieurs.
+pub fn lit_fortune_manual(items: &HashMap<i32, ItemRecord>, rows: &HashMap<i32, ItemRow>, lit: &dyn Fn(i32) -> bool) -> Option<i32> {
+    items
+        .values()
+        .filter(|i| i.status == Some(STATUS_CASH_INVENTORY) && lit(i.id))
+        .filter(|i| i.template_id.and_then(|t| rows.get(&t)).is_some_and(|r| r.item_type == 1 && r.use_type == USE_LUCKY_SCROLL && r.sub_type == 0))
+        .map(|i| i.id)
+        .min()
+}
+
+/// Équipement dont un Release of Agreement peut rompre les liens de contrat (`FUN_14032dfc0`) : `filled` = pierres
+/// serties.
+pub fn socket_initializable(row: ItemRow, filled: usize) -> bool {
+    row.item_type == 0 && filled > 0 && (SOCKET_INIT_KINDS.contains(&row.kind) || (row.kind == KIND_WEAPON && row.use_type != WEAPON_LANCE))
+}
+
+/// Données `AgcmEventEffect` d'un modèle d'objet (`ItemTemplateAll.ini`) : effets
+/// (`AGCMEVENTEFFECT_EFFECT_DATA*` = « condition:EID:x:y:z:échelle:nœud:délai ») et sons
+/// (`AGCMEVENTEFFECT_SOUND_DATA*` = « condition:fichier »), toutes conditions confondues.
+pub fn item_event_effects(header: &[(String, String)], section: &[(String, String)]) -> (Vec<(u32, [f32; 3], f32, i32, u32)>, Vec<String>) {
+    let name_of = |k: &str| header.iter().find(|(h, _)| h == k).map_or("", |(_, v)| v.as_str());
+    let (mut effects, mut sounds) = (Vec::new(), Vec::new());
+    for (k, v) in section {
+        let name = name_of(k);
+        let f: Vec<&str> = v.split(':').map(str::trim).collect();
+        if name.starts_with("AGCMEVENTEFFECT_EFFECT_DATA") {
+            let num = |i: usize| f.get(i).and_then(|x| x.parse::<f32>().ok()).unwrap_or(0.0);
+            let Some(eid) = f.get(1).and_then(|x| x.parse::<u32>().ok()).filter(|e| *e > 0) else { continue };
+            let scale = Some(num(5)).filter(|s| *s > 0.0).unwrap_or(1.0);
+            effects.push((eid, [num(2), num(3), num(4)], scale, num(6) as i32, num(7).clamp(0.0, 60_000.0) as u32));
+        } else if name.starts_with("AGCMEVENTEFFECT_SOUND_DATA") {
+            if let Some(file) = f.get(1).filter(|x| !x.is_empty()) {
+                sounds.push(file.to_string());
+            }
+        }
+    }
+    (effects, sounds)
 }
 
 /// Message de l'op 4 d'un objet d'usage 12 (`FUN_14053f540`) : clé de l'événement et pourcentage.
@@ -288,7 +387,12 @@ struct Me {
     region: Option<u16>,
     evolution_lock: bool,
     paid_skills: usize,
+    /// Pages de banque en plus (AGPMCHARACTER champ 23).
+    bank_pages: i32,
 }
+
+/// Effets et sons d'un modèle d'objet (voir [`item_event_effects`]).
+type ItemEffects = (Vec<super::effects_glue::Placed>, Vec<String>);
 
 #[derive(Default)]
 pub struct ConsumablesGlue {
@@ -306,6 +410,14 @@ pub struct ConsumablesGlue {
     reuse: HashMap<i32, (Instant, Duration)>,
     /// Fin de la recharge de l'orbe (op 18).
     orb_reuse_end: Option<Instant>,
+    /// Release of Agreement en attente d'`Item_Socket_Init_Confirm` : IID de l'équipement et de l'objet.
+    socket_confirm: Option<(i32, i32)>,
+    /// Signatures des personnages (AGPMCHARACTER champ 27), par CID.
+    signatures: HashMap<i32, String>,
+    /// Effets des modèles d'objets utilisés (usage 22), par TID.
+    item_effects: HashMap<i32, ItemEffects>,
+    /// Fortune Manual allumé (IID), pour le journal.
+    fortune_manual: Option<i32>,
 }
 
 impl ConsumablesGlue {
@@ -326,7 +438,7 @@ impl ConsumablesGlue {
     fn check(&mut self, iid: i32, items: &HashMap<i32, ItemRecord>, hud: &mut HudState, assets: &Assets, ui: &mut UiState) -> bool {
         let row = self.row(assets, items.get(&iid).and_then(|i| i.template_id));
         let region_type = self.region_type(assets);
-        match use_check(row, self.me.dead, self.me.evolution_lock, self.me.paid_skills, region_type) {
+        match use_check(row, self.me.dead, self.me.evolution_lock, self.me.paid_skills, region_type, self.me.bank_pages) {
             UseCheck::Send => true,
             UseCheck::Silent => {
                 log::info!("objet {iid} : utilisation refusée par le client (FUN_14053d0b0)");
@@ -343,7 +455,49 @@ impl ConsumablesGlue {
                 self.gem_confirm = Some(iid);
                 false
             }
+            UseCheck::BankSlotFull => {
+                // Événement `BankSlotFull` (`Action=4:0`) : boîte d'information.
+                self.info = Some(super::portal_glue::ui_event_text(assets, "BankSlotFull")).filter(|t| !t.is_empty());
+                false
+            }
         }
+    }
+
+    /// Release of Agreement `drag` lâché sur la case `grid` du sac (`FUN_1407bc460`) : `true` si la demande est prise
+    /// (confirmation ou refus), `false` si elle n'en est pas une.
+    fn socket_init_drop(&mut self, drag: ItemDrag, grid: [i16; 3], items: &HashMap<i32, ItemRecord>, filled: &dyn Fn(i32) -> usize, hud: &mut HudState, assets: &Assets) -> bool {
+        if drag.worn || drag.bank {
+            return false;
+        }
+        let row = self.row(assets, items.get(&drag.iid).and_then(|i| i.template_id).or(Some(drag.tid)));
+        if row.item_type != 1 || row.use_type != USE_SOCKET_INIT {
+            return false;
+        }
+        let Some(target) = items.values().find(|i| i.status == Some(STATUS_INVENTORY) && i.grid == Some(grid) && i.id != drag.iid) else { return false };
+        let target_row = self.row(assets, target.template_id);
+        if socket_initializable(target_row, filled(target.id)) {
+            self.socket_confirm = Some((target.id, drag.iid));
+        } else {
+            self.info = Some(crate::hud::ui_message(hud, assets, "Item_Not_Socket_Initializable")).filter(|t| !t.is_empty());
+        }
+        true
+    }
+
+    /// Effets et sons du modèle `tid` (lus une fois dans `ItemTemplateAll.ini`).
+    fn item_effects(&mut self, assets: &Assets, tid: i32) -> ItemEffects {
+        self.item_effects
+            .entry(tid)
+            .or_insert_with(|| {
+                let Ok(t) = assets.table("ini", "ItemTemplateAll.ini") else { return (Vec::new(), Vec::new()) };
+                let (Some(header), Some(sec)) = (t.section(""), t.section(&tid.to_string())) else { return (Vec::new(), Vec::new()) };
+                let (effects, sounds) = item_event_effects(&header.entries, &sec.entries);
+                let placed = effects
+                    .into_iter()
+                    .map(|(eid, o, scale, node, delay)| super::effects_glue::Placed { eid, offset: glam::Vec3::from(o), scale, node, delay })
+                    .collect();
+                (placed, sounds)
+            })
+            .clone()
     }
 }
 
@@ -355,9 +509,12 @@ fn send(net: Option<&NetLink>, cmd: Command) {
 
 /// Demandes de l'inventaire : refus et confirmation de l'orbe et de la Gem of origin, avant `app_morph.rs` (le
 /// refus d'un mort passe avant celui de l'évolution, comme dans `FUN_14053d0b0`).
-pub fn item_requests(glue: &mut ConsumablesGlue, items: &HashMap<i32, ItemRecord>, requests: &mut Vec<ItemUi>, hud: &mut HudState, assets: &Assets, ui: &mut UiState) {
+/// Un Release of Agreement lâché sur un équipement du sac passe par sa confirmation (`filled` : pierres serties de
+/// l'objet, état de `app_convert.rs`) au lieu d'un déplacement.
+pub fn item_requests(glue: &mut ConsumablesGlue, items: &HashMap<i32, ItemRecord>, filled: &dyn Fn(i32) -> usize, requests: &mut Vec<ItemUi>, hud: &mut HudState, assets: &Assets, ui: &mut UiState) {
     requests.retain(|r| match *r {
         ItemUi::Activate { iid, worn: false } => glue.check(iid, items, hud, assets, ui),
+        ItemUi::DropOnBag { drag, grid } => !glue.socket_init_drop(drag, grid, items, filled, hud, assets),
         _ => true,
     });
 }
@@ -397,6 +554,16 @@ pub fn panel(ctx: &egui::Context, glue: &mut ConsumablesGlue, items: &HashMap<i3
             }
         }
     }
+    // Release of Agreement : `Item_Socket_Init_Confirm`, OK → AGPMITEMCONVERT op 12.
+    if let Some((equip, item)) = glue.socket_confirm {
+        let text = crate::hud::ui_message(hud, assets, "Item_Socket_Init_Confirm");
+        if let Some(answer) = crate::hud::confirm_box(ctx, hud, assets, ("archrust-socket-init", equip, item), &text) {
+            glue.socket_confirm = None;
+            if answer && items.contains_key(&equip) && items.contains_key(&item) {
+                send(net, Command::Consumable(ConsumableCommand::SocketInit { equip, item }));
+            }
+        }
+    }
     if let Some(text) = glue.info.clone() {
         if crate::hud::info_box(ctx, hud, assets, &text) {
             glue.info = None;
@@ -423,7 +590,17 @@ impl App {
             region: self.zone_region.as_ref().map(|z| z.region),
             evolution_lock: matches!(race_class(&self.hud), Some((4, class)) if class != 3),
             paid_skills,
+            bank_pages: self.hud.stats.bank_pages.unwrap_or(0) as i32,
         };
+        // Fortune Manual allumé ou éteint (`FUN_14030c3d0`) : relevé au journal.
+        let assets = self.assets.clone();
+        let rows = &self.consumables.data.get_or_insert_with(|| load_data(&assets)).items;
+        let cash = &self.petbag.cash;
+        let lit = lit_fortune_manual(&self.items, rows, &|iid| cash.get(&iid).and_then(|c| c.in_use) == Some(archrust_netclient::pet_bag::in_use::YES));
+        if lit != self.consumables.fortune_manual {
+            log::info!("Fortune Manual : {}", lit.map_or("éteint".to_string(), |iid| format!("objet {iid} allumé")));
+            self.consumables.fortune_manual = lit;
+        }
         // `FUN_1404f86a0` : niveau > 5 et hors guerre de siège de sa guilde (`+0x760` ≠ 2 : attache au sens inconnu,
         // supposée vraie).
         self.combat.town_confirm = dead && level > 5 && !self.siege_war_participant();
@@ -433,6 +610,17 @@ impl App {
     pub(super) fn consumables_intercepts(&mut self, iid: i32) -> bool {
         let assets = self.assets.clone();
         !self.consumables.check(iid, &self.items, &mut self.hud, &assets, &mut self.ui)
+    }
+
+    /// Return Orb (usage 13) dans l'inventaire ou l'inventaire Cash (`Skill_ActiveRollbackButton`).
+    pub(super) fn consumables_has_return_orb(&mut self) -> bool {
+        let assets = self.assets.clone();
+        has_return_orb(&self.items, &self.consumables.data(&assets).items)
+    }
+
+    /// Signature (AGPMCHARACTER champ 27) du personnage `cid`, si elle n'est pas vide.
+    pub(super) fn consumables_signature(&self, cid: i32) -> Option<String> {
+        self.consumables.signatures.get(&cid).filter(|s| !s.is_empty()).cloned()
     }
 
     /// Recharge d'un objet `tid` pour la barre : part restante et secondes.
@@ -464,9 +652,20 @@ impl App {
                 let data = self.consumables.data.take();
                 self.consumables = ConsumablesGlue { data, ..Default::default() };
             }
+            // Feux d'artifice (usage 22) : effet du modèle sur l'utilisateur, soi ou un voisin.
+            WorldEvent::ItemUsed { tid: Some(tid), user: Some(user), .. } if *user != me && me != 0 => {
+                let assets = self.assets.clone();
+                let row = self.consumables.row(&assets, Some(*tid));
+                if row.item_type == 1 && row.use_type == USE_EFFECT {
+                    self.consumables_play_item_effects(*tid, *user);
+                }
+            }
             WorldEvent::ItemUsed { tid: Some(tid), user, .. } if user.is_none_or(|u| u == me || me == 0) => {
                 let assets = self.assets.clone();
                 let row = self.consumables.row(&assets, Some(*tid));
+                if row.item_type == 1 && row.use_type == USE_EFFECT {
+                    self.consumables_play_item_effects(*tid, me);
+                }
                 if row.item_type == 1 && row.use_type == USE_REVERSE_ORB {
                     let name = self.player.as_ref().map(|p| p.name.clone()).unwrap_or_default();
                     let text = super::guild_glue::fill_braces(&super::portal_glue::ui_event_text(&assets, "Item_UseSuccessReverseOrb"), &name);
@@ -496,6 +695,20 @@ impl App {
         }
     }
 
+    /// Effets et sons du modèle d'objet `tid` sur le personnage `cid` (op 4 d'un objet d'usage 22).
+    fn consumables_play_item_effects(&mut self, tid: i32, cid: i32) {
+        let assets = self.assets.clone();
+        let (placed, sounds) = self.consumables.item_effects(&assets, tid);
+        log::debug!("objet {tid} utilisé par {cid} : {} effet(s), {} son(s)", placed.len(), sounds.len());
+        self.effects_play_item(cid, &placed);
+        let near = cid == self.player.as_ref().map_or(0, |p| p.cid) || self.entities.iter().any(|e| e.cid == cid);
+        if near {
+            for s in sounds {
+                self.audio.play_effect(&format!("sound/effect/{s}"));
+            }
+        }
+    }
+
     /// Annonces de `consumables`.
     pub(super) fn on_consumable_event(&mut self, ev: ConsumableEvent) {
         let me = self.player.as_ref().map_or(0, |p| p.cid);
@@ -522,12 +735,29 @@ impl App {
                 log::info!("oubli des compétences : résultat {result}");
                 self.consumables.info = Some(text).filter(|t| !t.is_empty());
             }
+            // Signature : Archonia ne recopie qu'une chaîne non vide (FUN_140175bb0).
+            ConsumableEvent::Signature { cid, text } => {
+                if !text.is_empty() {
+                    self.consumables.signatures.insert(cid, text);
+                }
+            }
             ConsumableEvent::UseFailed { .. } | ConsumableEvent::ReverseOrbReuse { .. } | ConsumableEvent::SkillInit { .. } => {}
         }
     }
 
-    /// `/oublier` (`/skillinit`) : oubli des compétences chez le maître (`Skill_TreeInitialize`).
-    pub(super) fn consumables_slash(&mut self, cmd: &str) -> bool {
+    /// `/oublier` (`/skillinit`) : oubli des compétences chez le maître (`Skill_TreeInitialize`). `/go nom`, et les
+    /// commandes de sysstr 661 (`/nick`), 662 (`/merchant`), 663 (`/safekeeper`) des objets d'usage 24 et 26 : la ligne
+    /// `text` telle quelle dans la discussion (AgpmChatting), où le serveur la lit ; aucun contrôle du client relevé.
+    pub(super) fn consumables_slash(&mut self, cmd: &str, text: &str) -> bool {
+        let assets = self.assets.clone();
+        let item_command = cmd.eq_ignore_ascii_case(JUMP_COMMAND) || ITEM_COMMANDS.iter().filter_map(|id| super::npc_glue::sysstr(&assets, *id)).any(|c| c.trim().eq_ignore_ascii_case(cmd));
+        if item_command {
+            match &self.net {
+                Some(net) => net.send(Command::Say(text.to_string())),
+                None => self.ui.push_chat(format!("[système] {cmd} : hors ligne")),
+            }
+            return true;
+        }
         if !matches!(cmd, "/oublier" | "/skillinit") {
             return false;
         }
@@ -596,15 +826,74 @@ mod tests {
     #[test]
     fn refus_avant_l_envoi() {
         let gem = ItemRow { item_type: 1, use_type: USE_SKILL_INIT, ..Default::default() };
-        assert_eq!(use_check(gem, true, false, 3, None), UseCheck::Silent);
-        assert_eq!(use_check(gem, false, true, 3, None), UseCheck::Send, "évolution : refus de app_morph");
-        assert_eq!(use_check(gem, false, false, 0, None), UseCheck::NoOwnSkill);
-        assert_eq!(use_check(gem, false, false, 1, None), UseCheck::Confirm);
+        assert_eq!(use_check(gem, true, false, 3, None, 0), UseCheck::Silent);
+        assert_eq!(use_check(gem, false, true, 3, None, 0), UseCheck::Send, "évolution : refus de app_morph");
+        assert_eq!(use_check(gem, false, false, 0, None, 0), UseCheck::NoOwnSkill);
+        assert_eq!(use_check(gem, false, false, 1, None, 0), UseCheck::Confirm);
         let orb = ItemRow { item_type: 1, use_type: USE_REVERSE_ORB, ..Default::default() };
-        assert_eq!(use_check(orb, false, false, 0, None), UseCheck::Silent, "vivant");
-        assert_eq!(use_check(orb, true, false, 0, Some(0x108)), UseCheck::Silent, "sûreté 2 sans Cash");
-        assert_eq!(use_check(ItemRow { cash: true, ..orb }, true, false, 0, Some(0x108)), UseCheck::Send);
-        assert_eq!(use_check(ItemRow { item_type: 1, use_type: 4, ..Default::default() }, true, false, 0, None), UseCheck::Send);
+        assert_eq!(use_check(orb, false, false, 0, None, 0), UseCheck::Silent, "vivant");
+        assert_eq!(use_check(orb, true, false, 0, Some(0x108), 0), UseCheck::Silent, "sûreté 2 sans Cash");
+        assert_eq!(use_check(ItemRow { cash: true, ..orb }, true, false, 0, Some(0x108), 0), UseCheck::Send);
+        assert_eq!(use_check(ItemRow { item_type: 1, use_type: 4, ..Default::default() }, true, false, 0, None, 0), UseCheck::Send);
+        // Secret Safe : refus local à trois pages en plus (`FUN_1403148b0`), le serveur juge du reste.
+        let safe = ItemRow { item_type: 1, use_type: USE_ADD_BANK_SLOT, ..Default::default() };
+        assert_eq!(use_check(safe, false, false, 0, None, 0), UseCheck::Send);
+        assert_eq!(use_check(safe, false, false, 0, None, 2), UseCheck::Send);
+        assert_eq!(use_check(safe, false, false, 0, None, 3), UseCheck::BankSlotFull);
+        // Return Orb, Release of Agreement, feux : op 3 sans contrôle propre (`FUN_14053d0b0` rend 1).
+        for u in [USE_SKILL_ROLLBACK, USE_EFFECT, USE_LUCKY_SCROLL, USE_SOCKET_INIT] {
+            assert_eq!(use_check(ItemRow { item_type: 1, use_type: u, ..Default::default() }, false, false, 0, None, 3), UseCheck::Send);
+        }
+    }
+
+    #[test]
+    fn return_orb_et_fortune_manual() {
+        let rows = parse_items("TID\tItemType\tType\tSubType\tCash\n1171\t1\t13\t\t1\n2757\t1\t13\t\t\n4569\t1\t25\t0\t1\n4570\t1\t25\t1\t1\n");
+        let mut items = HashMap::new();
+        assert!(!has_return_orb(&items, &rows));
+        items.insert(1, record(1, 2757, 7, [0, 0, 0]));
+        assert!(!has_return_orb(&items, &rows), "ni l'inventaire ni l'inventaire Cash");
+        items.insert(2, record(2, 1171, STATUS_CASH_INVENTORY, [0, 0, 0]));
+        assert!(has_return_orb(&items, &rows));
+        items.clear();
+        items.insert(3, record(3, 2757, STATUS_INVENTORY, [0, 1, 1]));
+        assert!(has_return_orb(&items, &rows));
+
+        items.insert(10, record(10, 4569, STATUS_CASH_INVENTORY, [0, 0, 0]));
+        items.insert(11, record(11, 4570, STATUS_CASH_INVENTORY, [0, 0, 0]));
+        assert_eq!(lit_fortune_manual(&items, &rows, &|_| false), None, "éteint");
+        assert_eq!(lit_fortune_manual(&items, &rows, &|_| true), Some(10), "SubType 0 seulement");
+        assert_eq!(lit_fortune_manual(&items, &rows, &|iid| iid == 11), None);
+    }
+
+    #[test]
+    fn release_of_agreement() {
+        let row = |item_type: i64, kind: i64, ty: i64| ItemRow { item_type, kind, use_type: ty, ..Default::default() };
+        // Armure, bouclier (4), anneau (8), collier (16), « autre » (64), arme hors lance.
+        for kind in SOCKET_INIT_KINDS {
+            assert!(socket_initializable(row(0, kind, 0), 1), "genre {kind}");
+        }
+        assert!(socket_initializable(row(0, KIND_WEAPON, 1), 2));
+        assert!(!socket_initializable(row(0, KIND_WEAPON, WEAPON_LANCE), 2), "lance");
+        assert!(!socket_initializable(row(0, 1, 0), 0), "sans pierre sertie");
+        assert!(!socket_initializable(row(1, 1, 0), 1), "pas un équipement");
+        assert!(!socket_initializable(row(0, 32, 0), 1));
+    }
+
+    #[test]
+    fn effets_d_un_objet() {
+        let header: Vec<(String, String)> = [("101", "ModuleData"), ("103", "AGCMEVENTEFFECT_CONDITION_FLAGS0"), ("104", "AGCMEVENTEFFECT_EFFECT_DATA0"), ("106", "AGCMEVENTEFFECT_CONDITION_FLAGS1"), ("107", "AGCMEVENTEFFECT_EFFECT_DATA1"), ("108", "AGCMEVENTEFFECT_SOUND_DATA1")]
+            .iter()
+            .map(|(k, v)| (k.to_string(), v.to_string()))
+            .collect();
+        // « Small firecracker » (4606) d'ItemTemplateAll.ini.
+        let sec: Vec<(String, String)> = [("101", "AgcmEventEffect"), ("103", "0:64"), ("104", "0:5002:0:0:0:1:0:0"), ("106", "1:1"), ("107", "1:0:0:0:0:1:0:0"), ("108", "1:IS0023.WAV")]
+            .iter()
+            .map(|(k, v)| (k.to_string(), v.to_string()))
+            .collect();
+        let (effects, sounds) = item_event_effects(&header, &sec);
+        assert_eq!(effects, vec![(5002, [0.0, 0.0, 0.0], 1.0, 0, 0)], "EID 0 ignoré");
+        assert_eq!(sounds, vec!["IS0023.WAV".to_string()]);
     }
 
     /// Avec les données du client (`ARCHRUST_GAME_DIR`) : orbes 842 (Cash, 90 s) et 7387 (« for Novices », 1;30),
@@ -621,6 +910,12 @@ mod tests {
         assert_eq!(speed_message(potion, d.speeds.get(&potion.skill_tid)), Some(("Item_UseAddMovementSkill", 25)));
         assert!(d.regions.get(&20).is_some_and(|t| t & REGION_RESURRECTION == 0));
         assert!(d.regions.values().any(|t| t & REGION_RESURRECTION != 0));
+        // Return Orb, Secret Safe, petit feu d'artifice, Fortune Manual, Release of Agreement.
+        let usages = [(1171, USE_SKILL_ROLLBACK), (3916, USE_ADD_BANK_SLOT), (4606, USE_EFFECT), (4569, USE_LUCKY_SCROLL), (4877, USE_SOCKET_INIT)];
+        for (tid, usage) in usages {
+            assert_eq!((d.items[&tid].item_type, d.items[&tid].use_type), (1, usage), "objet {tid}");
+        }
+        assert_eq!(d.items[&4569].sub_type, 0);
     }
 
     #[test]

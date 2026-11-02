@@ -65,6 +65,11 @@ pub enum SkillUi {
     TreeSelect(i32),
     /// « Apprendre » / « Améliorer » d'un arbre de l'instructeur (confirmation d'Archonia, puis envoi).
     TreeLearn(i32),
+    /// Compétence choisie dans la liste du livre (`Skill_SelectGrid`).
+    BookSelect(i32),
+    /// « Reset Selected » (`Skill_Rollback`, `Skill_*_Skill_RollBack`) sur la compétence choisie (TID) : Return Orb,
+    /// voir `app_consumables.rs`.
+    Rollback(i32),
 }
 
 /// Compétence du livre.
@@ -88,6 +93,10 @@ pub struct BookView<'a> {
     pub allowed: &'a dyn Fn(SkillTab) -> bool,
     /// Nom de la classe (texte `2:0:主_Character …`).
     pub title: String,
+    /// Compétence choisie (`Skill_SelectGrid`, TID).
+    pub selected: Option<i32>,
+    /// « Reset Selected » actif (`Skill_ActiveRollbackButton`, FUN_1405da000).
+    pub rollback: bool,
 }
 
 /// Compétence enseignée par un instructeur.
@@ -242,6 +251,15 @@ pub fn draw_skill_book(ctx: &egui::Context, hud: &mut HudState, assets: &Assets,
                         out.push(SkillUi::CloseBook);
                     }
                 }
+                // « Reset Selected » (`Skill_Rollback`), actif selon `Skill_ActiveRollbackButton`.
+                "CONTROL_12212" => {
+                    let enabled = view.rollback && view.selected.is_some();
+                    if super::npc_ui::button(ctx, ui, hud, assets, painter, r, c, c.fixed_label(), font, enabled, ("skill-book-reset", window)).clicked() {
+                        if let Some(tid) = view.selected.filter(|_| enabled) {
+                            out.push(SkillUi::Rollback(tid));
+                        }
+                    }
+                }
                 _ => {}
             }
         }
@@ -266,6 +284,11 @@ pub fn draw_skill_book(ctx: &egui::Context, hud: &mut HudState, assets: &Assets,
             }
             if resp.secondary_clicked() || resp.double_clicked() {
                 out.push(SkillUi::Cast(e.tid));
+            } else if resp.clicked() {
+                out.push(SkillUi::BookSelect(e.tid));
+            }
+            if Some(e.tid) == view.selected {
+                painter.rect_stroke(cell, 2.0, egui::Stroke::new(1.5_f32, Color32::from_rgb(255, 210, 110)), egui::StrokeKind::Inside);
             }
             if resp.hovered() && !dragging {
                 painter.rect_stroke(cell, 2.0, egui::Stroke::new(1.0_f32, Color32::from_rgb(120, 200, 255)), egui::StrokeKind::Inside);
@@ -336,7 +359,9 @@ pub fn draw_trainer(ctx: &egui::Context, hud: &mut HudState, assets: &Assets, vi
             skill_icon(ctx, hud, assets, painter, icon_rect, e.tid, Color32::WHITE);
             // Nom (`CONTROL_5918`), « SkillLevel2 » (`CONTROL_4297`, « %s %d » : uimessage `SkillLevel`, niveau) et
             // « SkillPrice » (`CONTROL_24573`, « %d %s » : prix, `Money_Name`) ; FUN_1405d8200, FUN_1405d9cc0.
-            let state = format!("{} {}", level_word, e.level.max(1));
+            // Compétence pas encore apprise : FUN_1405d8200 ne trouve pas la compétence du personnage
+            // (FUN_1402f3f30 nul) et n'écrit rien.
+            let state = if e.level > 0 { format!("{} {}", level_word, e.level) } else { String::new() };
             shadow_text(painter, cell.min + Vec2::new(62.0, 10.0) * s, Align2::LEFT_TOP, &e.name, font, Color32::WHITE);
             shadow_text(painter, cell.min + Vec2::new(62.0, 30.0) * s, Align2::LEFT_TOP, &state, font * 0.95, Color32::from_rgb(255, 230, 160));
             shadow_text(painter, cell.min + Vec2::new(185.0, 30.0) * s, Align2::RIGHT_TOP, &format!("{} {}", e.cost.max(0), money_name), font * 0.95, Color32::from_rgb(255, 220, 120));

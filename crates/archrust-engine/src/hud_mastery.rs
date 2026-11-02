@@ -223,6 +223,9 @@ pub struct TreeView<'a> {
     pub selected: Option<i32>,
     /// Onglets ouvrables (ex. Heroic : arbre héroïque connu pour la classe).
     pub allowed: &'a dyn Fn(SkillTab) -> bool,
+    /// « Reset Selected » du livre actif (Return Orb : `Skill_ActiveRollbackButton` de `UI_SkillHighLevel`, contrôles
+    /// des `Skill_*_Skill_RollBack` des fenêtres héroïques et du Scion).
+    pub rollback: bool,
 }
 
 /// Fenêtre d'un arbre de maîtrise (livre ou instructeur).
@@ -294,10 +297,20 @@ pub fn draw_tree(ctx: &egui::Context, hud: &mut HudState, assets: &Assets, view:
                                 out.push(SkillUi::TreeLearn(e.tid));
                             }
                         }
-                    } else if display == "1:Reset Selected" || display == "1:Reset" {
-                        // Remise à zéro d'une compétence (`Skill_Rollback`) et `UI_CharacterLoadouts` : ajouts
-                        // d'Archonia, laissés inactifs.
-                        super::npc_ui::button(ctx, ui, hud, assets, painter, r, c, c.fixed_label(), font, false, ("tree-reset", &w.name));
+                    } else if display == "1:Reset Selected" {
+                        // Remise à zéro de la compétence choisie (`Skill_Rollback`, `Skill_Heroic_Skill_RollBack`,
+                        // `Skill_Scion_Skill_RollBack`…) : Return Orb de l'épisode 8 (AGPMSKILL op 13), voir
+                        // `app_consumables.rs`.
+                        let enabled = !view.trainer && view.rollback && view.selected.is_some();
+                        if super::npc_ui::button(ctx, ui, hud, assets, painter, r, c, c.fixed_label(), font, enabled, ("tree-reset", &w.name)).clicked() {
+                            if let Some(tid) = view.selected.filter(|_| enabled) {
+                                out.push(SkillUi::Rollback(tid));
+                            }
+                        }
+                    } else if display == "1:Reset" {
+                        // `Action=1:3:0:1:UI_CharacterLoadouts` des fenêtres de l'instructeur : seul ajout d'Archonia de
+                        // ces boutons, laissé inactif.
+                        super::npc_ui::button(ctx, ui, hud, assets, painter, r, c, c.fixed_label(), font, false, ("tree-loadouts", &w.name));
                     }
                 }
                 _ => {}

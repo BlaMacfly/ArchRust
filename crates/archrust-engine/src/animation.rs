@@ -262,24 +262,32 @@ fn clip_cache() -> &'static Mutex<HashMap<String, Option<Arc<Clip>>>> {
 
 /// Clip `character\animation\<file>`, analysé une fois puis gardé en cache.
 pub fn load_clip(assets: &Assets, file: &str) -> Option<Arc<Clip>> {
-    if let Some(c) = clip_cache().lock().unwrap().get(file) {
+    load_clip_in(assets, "character/animation", file)
+}
+
+/// Clip `<folder>\<file>` (`character/animation`, ou `effect/animation` pour les animations RtAnim
+/// des objets d'effet, voir `app_effects.rs`), analysé une fois puis gardé en cache.
+pub fn load_clip_in(assets: &Assets, folder: &str, file: &str) -> Option<Arc<Clip>> {
+    // Clé du cache : le fichier seul pour les personnages, dossier compris sinon.
+    let key = if folder == "character/animation" { file.to_string() } else { format!("{folder}/{file}") };
+    if let Some(c) = clip_cache().lock().unwrap().get(&key) {
         return c.clone();
     }
     let clip = match assets
-        .read_packed("character/animation", file)
+        .read_packed(folder, file)
         .map_err(anyhow::Error::from)
         .and_then(|b| EanFile::parse(&b).map_err(anyhow::Error::from))
     {
         Ok(ean) => Clip::from_ean(file, &ean).map(Arc::new),
         Err(e) => {
-            log::debug!("animation {file} : {e:#}");
+            log::debug!("animation {folder}/{file} : {e:#}");
             None
         }
     };
     clip_cache()
         .lock()
         .unwrap()
-        .insert(file.to_string(), clip.clone());
+        .insert(key, clip.clone());
     clip
 }
 

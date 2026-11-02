@@ -176,6 +176,18 @@ fn admits(d: &SkillData, race: i32, class: i32) -> bool {
 /// Niveaux cumulés des compétences apprises (FUN_1402fdc60) : de toutes sans race ni classe (ConditionD de l'arbre
 /// supérieur, appel (-1, -1), sans exclusion) ; sinon de celles qu'admettent la race et la classe, hors passives,
 /// évolutions et attaque normale (ConditionC).
+/// Partie « arbre » du contrôle de la Return Orb (`FUN_1402bcc70` pour `UI_SkillHighLevel`, `FUN_1402bd5f0` pour les
+/// fenêtres héroïques et du Scion) : la compétence `tid` est dans l'arbre `rows`, aucune autre compétence apprise de
+/// l'arbre ne l'exige (ConditionA/B de niveau non nul) et le total qui resterait (`total_after`, niveaux cumulés ou
+/// points héroïques dépensés sans elle) suffit encore à chaque autre case apprise (`FUN_1402be4b0`, ConditionD).
+fn tree_refundable(rows: &[MasteryRow], tid: i32, known: &HashMap<i32, i32>, total_after: i32) -> bool {
+    if !rows.iter().any(|r| r.tid == tid) {
+        return false;
+    }
+    let learned = |r: &&MasteryRow| r.tid != tid && known.get(&r.tid).is_some_and(|l| *l > 0);
+    !rows.iter().filter(learned).any(|r| r.requires.iter().any(|(t, n)| *t == tid && *n > 0) || total_after < r.total)
+}
+
 fn mastery_levels(by_tid: &HashMap<i32, SkillData>, known: &HashMap<i32, i32>, race_class: Option<(i32, i32)>) -> i32 {
     known
         .iter()
@@ -355,20 +367,35 @@ pub struct SkillsGlue {
     trainer_tab: SkillTab,
     /// Case choisie dans un arbre (TID).
     tree_selected: Option<i32>,
+    /// Compétence choisie dans la liste du livre (TID, `Skill_SelectGrid`).
+    book_selected: Option<i32>,
+    /// Return Orb : compétence (TID) en attente de `Skill_RollbackConfirm` / `Skill_Init_Confirm_Message`, puis
+    /// confirmée (envoi à l'image suivante, `FUN_1405db3a0` refait les contrôles).
+    rollback_confirm: Option<i32>,
+    rollback_ok: Option<i32>,
     /// Confirmation en attente : TID et apprentissage (sinon amélioration).
     confirm: Option<(i32, bool)>,
     /// Boîte d'information (`Action=4:…` des événements `Skill_*` de l'[EventMap]).
     info: Option<String>,
-    /// uimessage `SkillLevel` (« Niveau ») des infobulles.
-    level_word: Option<String>,
     /// Messages des événements d'interface (`[EventMap]`).
     events: Option<HashMap<String, String>>,
 }
 
-/// Phrase de `uimessage.txt` du dossier de langue sans l'état du HUD (vide si absente).
-fn ui_message_in(assets: &Assets, key: &str) -> String {
-    let text = super::npc_glue::client_text(assets, "uimessage.txt");
-    text.lines().filter_map(|l| l.split_once('\t')).find(|(k, _)| k.trim() == key).map(|(_, v)| v.trim().to_string()).unwrap_or_default()
+/// Bonus de niveau d'une compétence apprise (FUN_1408762b0) : bonus du personnage (+0x854 des données de
+/// compétence, FUN_1402ff810), +1 si le titre porté est lié à la compétence (FUN_1401c3e90,
+/// `TitleRelatedSkills.txt`, ajout d'Archonia écarté) et bonus propre à la compétence (+0x188). Aucun n'est
+/// tenu par ArchRust : 0.
+fn skill_level_bonus(_tid: i32) -> i32 {
+    0
+}
+
+/// En-tête « %s : %d », ou « %s : %d (+%d) » avec un bonus (FUN_1408762b0, FUN_14087cb70).
+fn level_header(word: &str, level: i32, bonus: i32) -> String {
+    if bonus == 0 {
+        format!("{word} : {level}")
+    } else {
+        format!("{word} : {level} (+{bonus})")
+    }
 }
 
 impl SkillsGlue {
@@ -390,27 +417,47 @@ impl SkillsGlue {
         self.tables(assets).by_tid.get(&tid).map(|d| d.name.clone()).unwrap_or_default()
     }
 
-    /// Infobulle d'une compétence au niveau `level` (1 et plus ; 0 : le premier niveau), comme celle
-    /// d'Archonia : nom, niveau, description, puis les lignes que `skilltooltip.txt` marque (libellés
-    /// de `sysstr.txt` 67 à 79 : niveau requis, points, incantation, relance, durée, coûts).
-    fn tooltip(&mut self, assets: &Assets, tid: i32, level: i32) -> Vec<(String, Color32)> {
+    /// Infobulle d'une compétence dont le personnage a le niveau `owned` (0 : pas apprise), comme celle
+    /// d'Archonia (FUN_14087c230) : nom, description (coupée aux « \n », FUN_1408777c0), puis
+    /// * apprise : « Niveau actuel : %d » (sysstr 24, « %s : %d (+%d) » avec un bonus, FUN_1408762b0) et les
+    ///   lignes de ce niveau, puis, sous le niveau maximal, « Niveau suivant : %d » (sysstr 25, FUN_14087cb70)
+    ///   et les lignes du niveau suivant ;
+    /// * pas apprise : les lignes du premier niveau, sans en-tête (FUN_14087cb70 sans compétence).
+    /// Lignes (FUN_14087c340) : celles que `skilltooltip.txt` marque (libellés de `sysstr.txt` 67 à 79 : niveau
+    /// requis, points, incantation, relance, durée, coûts).
+    fn tooltip(&mut self, assets: &Assets, tid: i32, owned: i32) -> Vec<(String, Color32)> {
         let name = self.name(assets, tid);
         let tables = self.tables(assets);
-        let data = tables.by_tid.get(&tid);
-        let key = data.map(|d| d.name.to_lowercase()).unwrap_or_default();
+        let data = tables.by_tid.get(&tid).cloned();
+        let key = data.as_ref().map(|d| d.name.to_lowercase()).unwrap_or_default();
         let row = tables.tips.get(&key).cloned();
         let description = tables.tips_local.get(&key).map(|r| r.description.clone()).filter(|d| !d.is_empty()).or_else(|| row.as_ref().map(|r| r.description.clone())).unwrap_or_default();
-        let lv = data.and_then(|d| d.levels.get((level.max(1) - 1) as usize).or(d.levels.last())).cloned();
         let mut lines = vec![(name, Color32::from_rgb(255, 210, 110))];
-        if level > 0 {
-            // uimessage `SkillLevel` (« %s %d » de « SkillLevel2 », FUN_1405d8200).
-            let word = self.level_word.get_or_insert_with(|| ui_message_in(assets, "SkillLevel")).clone();
-            lines.push((format!("{word} {level}"), Color32::from_rgb(255, 235, 170)));
+        for part in description.split("\\n").filter(|p| !p.is_empty()) {
+            lines.push((part.to_string(), Color32::from_rgb(225, 225, 225)));
         }
-        if !description.is_empty() {
-            lines.push((description, Color32::from_rgb(225, 225, 225)));
+        let max = data.as_ref().map_or(0, |d| d.levels.len() as i32);
+        if owned <= 0 {
+            self.tooltip_rows(assets, data.as_ref(), row.as_ref(), 1, Color32::from_rgb(200, 220, 255), &mut lines);
+            return lines;
         }
-        let (Some(row), Some(lv)) = (row, lv) else { return lines };
+        let bonus = skill_level_bonus(tid);
+        let current = owned + bonus;
+        let [now_word, next_word] = [24, 25].map(|n| super::npc_glue::sysstr(assets, n).unwrap_or_default());
+        lines.push((level_header(&now_word, current, bonus), Color32::from_rgb(255, 235, 170)));
+        self.tooltip_rows(assets, data.as_ref(), row.as_ref(), current, Color32::from_rgb(200, 220, 255), &mut lines);
+        if current < max {
+            lines.push((level_header(&next_word, current + 1, bonus), Color32::from_rgb(200, 200, 200)));
+            self.tooltip_rows(assets, data.as_ref(), row.as_ref(), current + 1, Color32::from_rgb(170, 180, 200), &mut lines);
+        }
+        lines
+    }
+
+    /// Lignes d'un niveau de l'infobulle (FUN_14087c340, niveau borné à 30 comme Archonia).
+    fn tooltip_rows(&mut self, assets: &Assets, data: Option<&SkillData>, row: Option<&TipRow>, level: i32, color: Color32, lines: &mut Vec<(String, Color32)>) {
+        let level = level.clamp(1, 30);
+        let lv = data.and_then(|d| d.levels.get((level - 1) as usize).or(d.levels.last())).cloned();
+        let (Some(row), Some(lv)) = (row, lv) else { return };
         let unit = super::npc_glue::sysstr(assets, 8).unwrap_or_default();
         // Points héroïques et charisme exigés : colonnes `RequiredHeroicPoints`, `RequireCharismaPoints` de
         // `skilltooltip.txt`, libellés sysstr 791 et 792.
@@ -429,9 +476,8 @@ impl SkillsGlue {
         for (column, label, value) in rows {
             let Some(value) = value.filter(|_| row.shown.contains(column)) else { continue };
             let label = super::npc_glue::sysstr(assets, label).unwrap_or_else(|| column.to_string());
-            lines.push((format!("{label} : {value}"), Color32::from_rgb(200, 220, 255)));
+            lines.push((format!("{label} : {value}"), color));
         }
-        lines
     }
 
     fn id_of(&self, tid: i32) -> Option<i32> {
@@ -528,6 +574,9 @@ pub struct SkillViews {
     /// Onglets ouvrables (arbre connu pour la classe).
     allowed: Vec<SkillTab>,
     confirm: Option<String>,
+    /// « Reset Selected » actif pour la compétence choisie du livre, et texte de sa confirmation.
+    rollback: bool,
+    rollback_text: Option<String>,
     trainer: Option<(String, Vec<TrainerEntry>)>,
     slots: Vec<SlotView>,
     belts: usize,
@@ -544,10 +593,10 @@ pub fn panel(ctx: &egui::Context, glue: &mut SkillsGlue, views: &SkillViews, hud
         let tab = views.book_tab;
         if tab.is_tree() {
             let points = if tab.heroic() { views.heroic_points } else { views.points };
-            let view = TreeView { tab, trainer: false, title: views.title.clone(), slots: &views.book_tree, points, selected: glue.tree_selected, allowed: &allowed };
+            let view = TreeView { tab, trainer: false, title: views.title.clone(), slots: &views.book_tree, points, selected: glue.tree_selected, allowed: &allowed, rollback: views.rollback };
             crate::hud::draw_tree(ctx, hud, assets, view, &mut out);
         } else {
-            let view = BookView { entries: &views.book, points: views.points, first: &mut glue.book_first, tab, allowed: &allowed, title: views.title.clone() };
+            let view = BookView { entries: &views.book, points: views.points, first: &mut glue.book_first, tab, allowed: &allowed, title: views.title.clone(), selected: glue.book_selected, rollback: views.rollback };
             crate::hud::draw_skill_book(ctx, hud, assets, view, &mut out);
         }
     }
@@ -555,7 +604,7 @@ pub fn panel(ctx: &egui::Context, glue: &mut SkillsGlue, views: &SkillViews, hud
         let tab = glue.trainer_tab;
         if tab.is_tree() {
             let points = if tab.heroic() { views.heroic_points } else { views.points };
-            let view = TreeView { tab, trainer: true, title: title.clone(), slots: &views.trainer_tree, points, selected: glue.tree_selected, allowed: &allowed };
+            let view = TreeView { tab, trainer: true, title: title.clone(), slots: &views.trainer_tree, points, selected: glue.tree_selected, allowed: &allowed, rollback: false };
             crate::hud::draw_tree(ctx, hud, assets, view, &mut out);
         } else {
             let view = TrainerView { title: title.clone(), entries, selected: glue.trainer_selected, points: views.points, first: &mut glue.trainer_first, tab, allowed: &allowed };
@@ -573,6 +622,15 @@ pub fn panel(ctx: &egui::Context, glue: &mut SkillsGlue, views: &SkillViews, hud
             glue.confirm = None;
             if yes {
                 out.push(if learn { SkillUi::Learn(tid) } else { SkillUi::Upgrade(tid) });
+            }
+        }
+    }
+    // Return Orb : boîte modale de l'[EventMap] (`Skill_RollbackConfirm`) ou d'uimessage (`Skill_Init_Confirm_Message`).
+    if let (Some(text), Some(tid)) = (&views.rollback_text, glue.rollback_confirm) {
+        if let Some(yes) = crate::hud::confirm_box(ctx, hud, assets, ("skill-rollback-confirm", tid), text) {
+            glue.rollback_confirm = None;
+            if yes {
+                glue.rollback_ok = Some(tid);
             }
         }
     }
@@ -1079,6 +1137,14 @@ impl App {
                     self.skills.book_tab = Some(tab);
                     self.skills.book_first = 0;
                     self.skills.tree_selected = None;
+                    self.skills.book_selected = None;
+                }
+                SkillUi::BookSelect(tid) => self.skills.book_selected = Some(tid),
+                // `Skill_Rollback` (FUN_1405dcd80) : mêmes contrôles que le bouton, puis la confirmation.
+                SkillUi::Rollback(tid) => {
+                    if self.skills_rollback_active(tid) {
+                        self.skills.rollback_confirm = Some(tid);
+                    }
                 }
                 SkillUi::TrainerTab(tab) => {
                     self.skills.trainer_tab = tab;
@@ -1115,6 +1181,18 @@ impl App {
         let requests = std::mem::take(&mut self.skills.pending);
         if !requests.is_empty() {
             self.skills_apply(requests);
+        }
+        // OK de la confirmation de la Return Orb (`FUN_1405db3a0`) : contrôles refaits, puis AGPMSKILL op 13.
+        if let Some(tid) = self.skills.rollback_ok.take() {
+            match self.skills.id_of(tid).filter(|_| self.skills_rollback_active(tid)) {
+                Some(id) => {
+                    log::info!("Return Orb : remise à zéro de la compétence {tid} (identifiant {id})");
+                    if let Some(net) = &self.net {
+                        net.send(Command::Consumable(archrust_netclient::consumables::ConsumableCommand::SkillRollback { id }));
+                    }
+                }
+                None => log::info!("Return Orb : compétence {tid} plus remboursable, rien n'est envoyé"),
+            }
         }
         // Livre fermé : il rouvre sur son premier onglet.
         if !self.skills.show_book {
@@ -1198,6 +1276,19 @@ impl App {
         if let (Some(_), true) = (self.skills.trainer, self.skills.trainer_tab.is_tree()) {
             v.trainer_tree = self.skills_tree(self.skills.trainer_tab, true);
         }
+        // « Reset Selected » (`Skill_ActiveRollbackButton`) pour la compétence choisie du livre.
+        let book_selected = if book_tab.is_tree() { self.skills.tree_selected } else { self.skills.book_selected };
+        v.rollback = self.skills.show_book && book_selected.is_some_and(|t| self.skills_rollback_active(t));
+        if let Some(tid) = self.skills.rollback_confirm {
+            let name = self.skills.name(&assets, tid);
+            // `UI_Skill` et `UI_SkillHighLevel` : `Skill_RollbackConfirm` ({{…SkillSelectedName}}) ; fenêtres héroïques
+            // et du Scion : `Skill_Init_Confirm_Message` (« [ %s ] »).
+            v.rollback_text = Some(if matches!(book_tab, SkillTab::Combo) || !book_tab.is_tree() {
+                super::guild_glue::fill_braces(&super::portal_glue::ui_event_cached(&mut self.skills.events, &assets, "Skill_RollbackConfirm"), &name)
+            } else {
+                super::chat_glue::printf(&crate::hud::ui_message(&mut self.hud, &assets, "Skill_Init_Confirm_Message"), &[name.as_str()])
+            });
+        }
         if let Some((_, learn)) = self.skills.confirm {
             // Messages de l'[EventMap] d'Archonia (Skill_ConfirmLearnSkill, Skill_ConfirmUpgradeSkill), sans le nom.
             v.confirm = Some(super::portal_glue::ui_event_cached(&mut self.skills.events, &assets, if learn { "Skill_ConfirmLearnSkill" } else { "Skill_ConfirmUpgradeSkill" }));
@@ -1237,7 +1328,7 @@ impl App {
                 let cost = super::tax_glue::taxed(next.map(|l| if owned == 0 { l.cost } else { l.upgrade_cost }).unwrap_or(0));
                 let require_level = next.map(|l| l.require_level).unwrap_or(0);
                 let possible = next.is_some_and(|l| level >= l.require_level && points >= l.require_point && money >= cost);
-                let tip = self.skills.tooltip(&assets, tid, (owned + 1).min(d.levels.len() as i32));
+                let tip = self.skills.tooltip(&assets, tid, owned);
                 entries.push(TrainerEntry { tid, name: d.name.clone(), level: owned, max_level: d.levels.len() as i32, require_level, cost, possible, tip });
             }
             entries.sort_by_key(|e| (e.require_level, e.tid));
@@ -1324,6 +1415,37 @@ fn player_race_class(hud: &HudState) -> Option<(i32, i32)> {
 }
 
 impl App {
+    /// Compétence `tid` remboursable par la Return Orb (`FUN_1402bcc70`, `FUN_1402bd5f0`) dans l'onglet courant du
+    /// livre : apprise, pas l'attaque normale, pas de production (bit 0x2000) ; onglet à liste : vendue par un
+    /// instructeur (prix du niveau 1 non nul, données de maître `+0x10` / `+0x14`) ; arbre : [`tree_refundable`].
+    fn skills_refundable(&mut self, tid: i32) -> bool {
+        let assets = self.assets.clone();
+        let tab = self.skills.book_tab.unwrap_or_default();
+        let known: HashMap<i32, i32> = self.skills.known.values().map(|(t, l)| (*t, *l)).collect();
+        if tid == NORMAL_ATTACK || known.get(&tid).is_none_or(|l| *l < 1) {
+            return false;
+        }
+        let Some(d) = self.skills.tables(&assets).by_tid.get(&tid).cloned() else { return false };
+        if d.spec.product {
+            return false;
+        }
+        if !tab.is_tree() {
+            return d.levels.first().is_some_and(|l| l.cost != 0);
+        }
+        let (race, class) = player_race_class(&self.hud).unwrap_or((0, 0));
+        let rows: Vec<MasteryRow> = self.skills.mastery(&assets).tree(tab, race, class).map(<[MasteryRow]>::to_vec).unwrap_or_default();
+        let mut without = known.clone();
+        without.remove(&tid);
+        let total_after = if tab.heroic() { self.skills.heroic_spent(&assets, &without) } else { mastery_levels(&self.skills.tables(&assets).by_tid, &without, None) };
+        tree_refundable(&rows, tid, &known, total_after)
+    }
+
+    /// `Skill_ActiveRollbackButton` (`FUN_1405da000`) : compétence remboursable et Return Orb (usage 13) dans
+    /// l'inventaire ou l'inventaire Cash.
+    fn skills_rollback_active(&mut self, tid: i32) -> bool {
+        self.consumables_has_return_orb() && self.skills_refundable(tid)
+    }
+
     /// Cases de l'arbre `tab` (livre, ou instructeur avec `trainer`) : niveau connu, prochaine étape possible
     /// et infobulle avec les conditions de l'arbre (FUN_1402b8f40 : compétences exigées, niveaux cumulés, points
     /// héroïques dépensés).
@@ -1356,7 +1478,7 @@ impl App {
                 let name = self.skills.name(&assets, rtid);
                 let got = self.skills.tables(&assets).by_tid.get(&rtid).map_or(0, |r| counted_level(r, known.get(&rtid).copied().unwrap_or(0)));
                 let [required, skill, lv] = [678, 14, 262].map(|id| super::npc_glue::sysstr(&assets, id).unwrap_or_default());
-                lines.push((format!("{required} {skill} : {name} {n} {lv}"), got >= n));
+                lines.push((format!("{required} {skill} : {name} {n}{lv}"), got >= n));
                 met &= got >= n;
             }
             if let Some((ctid, n)) = row.class_levels {
@@ -1391,7 +1513,7 @@ impl App {
             let possible = trainer
                 && met
                 && next.as_ref().is_some_and(|l| level >= l.require_level && points >= if heroic { l.require_heroic } else { l.require_point } && money >= cost);
-            let mut tip = self.skills.tooltip(&assets, row.tid, if trainer { (owned + 1).min(d.levels.len() as i32) } else { owned });
+            let mut tip = self.skills.tooltip(&assets, row.tid, owned);
             // Prix (FUN_1408756f0) : « %s : %d%s » (sysstr 137, prix, `Money_Name`), en rouge sans l'or ; points
             // héroïques et charisme : lignes de `skilltooltip.txt` (voir `tooltip`).
             if let (true, Some(_)) = (trainer, &next) {
@@ -1414,6 +1536,23 @@ impl App {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn return_orb_dans_un_arbre() {
+        let row = |tid: i32, requires: Vec<(i32, i32)>, total: i32| MasteryRow { tid, requires, class_levels: None, total };
+        let rows = vec![row(10, vec![], 0), row(11, vec![(10, 2)], 0), row(12, vec![], 20), row(13, vec![(10, 0)], 0)];
+        let known = |pairs: &[(i32, i32)]| pairs.iter().copied().collect::<HashMap<i32, i32>>();
+        // Exigée par une case apprise (ConditionA de niveau 2) : refusée ; case non apprise : sans effet.
+        assert!(!tree_refundable(&rows, 10, &known(&[(10, 3), (11, 1)]), 30));
+        assert!(tree_refundable(&rows, 10, &known(&[(10, 3)]), 30));
+        // Condition de niveau 0 : ne compte pas (`piVar1[4] != 0`).
+        assert!(tree_refundable(&rows, 10, &known(&[(10, 3), (13, 1)]), 30));
+        // ConditionD d'une autre case apprise : le total restant doit suffire (`FUN_1402be4b0`).
+        assert!(!tree_refundable(&rows, 10, &known(&[(10, 3), (12, 1)]), 19));
+        assert!(tree_refundable(&rows, 10, &known(&[(10, 3), (12, 1)]), 20));
+        // Hors de l'arbre.
+        assert!(!tree_refundable(&rows, 99, &known(&[(99, 1)]), 30));
+    }
 
     #[test]
     fn classes_et_barre() {

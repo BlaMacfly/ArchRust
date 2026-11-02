@@ -229,8 +229,9 @@ pub fn draw_character(
                     }
                     1 if value("HP_All") || value("MP_All") => {
                         let (cur, max) = if value("HP_All") { (stats.hp, stats.max_hp) } else { (stats.mp, stats.max_mp) };
+                        // Archonia (FUN_1404fab20, cas 0x14 / 0x18) : « %d/%d », sans espaces.
                         let text = match (cur, max) {
-                            (Some(c), Some(m)) => format!("{c} / {m}"),
+                            (Some(c), Some(m)) => format!("{c}/{m}"),
                             (Some(c), None) => c.to_string(),
                             _ => String::new(),
                         };

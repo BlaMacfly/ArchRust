@@ -152,6 +152,15 @@ pub struct GpuTexture {
     pub height: u32,
 }
 
+/// Cible de rendu hors écran (voir [`Renderer::create_offscreen`]) : couleur lisible comme texture
+/// (à enregistrer auprès d'egui) et sa profondeur.
+pub struct OffscreenTarget {
+    pub view: wgpu::TextureView,
+    depth: wgpu::TextureView,
+    pub width: u32,
+    pub height: u32,
+}
+
 /// Lot d'un effet : texture (nom RenderWare ; absente = blanc), mélange et triangles.
 pub struct EffectDraw {
     pub texture: Option<String>,
@@ -739,6 +748,90 @@ impl Renderer {
             });
             self.instance_pool.push((buf, bg));
         }
+    }
+
+    /// Cible de rendu hors écran de `width × height` (format de la surface, lisible comme texture) :
+    /// raster d'un aperçu comme celui du coiffeur d'Archonia (`AgcmCustomizeRender`).
+    pub fn create_offscreen(&self, width: u32, height: u32) -> OffscreenTarget {
+        let size = wgpu::Extent3d { width: width.max(1), height: height.max(1), depth_or_array_layers: 1 };
+        let color = self.device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("offscreen"),
+            size,
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: self.config.format,
+            usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::TEXTURE_BINDING,
+            view_formats: &[],
+        });
+        let depth = self.device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("offscreen depth"),
+            size,
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: wgpu::TextureFormat::Depth32Float,
+            usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
+            view_formats: &[],
+        });
+        OffscreenTarget { view: color.create_view(&Default::default()), depth: depth.create_view(&Default::default()), width: size.width, height: size.height }
+    }
+
+    /// Dessine `items` dans `target` (profondeur inversée comme la scène), sans ciel, brouillard ni
+    /// lumière d'effet, avec la lumière `light` (direction vers la lumière, ambiante, couleur
+    /// directionnelle `w > 0`), sur le fond `clear`. Soumis aussitôt : les tampons communs (globales,
+    /// instances) peuvent être réécrits ensuite par l'image principale.
+    pub fn render_offscreen(&mut self, target: &OffscreenTarget, view_proj: Mat4, camera_pos: Vec3, items: &[DrawItem], light: (Vec3, [f32; 4], [f32; 4]), clear: wgpu::Color) {
+        let (point_pos, point_color, point_count) = pack_point_lights(&[]);
+        let globals = Globals {
+            view_proj: view_proj.to_cols_array_2d(),
+            light_dir: light.0.extend(0.0).to_array(),
+            ambient: light.1,
+            camera_pos: camera_pos.extend(1.0).to_array(),
+            light_color: light.2,
+            fog_color: self.fog_color,
+            fog_range: [f32::MAX, f32::MAX, 0.0, 0.0],
+            point_pos,
+            point_color,
+            point_count,
+        };
+        self.queue.write_buffer(&self.globals_buf, 0, bytemuck::bytes_of(&globals));
+        self.ensure_instances(items.len());
+        for (i, item) in items.iter().enumerate() {
+            let data = InstanceUniform { model: item.model.to_cols_array_2d(), color: item.tint };
+            self.queue.write_buffer(&self.instance_pool[i].0, 0, bytemuck::bytes_of(&data));
+        }
+        let mut encoder = self.device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: Some("offscreen") });
+        {
+            let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: Some("offscreen"),
+                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                    view: &target.view,
+                    resolve_target: None,
+                    ops: wgpu::Operations { load: wgpu::LoadOp::Clear(clear), store: wgpu::StoreOp::Store },
+                })],
+                depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
+                    view: &target.depth,
+                    depth_ops: Some(wgpu::Operations { load: wgpu::LoadOp::Clear(0.0), store: wgpu::StoreOp::Store }),
+                    stencil_ops: None,
+                }),
+                timestamp_writes: None,
+                occlusion_query_set: None,
+            });
+            pass.set_bind_group(0, &self.globals_bg, &[]);
+            pass.set_pipeline(&self.pipeline_culled);
+            for (i, item) in items.iter().enumerate() {
+                pass.set_bind_group(2, &self.instance_pool[i].1, &[]);
+                pass.set_vertex_buffer(0, item.mesh.vertices.slice(..));
+                pass.set_index_buffer(item.mesh.indices.slice(..), wgpu::IndexFormat::Uint32);
+                for part in &item.mesh.parts {
+                    let tex = part.texture.as_ref().and_then(|t| self.textures.get(&t.to_ascii_lowercase())).unwrap_or(&self.white);
+                    pass.set_bind_group(1, &tex.bind_group, &[]);
+                    pass.draw_indexed(part.index_start..part.index_start + part.index_count, 0, 0..1);
+                }
+            }
+        }
+        self.queue.submit(Some(encoder.finish()));
     }
 
     /// Dessine une image : scène 3D puis une fermeture pour l'interface (egui) sur le même encodeur.

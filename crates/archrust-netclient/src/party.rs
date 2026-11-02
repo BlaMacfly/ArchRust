@@ -249,7 +249,8 @@ pub enum PartyNotice {
 }
 
 impl PartyNotice {
-    /// Message de discussion, avec les noms connus.
+    /// Description pour le journal et les exemples en console, avec les noms connus. Jamais affichée
+    /// en jeu : le moteur prend les textes d'Archonia ([EventMap], uimessage ; voir `app_party.rs`).
     pub fn message(&self, state: &PartyState) -> String {
         let name = |cid: &i32| state.name_of(*cid);
         match self {

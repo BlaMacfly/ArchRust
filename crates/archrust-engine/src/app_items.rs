@@ -253,8 +253,9 @@ impl App {
             }
             WorldEvent::ReturnPoint { enabled } => {
                 self.item_ui.return_enabled = enabled;
+                // Archonia n'écrit rien dans la discussion (voir plus haut : pas de fenêtre non plus).
                 if enabled {
-                    self.ui.push_chat("[objet] Point de départ mémorisé : /retour pour y revenir.");
+                    log::info!("point de départ mémorisé (parchemin aller-retour)");
                 }
             }
             _ => {}

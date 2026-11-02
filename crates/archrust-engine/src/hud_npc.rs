@@ -32,6 +32,8 @@ pub enum NpcUi {
     QuestAccept(i32),
     QuestComplete(i32),
     QuestAbandon(i32),
+    /// Clic sur une récompense au choix : rang parmi les objets choisissables, à partir de 0.
+    QuestSelectReward(usize),
 }
 
 /// Dialogue ouvert.
@@ -105,6 +107,8 @@ pub struct QuestView<'a> {
     /// Libellé du bouton de fin (`CONTROL_8149`, « QusetAcceptLeftButton_Display2 », FUN_1406559a0) :
     /// sysstr 432 pour une quête proposée, 431 sinon.
     pub left_label: String,
+    /// Récompense au choix retenue (rang parmi les objets choisissables).
+    pub reward_choice: Option<usize>,
 }
 
 pub(super) fn window(hud: &mut HudState, assets: &Assets, name: &str) -> Option<UiWindow> {
@@ -151,18 +155,102 @@ fn text_box(ui: &mut egui::Ui, r: Rect, id: &str, text: &str, font: f32, color: 
     });
 }
 
-/// Zone de texte défilante à codes de couleur `<H…>` ; le blanc prend la couleur `base`.
-fn colored_text_box(ui: &mut egui::Ui, r: Rect, id: &str, text: &str, font: f32, base: Color32) {
-    let mut job = egui::text::LayoutJob::default();
-    job.wrap.max_width = r.width() - 12.0;
-    for (part, color) in super::convert_ui::colored_segments(text, base) {
-        let color = if color == Color32::WHITE { base } else { color };
-        job.append(&part, 0.0, egui::TextFormat { font_id: FontId::proportional(font), color, ..Default::default() });
+/// Morceau du texte d'une quête : texte coloré ou balise `<ITEM::nombre::TID::…::choix>`.
+#[derive(Debug, Clone, PartialEq)]
+enum QuestPart {
+    Text(String),
+    Item { count: i32, tid: i32, selectable: bool },
+}
+
+/// Découpe le texte d'une quête aux balises `<ITEM::…>` (six nombres, AgcUIQuestText FUN_14088f9a0 :
+/// le premier est le nombre, le deuxième le TID, le dernier 1 pour un objet à choisir).
+fn quest_parts(text: &str) -> Vec<QuestPart> {
+    let mut out = Vec::new();
+    let mut rest = text;
+    while let Some(i) = rest.find("<ITEM::") {
+        let Some(end) = rest[i..].find('>') else { break };
+        if i > 0 {
+            out.push(QuestPart::Text(rest[..i].to_string()));
+        }
+        let v: Vec<i32> = rest[i + 7..i + end].split("::").map(|p| p.trim().parse().unwrap_or(0)).collect();
+        out.push(QuestPart::Item { count: v.first().copied().unwrap_or(0), tid: v.get(1).copied().unwrap_or(0), selectable: v.get(5).copied().unwrap_or(0) != 0 });
+        rest = &rest[i + end + 1..];
     }
+    if !rest.is_empty() {
+        out.push(QuestPart::Text(rest.to_string()));
+    }
+    out
+}
+
+/// Texte d'une quête (`CONTROL_QUEST_TEXT`, AgcUIQuestText) : texte coloré, objets en cases
+/// `Quest_Slot.png` avec leur icône et leur nombre (« %d », 0xFFFF9999, en bas à droite, FUN_14088cd40) ;
+/// un objet à choisir se clique et prend le cadre `Quest_ActiveBox.png` (un seul à la fois, LAB_14088c840).
+#[allow(clippy::too_many_arguments)]
+fn quest_text_box(ctx: &egui::Context, ui: &mut egui::Ui, hud: &mut HudState, assets: &Assets, r: Rect, id: &str, text: &str, font: f32, base: Color32, choice: Option<usize>, out: &mut Vec<NpcUi>) {
+    let parts = quest_parts(text);
+    let slot_tex = hud.image(ctx, assets, "Quest_Slot.png");
+    let active_tex = hud.image(ctx, assets, "Quest_ActiveBox.png");
+    let cell = slot_tex.map_or(36.0, |(_, size)| size[0].max(16.0)) * (font / 11.0).max(0.5);
     ui.scope_builder(egui::UiBuilder::new().max_rect(r), |ui| {
         egui::ScrollArea::vertical().id_salt(id).max_height(r.height()).show(ui, |ui| {
             ui.set_width(r.width() - 12.0);
-            ui.label(job);
+            ui.spacing_mut().item_spacing = Vec2::new(2.0, 0.0);
+            let mut k = 0;
+            let mut selectable_rank = 0usize;
+            while k < parts.len() {
+                match &parts[k] {
+                    QuestPart::Text(t) => {
+                        let mut job = egui::text::LayoutJob::default();
+                        job.wrap.max_width = r.width() - 12.0;
+                        for (part, color) in super::convert_ui::colored_segments(if k > 0 { t.strip_prefix('\n').unwrap_or(t) } else { t }, base) {
+                            let color = if color == Color32::WHITE { base } else { color };
+                            job.append(&part, 0.0, egui::TextFormat { font_id: FontId::proportional(font), color, ..Default::default() });
+                        }
+                        ui.label(job);
+                        k += 1;
+                    }
+                    QuestPart::Item { .. } => {
+                        // Objets consécutifs : une rangée de cases.
+                        ui.horizontal_wrapped(|ui| {
+                            while let Some(QuestPart::Item { count, tid, selectable }) = parts.get(k) {
+                                let (rect, resp) = ui.allocate_exact_size(Vec2::splat(cell), if *selectable { egui::Sense::click() } else { egui::Sense::hover() });
+                                let painter = ui.painter();
+                                if let Some((tex, _)) = slot_tex {
+                                    painter.image(tex, rect, Rect::from_min_max(Pos2::ZERO, Pos2::new(1.0, 1.0)), Color32::WHITE);
+                                }
+                                super::items_ui::icon(ctx, hud, assets, painter, rect.shrink(3.0 * cell / 36.0), Some(*tid), Color32::WHITE);
+                                if *count != 0 {
+                                    shadow_text(painter, rect.right_bottom() - Vec2::splat(3.0), Align2::RIGHT_BOTTOM, &count.to_string(), font * 0.95, Color32::from_rgb(0xff, 0x99, 0x99));
+                                }
+                                if *selectable {
+                                    let rank = selectable_rank;
+                                    selectable_rank += 1;
+                                    if choice == Some(rank) {
+                                        match active_tex {
+                                            Some((tex, _)) => {
+                                                painter.image(tex, rect, Rect::from_min_max(Pos2::ZERO, Pos2::new(1.0, 1.0)), Color32::WHITE);
+                                            }
+                                            None => {
+                                                painter.rect_stroke(rect, 2.0, egui::Stroke::new(1.5_f32, Color32::from_rgb(255, 210, 110)), egui::StrokeKind::Inside);
+                                            }
+                                        }
+                                    }
+                                    if resp.clicked() {
+                                        out.push(NpcUi::QuestSelectReward(rank));
+                                    }
+                                }
+                                if resp.hovered() {
+                                    let name = crate::scene::item_name_for_tid(assets, *tid).unwrap_or_default();
+                                    if !name.is_empty() {
+                                        super::item_tooltip(ctx, &[(name, Color32::WHITE)], "");
+                                    }
+                                }
+                                k += 1;
+                            }
+                        });
+                    }
+                }
+            }
         });
     });
 }
@@ -471,9 +559,28 @@ pub fn draw_quests(ctx: &egui::Context, hud: &mut HudState, assets: &Assets, vie
                     });
                 }
                 // Texte sur parchemin : codes de couleur d'Archonia, le blanc (`<HFFFFFFFF>`) en brun foncé.
-                "CONTROL_QUEST_TEXT" => colored_text_box(ui, r.shrink(8.0 * s), &format!("{id}-text"), &view.text, font * 1.05, Color32::from_rgb(35, 22, 8)),
+                "CONTROL_QUEST_TEXT" => quest_text_box(ctx, ui, hud, assets, r.shrink(8.0 * s), &format!("{id}-text"), &view.text, font * 1.05, Color32::from_rgb(35, 22, 8), view.reward_choice, out),
                 _ => {}
             }
         }
     });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn decoupe_aux_balises_d_objets() {
+        let parts = quest_parts("a<ITEM::2::100::0::0::0::0><ITEM::1::200::0::0::0::1>\nb");
+        assert_eq!(
+            parts,
+            vec![
+                QuestPart::Text("a".into()),
+                QuestPart::Item { count: 2, tid: 100, selectable: false },
+                QuestPart::Item { count: 1, tid: 200, selectable: true },
+                QuestPart::Text("\nb".into()),
+            ]
+        );
+    }
 }

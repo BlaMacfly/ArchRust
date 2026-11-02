@@ -4,7 +4,10 @@
 //!
 //! 1. [`GltfModel::parse`] lit le fichier (binaire GLB ou JSON `.gltf` avec tampons et images
 //!    voisins ou en `data:` URI) : positions, normales, UV0, couleurs de sommet, indices, couleur
-//!    de base et texture de chaque matériau, matrices monde des nœuds de la scène par défaut ;
+//!    de base et texture de chaque matériau, matrices monde des nœuds de la scène par défaut ; tous
+//!    les nœuds (TRS de repos), peaux (`JOINTS_0` / `WEIGHTS_0`, inverses de liaison) et animations
+//!    nommées, pour les montures animées (`app_ride.rs` : [`GltfModel::node_matrices`],
+//!    [`GltfModel::skinned_vertices`], nœud de selle [`GltfModel::hanim_node`]) ;
 //! 2. [`upload`] crée les maillages et textures GPU via [`Renderer::create_mesh`] et
 //!    [`Renderer::upload_texture`], et renvoie des paires (maillage, matrice) comme
 //!    [`crate::scene::build_clump_meshes`].
@@ -19,7 +22,7 @@ use crate::assets::placeholder_texture;
 use crate::render::{Mesh, Renderer, SubMesh, Vertex};
 use anyhow::{anyhow, bail, Context, Result};
 use base64::Engine;
-use glam::{Mat4, Vec3};
+use glam::{Mat4, Quat, Vec3};
 use std::sync::Arc;
 
 /// Image RGBA8 décodée d'un glTF.
@@ -41,6 +44,53 @@ pub struct GltfPrimitive {
     /// Index dans [`GltfModel::images`] de la texture de couleur de base.
     pub image: Option<usize>,
     pub material: String,
+    /// `JOINTS_0` / `WEIGHTS_0` (vides sans peau) : indices dans les articulations de la peau du nœud.
+    pub joints: Vec<[u16; 4]>,
+    pub weights: Vec<[f32; 4]>,
+}
+
+/// Nœud du document : nom, parent, transformation locale de repos (TRS), maillage et peau.
+#[derive(Debug, Clone)]
+pub struct GltfNode {
+    pub name: String,
+    pub parent: Option<usize>,
+    pub translation: Vec3,
+    pub rotation: Quat,
+    pub scale: Vec3,
+}
+
+/// Peau : nœuds articulations et matrices inverses de liaison.
+#[derive(Debug, Clone)]
+pub struct GltfSkin {
+    pub joints: Vec<usize>,
+    pub inverse_bind: Vec<Mat4>,
+}
+
+/// Propriété animée d'un nœud.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum GltfPath {
+    Translation,
+    Rotation,
+    Scale,
+}
+
+/// Canal d'animation : clés (secondes) et valeurs (xyz, ou quaternion xyzw), paliers ou linéaire
+/// (une spline cubique est lue par ses valeurs, sans ses tangentes).
+#[derive(Debug, Clone)]
+pub struct GltfChannel {
+    pub node: usize,
+    pub path: GltfPath,
+    pub times: Vec<f32>,
+    pub values: Vec<[f32; 4]>,
+    pub step: bool,
+}
+
+/// Animation nommée du document (« IDLE », « RUN »…).
+#[derive(Debug, Clone)]
+pub struct GltfAnimation {
+    pub name: String,
+    pub duration: f32,
+    pub channels: Vec<GltfChannel>,
 }
 
 #[derive(Debug, Clone)]
@@ -55,6 +105,9 @@ pub struct GltfInstance {
     pub node: String,
     pub mesh: usize,
     pub matrix: Mat4,
+    /// Indice du nœud dans [`GltfModel::nodes`] et peau qu'il porte.
+    pub node_index: usize,
+    pub skin: Option<usize>,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -67,6 +120,10 @@ pub struct GltfModel {
     pub instances: Vec<GltfInstance>,
     /// Primitives ignorées (points, lignes).
     pub skipped: usize,
+    /// Tous les nœuds, peaux et animations du document (squelette et clips des montures animées).
+    pub nodes: Vec<GltfNode>,
+    pub skins: Vec<GltfSkin>,
+    pub animations: Vec<GltfAnimation>,
 }
 
 /// Lecture d'un fichier voisin (`.bin`, image) : chemin relatif au glTF, déjà décodé (`%20` → espace).
@@ -228,12 +285,17 @@ impl GltfModel {
                 if normals.is_none() {
                     compute_normals(&mut vertices, &indices);
                 }
+                let joints: Vec<[u16; 4]> = reader.read_joints(0).map(|j| j.into_u16().collect()).unwrap_or_default();
+                let weights: Vec<[f32; 4]> = reader.read_weights(0).map(|w| w.into_f32().collect()).unwrap_or_default();
+                let (joints, weights) = if joints.len() == vertices.len() && weights.len() == vertices.len() { (joints, weights) } else { (Vec::new(), Vec::new()) };
                 primitives.push(GltfPrimitive {
                     vertices,
                     indices,
                     base_color,
                     image,
                     material: material.name().unwrap_or("(sans nom)").to_string(),
+                    joints,
+                    weights,
                 });
             }
             meshes.push(GltfMesh { name, primitives });
@@ -256,10 +318,72 @@ impl GltfModel {
                         node: m.name.clone(),
                         mesh: i,
                         matrix: Mat4::IDENTITY,
+                        node_index: usize::MAX,
+                        skin: None,
                     });
                 }
             }
         }
+
+        // Nœuds (parents, repos), peaux et animations : squelette et clips des modèles animés.
+        let mut nodes: Vec<GltfNode> = document
+            .nodes()
+            .map(|n| {
+                let (t, r, s) = n.transform().decomposed();
+                let q = Quat::from_array(r);
+                GltfNode {
+                    name: n.name().map(str::to_string).unwrap_or_else(|| format!("node{}", n.index())),
+                    parent: None,
+                    translation: Vec3::from(t),
+                    rotation: if q.is_finite() && q.length_squared() > 1e-12 { q.normalize() } else { Quat::IDENTITY },
+                    scale: Vec3::from(s),
+                }
+            })
+            .collect();
+        for n in document.nodes() {
+            for c in n.children() {
+                if let Some(child) = nodes.get_mut(c.index()) {
+                    child.parent = Some(n.index());
+                }
+            }
+        }
+        let skins = document
+            .skins()
+            .map(|s| {
+                let joints: Vec<usize> = s.joints().map(|j| j.index()).collect();
+                let reader = s.reader(|b| buffers.get(b.index()).map(|v| v.as_slice()));
+                let mut inverse_bind: Vec<Mat4> = reader.read_inverse_bind_matrices().map(|m| m.map(|c| Mat4::from_cols_array_2d(&c)).collect()).unwrap_or_default();
+                inverse_bind.resize(joints.len(), Mat4::IDENTITY);
+                GltfSkin { joints, inverse_bind }
+            })
+            .collect();
+        let mut animations = Vec::new();
+        for a in document.animations() {
+            let mut channels = Vec::new();
+            for c in a.channels() {
+                let reader = c.reader(|b| buffers.get(b.index()).map(|v| v.as_slice()));
+                let (Some(inputs), Some(outputs)) = (reader.read_inputs(), reader.read_outputs()) else { continue };
+                let times: Vec<f32> = inputs.collect();
+                let (path, mut values): (GltfPath, Vec<[f32; 4]>) = match outputs {
+                    gltf::animation::util::ReadOutputs::Translations(v) => (GltfPath::Translation, v.map(|x| [x[0], x[1], x[2], 0.0]).collect()),
+                    gltf::animation::util::ReadOutputs::Scales(v) => (GltfPath::Scale, v.map(|x| [x[0], x[1], x[2], 0.0]).collect()),
+                    gltf::animation::util::ReadOutputs::Rotations(v) => (GltfPath::Rotation, v.into_f32().collect()),
+                    gltf::animation::util::ReadOutputs::MorphTargetWeights(_) => continue,
+                };
+                let interpolation = c.sampler().interpolation();
+                if interpolation == gltf::animation::Interpolation::CubicSpline {
+                    // (tangente d'entrée, valeur, tangente de sortie) par clé : la valeur seule.
+                    values = values.chunks_exact(3).map(|k| k[1]).collect();
+                }
+                if times.is_empty() || values.len() != times.len() {
+                    continue;
+                }
+                channels.push(GltfChannel { node: c.target().node().index(), path, times, values, step: interpolation == gltf::animation::Interpolation::Step });
+            }
+            let duration = channels.iter().filter_map(|c| c.times.last().copied()).fold(0.0f32, f32::max);
+            animations.push(GltfAnimation { name: a.name().map(str::to_string).unwrap_or_else(|| format!("animation{}", a.index())), duration, channels });
+        }
+        nodes.shrink_to_fit();
 
         Ok(GltfModel {
             generator: document
@@ -274,9 +398,151 @@ impl GltfModel {
             images,
             instances,
             skipped,
+            nodes,
+            skins,
+            animations,
         })
     }
 
+    /// Animation nommée `name` (sans casse ; l'extension `.ean` éventuelle est ôtée : une variante de
+    /// `charactertemplateanimation.ini` comme `IDLE` pour un `.glb` du client).
+    pub fn animation(&self, name: &str) -> Option<usize> {
+        let stem = name.strip_suffix(".ean").or_else(|| name.strip_suffix(".EAN")).unwrap_or(name);
+        self.animations.iter().position(|a| a.name.eq_ignore_ascii_case(stem))
+    }
+
+    /// Matrices globales (scène) de tous les nœuds, dans la pose de l'animation `anim` à `time`
+    /// secondes (bouclé sur sa durée), ou au repos sans animation.
+    pub fn node_matrices(&self, anim: Option<usize>, time: f32) -> Vec<Mat4> {
+        let mut t: Vec<Vec3> = self.nodes.iter().map(|n| n.translation).collect();
+        let mut r: Vec<Quat> = self.nodes.iter().map(|n| n.rotation).collect();
+        let mut s: Vec<Vec3> = self.nodes.iter().map(|n| n.scale).collect();
+        if let Some(a) = anim.and_then(|i| self.animations.get(i)) {
+            let time = if a.duration > 0.0 { time.rem_euclid(a.duration) } else { 0.0 };
+            for c in &a.channels {
+                if c.node >= self.nodes.len() {
+                    continue;
+                }
+                let v = sample_channel(c, time);
+                match c.path {
+                    GltfPath::Translation => t[c.node] = Vec3::new(v[0], v[1], v[2]),
+                    GltfPath::Scale => s[c.node] = Vec3::new(v[0], v[1], v[2]),
+                    GltfPath::Rotation => {
+                        let q = Quat::from_array(v);
+                        if q.is_finite() && q.length_squared() > 1e-12 {
+                            r[c.node] = q.normalize();
+                        }
+                    }
+                }
+            }
+        }
+        let mut out: Vec<Option<Mat4>> = vec![None; self.nodes.len()];
+        fn global(i: usize, nodes: &[GltfNode], local: &dyn Fn(usize) -> Mat4, out: &mut [Option<Mat4>], depth: usize) -> Mat4 {
+            if let Some(m) = out[i] {
+                return m;
+            }
+            let m = match nodes[i].parent.filter(|_| depth < 256) {
+                Some(p) => global(p, nodes, local, out, depth + 1) * local(i),
+                None => local(i),
+            };
+            out[i] = Some(m);
+            m
+        }
+        let local = |i: usize| Mat4::from_scale_rotation_translation(s[i], r[i], t[i]);
+        (0..self.nodes.len()).map(|i| global(i, &self.nodes, &local, &mut out, 0)).collect()
+    }
+
+    /// Sommets du maillage `mesh` (primitives bout à bout, comme [`upload`]) déformés par la peau
+    /// `skin` dans la pose `globals` ([`GltfModel::node_matrices`]) : position et normale mélangées par
+    /// `Σ poids × (global(articulation) × inverse de liaison)`, dans le repère de la scène (la matrice
+    /// du nœud du maillage ne compte pas, règle glTF). Un sommet sans poids garde sa position.
+    pub fn skinned_vertices(&self, mesh: usize, skin: usize, globals: &[Mat4]) -> Option<Vec<Vertex>> {
+        let (mesh, skin) = (self.meshes.get(mesh)?, self.skins.get(skin)?);
+        let mats: Vec<Mat4> = skin.joints.iter().zip(&skin.inverse_bind).map(|(&j, ib)| globals.get(j).copied().unwrap_or(Mat4::IDENTITY) * *ib).collect();
+        let mut out = Vec::with_capacity(mesh.primitives.iter().map(|p| p.vertices.len()).sum());
+        for p in &mesh.primitives {
+            for (i, v) in p.vertices.iter().enumerate() {
+                let (Some(j), Some(w)) = (p.joints.get(i), p.weights.get(i)) else {
+                    out.push(*v);
+                    continue;
+                };
+                let (pos, nor) = (Vec3::from(v.position), Vec3::from(v.normal));
+                let (mut pp, mut nn, mut total) = (Vec3::ZERO, Vec3::ZERO, 0.0);
+                for k in 0..4 {
+                    let Some(m) = mats.get(j[k] as usize).filter(|_| w[k] > 0.0) else { continue };
+                    pp += m.transform_point3(pos) * w[k];
+                    nn += m.transform_vector3(nor) * w[k];
+                    total += w[k];
+                }
+                let mut v = *v;
+                if total > 0.0 {
+                    v.position = (pp / total).to_array();
+                    let nn = nn.normalize_or_zero();
+                    if nn != Vec3::ZERO {
+                        v.normal = nn.to_array();
+                    }
+                }
+                out.push(v);
+            }
+        }
+        Some(out)
+    }
+
+    /// Repère du squelette : inverse de la matrice (au repos) du parent de l'articulation racine de la
+    /// première peau (l'armature), identité sans peau ni parent. Les `.glb` du client (Blender, montures
+    /// 5748 à 5777) portent l'échelle 0,01 et la rotation d'axes sur ce nœud : dans son repère, le modèle
+    /// est en centimètres, Y vers le haut, comme ArchLord (hauteur 433 ≈ `RIDER_HEIGHT` 430, selle à 281 =
+    /// rayon de `BOUNDING_SPHERE`) — repère **déduit des données**, la conversion d'Archonia n'est pas
+    /// relevée.
+    pub fn skeleton_space(&self) -> Mat4 {
+        let Some(skin) = self.skins.first() else { return Mat4::IDENTITY };
+        let root = skin.joints.iter().find(|&&j| self.nodes.get(j).and_then(|n| n.parent).is_none_or(|p| !skin.joints.contains(&p)));
+        let Some(parent) = root.and_then(|&j| self.nodes.get(j)?.parent) else { return Mat4::IDENTITY };
+        self.node_matrices(None, 0.0).get(parent).map_or(Mat4::IDENTITY, |m| m.inverse())
+    }
+
+    /// Nœud portant l'ID HAnim `id` d'après son nom, comme la table d'Archonia (FUN_140769280,
+    /// DAT_140d70270 : `RideNode`, `rideNode`, `Mount` → 20, … ; `Bone_<n>` → n) ; ArchRust lit aussi
+    /// un suffixe `_<n>` (`Saddle_20` des `.glb` du client : règle d'Archonia non retrouvée, déduite).
+    pub fn hanim_node(&self, id: u32) -> Option<usize> {
+        self.nodes.iter().position(|n| hanim_id(&n.name) == Some(id))
+    }
+}
+
+/// ID HAnim d'un nom de nœud glTF (voir [`GltfModel::hanim_node`]) ; seules les entrées du nœud de selle
+/// (20) de la table d'Archonia sont reprises, avec `Bone_<n>` et le suffixe `_<n>`.
+pub fn hanim_id(name: &str) -> Option<u32> {
+    if matches!(name, "RideNode" | "rideNode" | "Mount") {
+        return Some(20);
+    }
+    let (_, n) = name.rsplit_once('_')?;
+    n.parse::<u32>().ok().filter(|v| *v <= 0xffff)
+}
+
+/// Valeur d'un canal à `time` (secondes) : bornée aux clés extrêmes, palier ou interpolation
+/// linéaire (slerp pour les rotations).
+fn sample_channel(c: &GltfChannel, time: f32) -> [f32; 4] {
+    let upper = c.times.partition_point(|&k| k <= time);
+    if upper == 0 {
+        return c.values[0];
+    }
+    if upper >= c.times.len() || c.step {
+        return c.values[upper - 1];
+    }
+    let (t0, t1) = (c.times[upper - 1], c.times[upper]);
+    let f = if t1 > t0 { ((time - t0) / (t1 - t0)).clamp(0.0, 1.0) } else { 0.0 };
+    let (a, b) = (c.values[upper - 1], c.values[upper]);
+    if c.path == GltfPath::Rotation {
+        let (qa, qb) = (Quat::from_array(a), Quat::from_array(b));
+        if qa.length_squared() > 1e-12 && qb.length_squared() > 1e-12 {
+            return qa.normalize().slerp(qb.normalize(), f).to_array();
+        }
+        return a;
+    }
+    std::array::from_fn(|i| a[i] + (b[i] - a[i]) * f)
+}
+
+impl GltfModel {
     /// Positions de tous les sommets instanciés, dans le repère `root * matrice du nœud`.
     pub fn world_positions(&self, root: Mat4) -> Vec<Vec3> {
         let mut out = Vec::new();
@@ -383,6 +649,8 @@ fn visit(node: &gltf::Node, parent: Mat4, out: &mut Vec<GltfInstance>) {
                 .unwrap_or_else(|| format!("node{}", node.index())),
             mesh: mesh.index(),
             matrix,
+            node_index: node.index(),
+            skin: node.skin().map(|s| s.index()),
         });
     }
     for child in node.children() {
@@ -476,6 +744,27 @@ pub fn upload(
     texture_prefix: &str,
     scale: f32,
 ) -> Vec<(Arc<Mesh>, Mat4)> {
+    upload_with(renderer, model, texture_prefix, scale, true).into_iter().map(|(_, m, t)| (m, t)).collect()
+}
+
+/// Comme [`upload`], avec un maillage GPU propre à chaque instance (ses sommets sont réécrits par
+/// l'animation, voir `app_ride.rs`) et l'indice de l'instance dans [`GltfModel::instances`].
+pub fn upload_instances(
+    renderer: &mut Renderer,
+    model: &GltfModel,
+    texture_prefix: &str,
+    scale: f32,
+) -> Vec<(usize, Arc<Mesh>, Mat4)> {
+    upload_with(renderer, model, texture_prefix, scale, false)
+}
+
+fn upload_with(
+    renderer: &mut Renderer,
+    model: &GltfModel,
+    texture_prefix: &str,
+    scale: f32,
+    share: bool,
+) -> Vec<(usize, Arc<Mesh>, Mat4)> {
     let tex_names: Vec<String> = (0..model.images.len())
         .map(|i| format!("{texture_prefix}#{i}"))
         .collect();
@@ -487,12 +776,15 @@ pub fn upload(
     let mut gpu_meshes: Vec<Option<Arc<Mesh>>> = vec![None; model.meshes.len()];
     let root = Mat4::from_scale(Vec3::splat(if scale > 0.0 { scale } else { 1.0 }));
     let mut out = Vec::with_capacity(model.instances.len());
-    for inst in &model.instances {
+    for (index, inst) in model.instances.iter().enumerate() {
         let Some(mesh) = model.meshes.get(inst.mesh) else {
             continue;
         };
         if mesh.primitives.is_empty() {
             continue;
+        }
+        if !share {
+            gpu_meshes[inst.mesh] = None;
         }
         let gpu = gpu_meshes[inst.mesh].get_or_insert_with(|| {
             let mut vertices = Vec::new();
@@ -512,7 +804,7 @@ pub fn upload(
             }
             Arc::new(renderer.create_mesh(&vertices, &indices, parts))
         });
-        out.push((gpu.clone(), root * inst.matrix));
+        out.push((index, gpu.clone(), root * inst.matrix));
     }
     out
 }
@@ -789,5 +1081,69 @@ mod tests {
             [1, 2, 3]
         );
         assert!(load_uri("x.bin", &no_neighbour).is_err());
+    }
+
+    /// Noms de nœuds → ID HAnim (table d'Archonia pour la selle, `Bone_<n>`, suffixe `_<n>`).
+    #[test]
+    fn hanim_ids_of_node_names() {
+        for n in ["RideNode", "rideNode", "Mount", "Bone_20", "Saddle_20"] {
+            assert_eq!(hanim_id(n), Some(20), "{n}");
+        }
+        assert_eq!(hanim_id("Bone_7"), Some(7));
+        assert_eq!(hanim_id("Neck1_Joint"), None);
+        assert_eq!(hanim_id("Head_Joint"), None);
+        assert_eq!(hanim_id("ride"), None);
+    }
+
+    /// Canal : bornes, palier, linéaire, slerp.
+    #[test]
+    fn channel_sampling() {
+        let c = GltfChannel { node: 0, path: GltfPath::Translation, times: vec![0.0, 1.0], values: vec![[0.0; 4], [10.0, 0.0, 0.0, 0.0]], step: false };
+        assert_eq!(sample_channel(&c, -1.0)[0], 0.0);
+        assert_eq!(sample_channel(&c, 0.25)[0], 2.5);
+        assert_eq!(sample_channel(&c, 5.0)[0], 10.0);
+        assert_eq!(sample_channel(&GltfChannel { step: true, ..c.clone() }, 0.5)[0], 0.0);
+        let r = GltfChannel { path: GltfPath::Rotation, values: vec![Quat::IDENTITY.to_array(), Quat::from_rotation_y(1.0).to_array()], ..c };
+        let q = Quat::from_array(sample_channel(&r, 0.5));
+        assert!(q.abs_diff_eq(Quat::from_rotation_y(0.5), 1e-5));
+    }
+
+    /// Avec les données du client (`ARCHRUST_GAME_DIR`) : monture glTF `a0001674.glb` (TID 5748) — peau
+    /// de 92 articulations, animations IDLE / ROAR / RUN / ATTACK / DEATH, nœud de selle `Saddle_20` ;
+    /// au repos, la peau redonne les sommets du fichier ; la course déplace la peau et la selle.
+    #[test]
+    fn client_gltf_mount_skin_and_clips() {
+        let Some(dir) = std::env::var_os("ARCHRUST_GAME_DIR") else { return };
+        let assets = crate::assets::Assets::new(Some(dir.into()), &[]);
+        let pm = assets.patched_model("character/a0001674.ecl").expect("glb du client").unwrap();
+        let m = &pm.model;
+        assert_eq!(m.skins.len(), 1);
+        assert_eq!(m.skins[0].joints.len(), 92);
+        for name in ["IDLE", "ROAR", "RUN", "ATTACK", "DEATH"] {
+            assert!(m.animation(name).is_some(), "{name}");
+        }
+        assert_eq!(m.animation("idle.ean"), m.animation("IDLE"));
+        let ride = m.hanim_node(20).expect("selle");
+        assert_eq!(m.nodes[ride].name, "Saddle_20");
+        let inst = m.instances.iter().find(|i| i.skin.is_some()).expect("instance skinnée");
+        let rest = m.node_matrices(None, 0.0);
+        let skinned = m.skinned_vertices(inst.mesh, inst.skin.unwrap(), &rest).unwrap();
+        // Règle glTF : au repos, la peau redonne les sommets du fichier (repère de la scène).
+        let raw: Vec<Vec3> = m.meshes[inst.mesh].primitives.iter().flat_map(|p| p.vertices.iter().map(|v| Vec3::from(v.position))).collect();
+        let worst = skinned.iter().zip(&raw).map(|(a, b)| (Vec3::from(a.position) - *b).length()).fold(0.0f32, f32::max);
+        assert!(worst < 1e-3, "pose de repos : écart {worst}");
+        // Repère du squelette (armature, sans sa matrice 0,01 × rotation) : Y vers le haut, centimètres —
+        // hauteur 0 à 433 (RIDER_HEIGHT 430), selle à 281 (BOUNDING_SPHERE de 5748 : rayon 280,98).
+        let space = m.skeleton_space();
+        let (lo, hi) = raw.iter().fold((Vec3::splat(f32::MAX), Vec3::splat(f32::MIN)), |(l, h), p| (l.min(space.transform_point3(*p)), h.max(space.transform_point3(*p))));
+        assert!(lo.y > -10.0 && (hi.y - 433.0).abs() < 1.0, "{lo} {hi}");
+        let seat = space.transform_point3(rest[ride].w_axis.truncate());
+        assert!((seat.y - 280.9).abs() < 0.5 && seat.x.abs() < 5.0, "{seat}");
+        assert!(((space * rest[ride]).x_axis.truncate().length() - 1.0).abs() < 0.01, "échelle de la selle");
+        let run = m.animation("RUN").unwrap();
+        let (a, b) = (m.node_matrices(Some(run), 0.0), m.node_matrices(Some(run), 0.5));
+        assert!(!a[ride].abs_diff_eq(b[ride], 1e-3), "selle immobile pendant la course");
+        let moved = m.skinned_vertices(inst.mesh, inst.skin.unwrap(), &b).unwrap();
+        assert!(moved.iter().zip(&skinned).any(|(x, y)| (Vec3::from(x.position) - Vec3::from(y.position)).length() > 1e-3));
     }
 }

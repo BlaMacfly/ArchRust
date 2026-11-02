@@ -62,7 +62,7 @@ and the [ArchCore](https://github.com/BlaMacfly/ArchCore) server emulator. This 
 | Shrines (`UI_Shrine_info`), Battleground announcements, boss window (`UI_Boss`), sieges (siege windows, carving), ArchLord, taxes (`UI_TaxSteward`, `UI_TaxView`) | 🟡 tested against ArchCore packets (headless tests), to confirm in game |
 | Trade between players (`UI_PrivateTrade`, request and yes/no box, "Trade" entry of the target player menu), metamorphosis and Dragon Scion evolution (form model, equipment and targeting rules), Archonia effects (particles, trails, dependencies between elements, lights), secondary stats of `Character_Status` (criticals, ignores, reflects, resistances) | 🟡 tested against ArchCore packets and data (headless tests), to be confirmed in game |
 | Weapons, shields and lances in hand (nodes 101/102, `TRANSFORM_DATA` matrices), original mounts (saddle, followed animations), Archonia key bindings (`UI_Hotkey`, keyboard movement), exit window, help and tips, login through `UI_LG_IDPASSWORD` / `UI_SelectServer`, return to character selection, quick bar stored by the server, mastery windows, titles, Cash inventory and pet bag, orb resurrection, skill reset, party recall, social actions, Shrine shop | 🟡 tested against ArchCore packets and data (headless tests), to be confirmed in game |
-| Animated glTF mounts, stylist 3D preview | ⏳ to do |
+| Animated glTF mounts (skin and named animations of the `.glb`, rider on `Saddle_20` / `RideNode`), stylist 3D preview (off-screen render of the cloned character, rotation, zoom), RtAnim animations of effect objects (`effect/animation/*.EAN`, nodes followed by attached bases) | 🟡 tested against the client data (headless tests), to be confirmed in game |
 
 ## Quick start
 

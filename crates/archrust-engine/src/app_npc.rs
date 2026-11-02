@@ -69,7 +69,29 @@ struct QuestText {
     complete_money: i64,
     money: i64,
     exp: i64,
-    gifts: Vec<(String, i32)>,
+    /// Objets donnés (`Gift_ItemA` à `D`) et objets au choix (`SelectItem1` à `8`, le joueur en prend un).
+    gifts: Vec<QuestItem>,
+    choices: Vec<QuestItem>,
+}
+
+/// Objet d'une quête : colonnes `…_Count`, `…_Tid` (« TID;a;b »), `…_Upgrade_Slot`, `…_Upgrade_Intensify`
+/// (champs +8, +0xc, +0x10, +0x14 de l'élément de 0x20 octets du modèle, lecture FUN_1401e1900).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+struct QuestItem {
+    tid: i32,
+    count: i32,
+    slot: i32,
+    intensify: i32,
+    /// Deuxième nombre de la colonne `…_Tid`.
+    extra: i32,
+}
+
+impl QuestItem {
+    /// Balise d'objet du texte de quête (FUN_140657bf0 ; 0x140d5a028) : nombre, TID, emplacements,
+    /// renforcement, `extra`, puis 1 si l'objet se choisit (récompense au choix).
+    fn tag(&self, selectable: bool) -> String {
+        format!("<ITEM::{}::{}::{}::{}::{}::{}>", self.count, self.tid, self.slot, self.intensify, self.extra, i32::from(selectable))
+    }
 }
 
 /// Données des PNJ lues dans le client.
@@ -116,6 +138,9 @@ pub struct NpcGlue {
     quest_npc: Option<i32>,
     pub show_journal: bool,
     selected_quest: Option<i32>,
+    /// Récompense au choix cliquée : rang parmi les objets choisissables du texte, à partir de 0
+    /// (AgcUIQuestText +0x38, -1 sans choix ; clic LAB_14088c840).
+    reward_choice: Option<usize>,
     journal: BTreeMap<i32, QuestProgress>,
     done: HashSet<u32>,
     /// Fenêtres de saisie : achat (IID, quantité), vente (IID), argent (dépôt, montant).
@@ -146,6 +171,8 @@ const COIN_ITEM_TYPE: i64 = 2;
 const COIN_TYPE: i64 = 6;
 /// Statut AgpmItem de l'inventaire (piles comptées pour les pièces).
 const STATUS_INVENTORY: i8 = 2;
+/// Cases du sac : 4 sacs de 4 × 4.
+const BAG_CELLS: usize = 64;
 
 /// Lit les colonnes `NPC Charisma Price`, `NPC Shrine Coin`, `ItemType` et `Type` d'itemdatatable.txt.
 pub(super) fn parse_shrine_prices(text: &str) -> ShrinePrices {
@@ -352,11 +379,16 @@ fn load_data(assets: &Assets) -> NpcData {
                     q.monsters.push((name, n as i32));
                 }
             }
-            for g in ["A", "B", "C", "D"] {
-                if let Some(name) = get(&format!("Gift_Item{g}_Name")) {
-                    q.gifts.push((name, num(&format!("Gift_Item{g}_Count")).unwrap_or(1) as i32));
-                }
-            }
+            // « TID;a;b » (FUN_1401e1900 : « %d;%d;%d »).
+            let item = |prefix: &str| {
+                let raw = get(&format!("{prefix}_Tid"))?;
+                let mut parts = raw.split(';').map(|p| p.trim().parse::<i32>().unwrap_or(0));
+                let tid = parts.next().filter(|t| *t > 0)?;
+                let n = |k: &str| num(&format!("{prefix}_{k}")).unwrap_or(0) as i32;
+                Some(QuestItem { tid, count: n("Count"), slot: n("Upgrade_Slot"), intensify: n("Upgrade_Intensify"), extra: parts.next().unwrap_or(0) })
+            };
+            q.gifts = ["A", "B", "C", "D"].iter().filter_map(|g| item(&format!("Gift_Item{g}"))).collect();
+            q.choices = (1..=8).filter_map(|i| item(&format!("SelectItem{i}"))).collect();
             data.quests.insert(tid as i32, q);
         }
     }
@@ -420,9 +452,9 @@ impl NpcGlue {
     /// Texte d'une quête comme `QuestMainText_Display2` (FUN_140658ae0) : nom entre guillemets et `Area`,
     /// « Objectifs de quete » (sysstr 442) et les objectifs (FUN_140658620), « Recompense de quete » (443),
     /// argent (« %d %s », sysstr 10), expérience (« %s %d », sysstr 5), objets, puis « Informations de
-    /// quete » (441) et `Dialogue_Start`. Codes de couleur d'Archonia (`<H…>`) gardés. Choix d'ArchRust :
-    /// les objets donnés (`<ITEM::…>` dans Archonia, icônes) sont écrits « nom (nombre) » comme la ligne
-    /// « %s (%d) » de la même fonction ; les objectifs d'objets (sortes 3 et 11) sans le compte du sac.
+    /// quete » (441) et `Dialogue_Start`. Codes de couleur d'Archonia (`<H…>`) et balises d'objets
+    /// (`<ITEM::…>`, voir [`QuestItem::tag`]) gardés. Écarts : la ligne « %s (%d) » (+0x1c88 du modèle, non
+    /// identifié) n'est pas reprise ; les objectifs d'objets (sortes 3 et 11) sans le compte du sac.
     /// Ligne de `sysstr.txt`, gardée après la première lecture.
     fn sys(&mut self, assets: &Assets, id: u32) -> String {
         self.sys_cache.entry(id).or_insert_with(|| sysstr(assets, id).unwrap_or_default()).clone()
@@ -459,8 +491,16 @@ impl NpcGlue {
         if q.exp != 0 {
             t.push_str(&format!("{} {}\n", s(5), q.exp));
         }
-        for (name, count) in &q.gifts {
-            t.push_str(&format!("{name} ({count})\n"));
+        // Objets donnés puis, s'il y en a, « Selectionnez … » (sysstr 837, « </n></n><H%x>%s<H%x></n> ») et
+        // les objets au choix : balises `<ITEM::…>` dessinées en icônes (AgcUIQuestText, FUN_14088cd40).
+        for g in &q.gifts {
+            t.push_str(&g.tag(false));
+        }
+        if !q.choices.is_empty() {
+            t.push_str(&format!("\n\n{HEAD}{}{WHITE}\n", self.sys(assets, 837)));
+            for c in &q.choices {
+                t.push_str(&c.tag(true));
+            }
         }
         t.push_str(&format!("\n{HEAD}{}{WHITE}\n{}\n", s(441), q.start));
         t
@@ -701,7 +741,7 @@ pub fn panel(
     if let Some((journal, title, entries, text)) = &views.quests {
         let available = glue.selected_quest.is_some_and(|t| glue.state(t) == QuestState::Available);
         let left_label = glue.sys(assets, if available { 432 } else { 431 });
-        let view = QuestView { journal: *journal, title: title.clone(), entries, selected: glue.selected_quest, text: text.clone(), left_label };
+        let view = QuestView { journal: *journal, title: title.clone(), entries, selected: glue.selected_quest, text: text.clone(), left_label, reward_choice: glue.reward_choice };
         crate::hud::draw_quests(ctx, hud, assets, view, &mut out);
     }
     // Abandon : `QuestCancelDlg_Open` (« {{QuestMainCancel…}} » : sysstr 435 avec le nom, FUN_140655d60).
@@ -767,14 +807,36 @@ pub fn panel(
                 glue.quest_npc = None;
                 glue.show_journal = false;
             }
-            NpcUi::SelectQuest(tid) => glue.selected_quest = Some(tid),
+            NpcUi::SelectQuest(tid) => {
+                if glue.selected_quest != Some(tid) {
+                    glue.reward_choice = None;
+                }
+                glue.selected_quest = Some(tid);
+            }
+            NpcUi::QuestSelectReward(k) => glue.reward_choice = Some(k),
             // Journal plein (60 quêtes) : `QuestFull_Message` au lieu de la demande (FUN_140655180).
             NpcUi::QuestAccept(tid) if glue.journal.len() >= 60 => {
                 log::info!("quête {tid} : journal plein");
                 glue.info = Some(super::portal_glue::ui_event_cached(&mut glue.events, assets, "QuestFull_Message")).filter(|t| !t.is_empty());
             }
             NpcUi::QuestAccept(tid) => send(net, NpcCommand::QuestAccept { npc: glue.quest_npc, tid }),
-            NpcUi::QuestComplete(tid) => send(net, NpcCommand::QuestComplete { npc: glue.quest_npc, tid, reward: 0 }),
+            // FUN_140655330 / FUN_140654970 : place dans le sac pour les objets donnés (sinon
+            // `QuestInventoryMainFull_Message`), récompense au choix exigée s'il y en a (sinon uimessage
+            // `QuestSelectItem`, notice au centre de l'écran dans Archonia), puis op 2, champ 7 = rang choisi
+            // (-1 sans choix).
+            NpcUi::QuestComplete(tid) => {
+                let q = glue.data(assets).quests.get(&tid).cloned().unwrap_or_default();
+                let used = items.values().filter(|i| i.status == Some(STATUS_INVENTORY)).count();
+                if BAG_CELLS.saturating_sub(used) < q.gifts.len() {
+                    glue.info = Some(super::portal_glue::ui_event_cached(&mut glue.events, assets, "QuestInventoryMainFull_Message")).filter(|t| !t.is_empty());
+                } else if !q.choices.is_empty() && glue.reward_choice.is_none_or(|k| k >= q.choices.len()) {
+                    let text = crate::hud::ui_message(hud, assets, "QuestSelectItem");
+                    hud.push_system(&text);
+                } else {
+                    let reward = if q.choices.is_empty() { -1 } else { glue.reward_choice.map_or(-1, |k| k as i32) };
+                    send(net, NpcCommand::QuestComplete { npc: glue.quest_npc, tid, reward });
+                }
+            }
             NpcUi::QuestAbandon(tid) => glue.abandon = Some(tid),
         }
     }
@@ -1024,6 +1086,7 @@ impl App {
                 self.npc.quest_npc = Some(npc);
                 self.npc.show_journal = false;
                 self.npc.selected_quest = None;
+                self.npc.reward_choice = None;
             }
             // Boîtes `QuestStart_Message` (sysstr 436, FUN_140656240) et `QuestComplete_Message` (sysstr 437,
             // FUN_140655ce0) avec le nom de la quête ; les refus et l'abandon n'affichent rien.
@@ -1135,6 +1198,7 @@ impl App {
         if let Some(q) = v.quests.as_mut() {
             if self.npc.selected_quest.is_none_or(|t| !q.2.iter().any(|e| e.tid == t)) {
                 self.npc.selected_quest = q.2.first().map(|e| e.tid);
+                self.npc.reward_choice = None;
             }
             q.3 = match self.npc.selected_quest {
                 Some(t) => self.npc.quest_text(&assets, t, self.hud.stats.level.unwrap_or(0), self.hud.stats.money.unwrap_or(0)),
@@ -1231,6 +1295,13 @@ impl App {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn balise_des_objets_de_quete() {
+        let q = QuestItem { tid: 65461, count: 3, slot: 2, intensify: 5, extra: 1 };
+        assert_eq!(q.tag(false), "<ITEM::3::65461::2::5::1::0>");
+        assert_eq!(q.tag(true), "<ITEM::3::65461::2::5::1::1>");
+    }
 
     #[test]
     fn lecture_des_tables() {
