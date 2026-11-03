@@ -9,9 +9,8 @@
 //! Une ligne `set realmlist <hôte>[:<port>]` (guillemets facultatifs, casse indifférente) ; port
 //! 11002 par défaut ; lignes vides et commentaires `#`, `;` ou `//` ignorés ; la dernière ligne
 //! `realmlist` l'emporte. Le fichier est cherché à côté de l'exécutable, puis dans le dossier
-//! courant, puis dans le dossier `Game` du client. Il préremplit le serveur de l'écran de connexion
-//! (panneau d'ArchRust ou `UI_LG_IDPASSWORD`) et donne celui de `--connect` quand celui-ci ne précise
-//! pas d'hôte.
+//! courant, puis dans le dossier `Game` du client. Il préremplit le serveur du panneau de connexion
+//! d'ArchRust et donne celui de `--connect` quand celui-ci ne précise pas d'hôte.
 //!
 //! Repli : sans `realmlist.wtf`, le fichier d'Archonia `ArchoniaTest.ini` (lu en clair par
 //! FUN_1408eb790, mêmes dossiers) : XML `<IPInfo><ServerGroup><GroupName>…</GroupName><IP>hôte:port</IP>…`

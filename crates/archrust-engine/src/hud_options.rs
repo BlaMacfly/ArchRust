@@ -10,8 +10,7 @@
 //!   20 px) porte ce qu'Archonia n'a pas : langue du jeu (textes du serveur, extension ArchCore, et du
 //!   client, dossier `ini_*` lu au démarrage) et
 //!   packs de ressources (activation ; l'ordre se règle dans `packs.toml`), AddOns (activation,
-//!   `AddOns.txt`, appliquée aussitôt en jeu par un rechargement de l'interface), écran de connexion
-//!   (fenêtres d'Archonia `UI_LG_IDPASSWORD` / `UI_SelectServer` au lieu du panneau d'ArchRust).
+//!   `AddOns.txt`, appliquée aussitôt en jeu par un rechargement de l'interface).
 //! - **GFX** : listes `OP_CharView` et `OP_MapView` (distances des personnages et de la carte,
 //!   « Proche » à « Global », un clic passe au choix suivant), `OP_Nature` (environnement bas à haut :
 //!   densité de la météo) et son bouton détail, qui ouvre `Option_Detail_Nature` (reflets
@@ -73,8 +72,6 @@ pub struct OptionsEdit<'a> {
     pub video: &'a mut VideoOptions,
     /// Résolutions proposées par `OP_Resolution` (modes du moniteur, 12 au plus comme AgcmUIOption +0x38c8).
     pub resolutions: &'a [(u32, u32)],
-    /// Écran de connexion d'Archonia (voir `ClientOptions::archonia_login`).
-    pub archonia_login: &'a mut bool,
 }
 
 /// Case des onglets Affichage et Fonction reliée à un réglage d'ArchRust, d'après son rappel.
@@ -121,7 +118,6 @@ enum AdvAction {
     Pack(String, bool),
     PacksReset,
     Addon(String, bool),
-    ArchoniaLogin(bool),
 }
 
 /// Options ; `None` si les fenêtres d'Archonia manquent (le moteur garde alors sa fenêtre egui).
@@ -136,7 +132,7 @@ pub fn draw_options(ctx: &egui::Context, hud: &mut HudState, assets: &Assets, ed
     let mut new_tab = None;
     let rows = if tab == 4 { advanced_rows(&edit) } else { Vec::new() };
     let mut adv_click: Option<AdvAction> = None;
-    let OptionsEdit { audio, language, packs, display, refuse, video, resolutions, archonia_login, .. } = edit;
+    let OptionsEdit { audio, language, packs, display, refuse, video, resolutions, .. } = edit;
     // Listes déroulantes actives (rectangle, rappel) : leur flèche `Common_Button_PGDN` est un
     // contrôle enfant sans nom posé dedans.
     let mut combos: Vec<(Rect, &str)> = Vec::new();
@@ -338,10 +334,6 @@ pub fn draw_options(ctx: &egui::Context, hud: &mut HudState, assets: &Assets, ed
         }
         Some(AdvAction::PacksReset) => out.pack_action = PackAction::Reset,
         Some(AdvAction::Addon(name, enabled)) => out.addon_toggle = Some((name, enabled)),
-        Some(AdvAction::ArchoniaLogin(on)) => {
-            *archonia_login = on;
-            out.changed = true;
-        }
         None => {}
     }
     if let Some(t) = new_tab {
@@ -534,7 +526,7 @@ fn slider(ctx: &egui::Context, ui: &mut egui::Ui, hud: &mut HudState, assets: &A
     changed
 }
 
-/// Lignes de l'onglet Avancé : langue, packs graphismes et sons, AddOns, puis écran de connexion.
+/// Lignes de l'onglet Avancé : langue, packs graphismes et sons, puis AddOns.
 fn advanced_rows(edit: &OptionsEdit) -> Vec<AdvRow> {
     use archrust_patch::Category;
     let mut rows = vec![AdvRow::Category("Langue du jeu (textes du client au prochain démarrage)".into())];
@@ -561,12 +553,6 @@ fn advanced_rows(edit: &OptionsEdit) -> Vec<AdvRow> {
         let label = if title.is_empty() || title == name { name.clone() } else { format!("{title} ({name})") };
         rows.push(AdvRow::Item { label, checked: *enabled, action: AdvAction::Addon(name.clone(), !*enabled) });
     }
-    rows.push(AdvRow::Category("Écran de connexion".into()));
-    rows.push(AdvRow::Item {
-        label: "Fenêtres d'Archonia (au lieu du panneau d'ArchRust)".into(),
-        checked: *edit.archonia_login,
-        action: AdvAction::ArchoniaLogin(!*edit.archonia_login),
-    });
     if edit.packs_restart {
         rows.push(AdvRow::Category("Redémarrez le client pour appliquer les changements.".into()));
     }

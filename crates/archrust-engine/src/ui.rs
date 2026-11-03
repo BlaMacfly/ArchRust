@@ -1,9 +1,8 @@
 //! Interface : panneaux egui du client (connexion, discussion, console, informations) et rendu
 //! des frames Lua des AddOns (rectangles, textes, barres) d'après leur mise en page.
 //!
-//! Connexion : panneau illustré d'ArchRust ([`login_panel`], écran par défaut) ; les fenêtres
-//! d'Archonia (`UI_LG_IDPASSWORD` / `UI_SelectServer`, `hud_login.rs`) le remplacent quand l'option
-//! « Écran de connexion » de l'onglet Avancé est cochée (`archonia_login` d'`options.toml`).
+//! Connexion : panneau illustré d'ArchRust ([`login_panel`]), seul écran de saisie du compte ; la
+//! sélection et la création de personnage sont les fenêtres d'Archonia (`hud_login.rs`).
 
 use archrust_addons::ui::{color_segments, Rect};
 use archrust_addons::AddonManager;
@@ -15,14 +14,8 @@ pub struct UiState {
     pub port: String,
     pub user: String,
     pub password: String,
-    /// Mondes du serveur de connexion (`UI_SelectServer`) et monde choisi.
-    pub worlds: Vec<archrust_netclient::login::WorldInfo>,
+    /// Monde joint : le premier annoncé par le serveur de connexion.
     pub selected_world: Option<String>,
-    /// Groupes de mondes repliés dans la liste (`LG_ServerTreeButton`).
-    pub folded_groups: Vec<String>,
-    /// Choix du monde de la connexion en cours : liste `UI_SelectServer` (toujours avec les fenêtres
-    /// d'Archonia, si plusieurs mondes avec le panneau d'ArchRust) ou premier monde (`--connect`).
-    pub world_choice: crate::net::WorldChoice,
     /// Dernier personnage joué (présélectionné à l'écran de sélection).
     pub character: String,
     /// Personnages du compte, reçus après l'authentification.
@@ -118,10 +111,7 @@ impl Default for UiState {
             user: "test".into(),
             password: "test".into(),
             character: "Testeur".into(),
-            worlds: Vec::new(),
             selected_world: None,
-            folded_groups: Vec::new(),
-            world_choice: crate::net::WorldChoice::First,
             characters: Vec::new(),
             selected_character: None,
             creation: None,
@@ -181,9 +171,9 @@ pub fn options_panel(
     if !st.show_options {
         return false;
     }
-    let crate::options::ClientOptions { audio, language, display, refuse, video, archonia_login } = options;
+    let crate::options::ClientOptions { audio, language, display, refuse, video } = options;
     // Fenêtres d'options d'Archonia (`Option_*`, voir `hud_options.rs`).
-    let edit = crate::hud::OptionsEdit { audio, language, languages: LANGUAGES, packs, packs_restart: st.packs_restart, addons: &st.addon_list, display, refuse, video, resolutions: &st.resolutions, archonia_login };
+    let edit = crate::hud::OptionsEdit { audio, language, languages: LANGUAGES, packs, packs_restart: st.packs_restart, addons: &st.addon_list, display, refuse, video, resolutions: &st.resolutions };
     if let Some(out) = crate::hud::draw_options(ctx, hud, assets, edit) {
         *pack_action = out.pack_action;
         if out.addon_toggle.is_some() {
@@ -383,11 +373,8 @@ impl UiState {
 /// Résultat des interactions de l'image.
 #[derive(Default)]
 pub struct UiActions {
-    /// « Connexion » du panneau d'ArchRust ou « Confirm » d'`UI_LG_IDPASSWORD` : connexion au serveur
-    /// de connexion (liste des mondes).
+    /// « Connexion » du panneau d'ArchRust : connexion au serveur de connexion.
     pub connect: bool,
-    /// « Connect » d'`UI_SelectServer` sur ce monde.
-    pub select_world: Option<String>,
     /// Écran de sélection : personnage à jouer, personnage à créer, retour à la connexion.
     pub enter_character: Option<String>,
     pub back_to_login: bool,

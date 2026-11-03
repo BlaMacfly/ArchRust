@@ -164,7 +164,7 @@ pub use social_ui::{draw_shrine_buy_confirm, draw_social_action, ShrineBuyUi, Sh
 mod petbag_ui;
 pub use petbag_ui::{draw_cash_inventory, draw_sub_inventory, CashInvenView, CashLine, PetBagUi, SubInvenView, CASH_ROWS};
 pub use options_ui::{draw_options, OptionsEdit, OptionsOut};
-pub use login_ui::{draw_char_create, draw_char_select, draw_id_password, draw_select_server, CharSlotView, CreateUi, LoginUi, SelectUi};
+pub use login_ui::{draw_char_create, draw_char_select, CharSlotView, CreateUi, SelectUi};
 pub use menu_ui::{draw_main_menu, main_menu_open, toggle_options_menu, MenuUi};
 pub use party_ui::{draw_party, party_face, PartyFrame, PartyFrames, PartyUi, PartyUiState};
 pub use dialogs_ui::{info_box, confirm_box, draw_bank_money, draw_buy_count, draw_dialog, draw_drop_money, draw_split, ui_message, DialogOut};
@@ -630,7 +630,6 @@ impl HudState {
                 .chain(skills_ui::QUICKBELT_WINDOWS.iter())
                 .chain(hotkey_ui::HOTKEY_WINDOWS.iter())
                 .chain(help_ui::HELP_WINDOWS.iter())
-                .chain(login_ui::LOGIN_WINDOWS.iter())
                 .chain(mastery_ui::MASTERY_WINDOWS.iter())
                 .chain([mastery_ui::SCION_ARCHLORD_WINDOW].iter())
                 .chain(social_ui::SOCIAL_WINDOWS.iter())

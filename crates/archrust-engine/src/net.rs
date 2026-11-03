@@ -1,11 +1,9 @@
 //! Liaison réseau : fait tourner `archrust-netclient` sur un fil tokio et échange avec la boucle
 //! de rendu par canaux.
 //!
-//! Ordre d'Archonia : serveur de connexion joint (liste des mondes, clé de hachage) → écran
-//! `UI_SelectServer` → « Connect » sur un monde (`LoginCommand::SelectWorld`) → compte, monde,
-//! personnages → sélection et création → entrée dans le monde. Écran de connexion d'ArchRust (par
-//! défaut) : même ordre, la liste des mondes n'apparaît que si le serveur en annonce plusieurs, sinon
-//! premier monde ; `--connect` : toujours le premier monde (voir [`WorldChoice`]).
+//! Ordre : serveur de connexion joint (liste des mondes, clé de hachage) → compte, premier monde
+//! annoncé, personnages → sélection et création → entrée dans le monde (panneau de connexion
+//! d'ArchRust comme `--connect`).
 //! Retour à la sélection des personnages (« Select Character » d'`UI_EXIT`, AgpmReturnToLogin) : la boucle de
 //! jeu rend la clé de l'op 5, la liaison rejoint le serveur de connexion (`LoginClient::return_to_selection`)
 //! et reprend aux écrans de sélection et de création, sans relancer le client.
@@ -18,31 +16,7 @@ use archrust_netclient::world::SessionEnd;
 use std::sync::mpsc as std_mpsc;
 use tokio::sync::mpsc;
 
-/// Choix du monde après la liste du serveur de connexion.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-pub enum WorldChoice {
-    /// Premier monde annoncé, sans écran (`--connect`).
-    #[default]
-    First,
-    /// Écran `UI_SelectServer` dans tous les cas (fenêtres de connexion d'Archonia).
-    List,
-    /// Écran `UI_SelectServer` si le serveur annonce plusieurs mondes, sinon premier monde (écran de
-    /// connexion d'ArchRust).
-    ListIfSeveral,
-}
-
-impl WorldChoice {
-    /// La liste des mondes s'affiche-t-elle (la liaison attend alors `LoginCommand::SelectWorld`) ?
-    pub fn lists(self, worlds: usize) -> bool {
-        match self {
-            WorldChoice::First => false,
-            WorldChoice::List => true,
-            WorldChoice::ListIfSeveral => worlds > 1,
-        }
-    }
-}
-
-/// Identifiants saisis à l'écran de connexion (panneau d'ArchRust ou `UI_LG_IDPASSWORD`).
+/// Identifiants saisis au panneau de connexion d'ArchRust (ou donnés par `--connect`).
 #[derive(Debug, Clone)]
 pub struct Credentials {
     pub host: String,
@@ -53,9 +27,6 @@ pub struct Credentials {
     /// sélection, après la liste des personnages du compte.
     pub character: Option<String>,
     pub create_if_missing: bool,
-    /// Monde : quand la liste s'affiche (voir [`WorldChoice::lists`]), la liaison envoie la liste des
-    /// mondes et attend `LoginCommand::SelectWorld` avant d'authentifier le compte ; sinon premier monde.
-    pub world_choice: WorldChoice,
     /// Langue des textes du serveur (Options), annoncée au `HELLO` des deux connexions.
     pub language: Option<String>,
 }
@@ -69,9 +40,6 @@ pub const LANGUAGE_REQUEST_ID: u32 = 0x4000_0001;
 /// `LG_CharacterCreateOK`).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum LoginCommand {
-    /// « Connect » sur un monde de `UI_SelectServer` (`LG_SelectServer`) : authentification du compte
-    /// puis choix du monde.
-    SelectWorld(String),
     /// Entrer dans le monde avec ce personnage du compte.
     Enter(String),
     /// Ouvrir l'écran de création : le serveur envoie ses modèles de base.
@@ -92,9 +60,9 @@ pub enum LoginCommand {
 pub enum NetEvent {
     Status(String),
     Error(String),
-    /// Mondes annoncés par le serveur de connexion (`Login_Servers` d'`UI_SelectServer`).
+    /// Mondes annoncés par le serveur de connexion (le premier est joint).
     Worlds(Vec<WorldInfo>),
-    /// Compte refusé par le serveur (`LG_IDPASSWORD_FAILD`) : la liaison s'arrête.
+    /// Compte refusé par le serveur : la liaison s'arrête.
     AuthRefused(String),
     Characters(Vec<CharacterSummary>),
     /// Modèles de base de l'écran de création.
@@ -171,17 +139,8 @@ async fn session(
     status(format!("connexion à {}:{}…", creds.host, creds.port));
     let mut login = LoginClient::connect_with(&creds.host, creds.port, creds.language.as_deref()).await?;
     let _ = ev.send(NetEvent::Worlds(login.worlds.clone()));
-    // Écran `UI_SelectServer` : rien n'est envoyé du compte avant « Connect » sur un monde.
-    let world = if creds.world_choice.lists(login.worlds.len()) {
-        loop {
-            match choice_rx.recv().await.ok_or_else(|| anyhow::anyhow!("connexion annulée"))? {
-                LoginCommand::SelectWorld(name) => break name,
-                other => log::debug!("choix ignoré avant celui du monde : {other:?}"),
-            }
-        }
-    } else {
-        login.worlds.first().map(|w| w.name.clone()).unwrap_or_else(|| "ArchCore".into())
-    };
+    // Premier monde annoncé.
+    let world = login.worlds.first().map(|w| w.name.clone()).unwrap_or_else(|| "ArchCore".into());
     status("authentification…".into());
     match login.authenticate(&creds.user, &creds.password).await {
         Ok(()) => {}
@@ -243,7 +202,6 @@ async fn session(
                         login.delete_character(&name).await?;
                         let _ = ev.send(NetEvent::CharacterDeleted(name));
                     }
-                    LoginCommand::SelectWorld(_) => {}
                 }
             },
         };
@@ -292,21 +250,5 @@ async fn session(
         .await?;
         login = again;
         let _ = ev.send(NetEvent::Characters(chars));
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::WorldChoice;
-
-    #[test]
-    fn liste_des_mondes() {
-        // `--connect` : premier monde ; fenêtres d'Archonia : toujours la liste ; panneau d'ArchRust :
-        // la liste dès deux mondes.
-        assert!(!WorldChoice::First.lists(3));
-        assert!(WorldChoice::List.lists(1));
-        assert!(!WorldChoice::ListIfSeveral.lists(1));
-        assert!(!WorldChoice::ListIfSeveral.lists(0));
-        assert!(WorldChoice::ListIfSeveral.lists(2));
     }
 }

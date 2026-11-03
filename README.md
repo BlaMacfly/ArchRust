@@ -67,7 +67,7 @@ Licence : [GPL-3.0-or-later](LICENSE.md).
 | Invocations et familiers (`UI_TargetSummonsMenu`), heure du monde, ciel d'après `skyset.ini` (nuages, étoiles, lune, brouillard, lumière), pluie et neige | 🟡 testé contre les paquets d'ArchCore (tests sans affichage), à confirmer en jeu |
 | Shrines (`UI_Shrine_info`), annonces du Battleground, fenêtre des boss (`UI_Boss`), sièges (fenêtres du siège, carving), ArchLord, taxes (`UI_TaxSteward`, `UI_TaxView`) | 🟡 testé contre les paquets d'ArchCore (tests sans affichage), à confirmer en jeu |
 | Échange entre joueurs (`UI_PrivateTrade`, demande et boîte oui/non, entrée « Trade » du menu du joueur ciblé), métamorphose et évolution du Dragon Scion (modèle de la forme, règles d'équipement et de cible), effets d'Archonia (particules, traînées, dépendances entre éléments, lumières), caractéristiques secondaires de `Character_Status` (critiques, ignorances, renvois, résistances) | 🟡 testé contre les paquets et les données d'ArchCore (tests sans affichage), à confirmer en jeu |
-| Armes, boucliers et lances en main (nœuds 101/102, matrices `TRANSFORM_DATA`), montures d'origine (selle, animations suivies), touches d'Archonia (`UI_Hotkey`, déplacement au clavier), fenêtre de sortie, aide et astuces, connexion par le panneau d'ArchRust (fenêtres d'Archonia `UI_LG_IDPASSWORD` / `UI_SelectServer` en option), retour à la sélection, barre de raccourcis gardée par le serveur, fenêtres de maîtrise, titres, inventaire Cash et sac du familier, résurrection par orbe, oubli des compétences, rappel de groupe, actions sociales, boutique des Shrines | 🟡 testé contre les paquets et les données d'ArchCore (tests sans affichage), à confirmer en jeu |
+| Armes, boucliers et lances en main (nœuds 101/102, matrices `TRANSFORM_DATA`), montures d'origine (selle, animations suivies), touches d'Archonia (`UI_Hotkey`, déplacement au clavier), fenêtre de sortie, aide et astuces, connexion par le panneau d'ArchRust, retour à la sélection, barre de raccourcis gardée par le serveur, fenêtres de maîtrise, titres, inventaire Cash et sac du familier, résurrection par orbe, oubli des compétences, rappel de groupe, actions sociales, boutique des Shrines | 🟡 testé contre les paquets et les données d'ArchCore (tests sans affichage), à confirmer en jeu |
 | Montures glTF animées (peau et animations nommées du `.glb`, cavalier sur `Saddle_20` / `RideNode`), aperçu 3D du coiffeur (rendu hors écran du personnage cloné, rotation, zoom), animations RtAnim des objets d'effet (`effect/animation/*.EAN`, nœuds suivis par les bases rattachées) | 🟡 testé contre les données du client (tests sans affichage), à confirmer en jeu |
 
 ## Démarrage rapide
@@ -135,14 +135,8 @@ Eternal Storm ») et, par-dessus, le panneau illustré `crates/archrust-engine/a
 « Options » sont posés sur leur dessin. Les deux images sont intégrées à l'exécutable. La case mémorise
 identifiant, mot de passe et dernier personnage, chiffrés pour la session Windows (DPAPI,
 `saved-variables/compte.dat`), et les reprend au démarrage ; décochée, le fichier est effacé à la
-connexion suivante. Si le serveur annonce plusieurs mondes, leur liste (`UI_SelectServer`, « Connect » ou
-double clic) s'affiche avant l'envoi du compte ; avec un seul monde, il est pris d'office.
-
-Les fenêtres de connexion d'Archonia restent disponibles : **Options → Avancé → « Écran de connexion :
-Fenêtres d'Archonia »** (ou `archonia_login = true` dans `saved-variables/options.toml`), désactivé par
-défaut. La saisie du compte passe alors par `UI_LG_IDPASSWORD` (« Confirm »), puis toujours par le choix
-du monde (`UI_SelectServer`) ; le compte n'est envoyé qu'au « Connect ». Dans les deux cas, `--connect`
-prend le premier monde. Comme dans WoW, l'interface des AddOns n'apparaît qu'en jeu.
+connexion suivante. Le premier monde annoncé par le serveur est pris d'office, comme avec `--connect`.
+Comme dans WoW, l'interface des AddOns n'apparaît qu'en jeu.
 
 Après la connexion, l'écran de sélection reprend la scène d'Archonia (personnages du compte dans
 la salle du trône, clic pour choisir) ; « Créer un personnage » ouvre la scène de création de la

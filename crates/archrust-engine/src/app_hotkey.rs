@@ -898,7 +898,7 @@ impl App {
 
     /// Choix des fenêtres de l'image précédente.
     pub(super) fn hotkey_frame(&mut self) {
-        // Monde choisi dans `UI_SelectServer` (`AgcmLogin`+0x1764).
+        // Monde joint à la connexion (`AgcmLogin`+0x1764).
         self.hotkey.world = self.ui.selected_world.clone();
         for r in std::mem::take(&mut self.hotkey.requests) {
             match r {

@@ -23,10 +23,6 @@ pub struct ClientOptions {
     pub refuse: RefuseOptions,
     /// Onglet « GFX » (`Option_Video`).
     pub video: VideoOptions,
-    /// Écran de connexion : fenêtres d'Archonia (`UI_LG_IDPASSWORD`, puis `UI_SelectServer`) au lieu
-    /// du panneau d'ArchRust (par défaut). Onglet « Avancé », ou `archonia_login = true` dans
-    /// `options.toml`.
-    pub archonia_login: bool,
 }
 
 /// Affichage des noms au-dessus des personnages et du casque, comme `[ETC_Option]` de `COption.ini`
@@ -255,12 +251,11 @@ mod tests {
         o.language = None;
         save(&tmp, &o).unwrap();
         assert_eq!(load(&tmp).language, None);
-        // Écran de connexion : panneau d'ArchRust par défaut, fenêtres d'Archonia sur option.
-        assert!(!o.archonia_login);
-        o.archonia_login = true;
-        save(&tmp, &o).unwrap();
-        assert!(std::fs::read_to_string(path(&tmp)).unwrap().contains("archonia_login = true"));
-        assert!(load(&tmp).archonia_login);
+        // Ancienne option `archonia_login` (écran de connexion d'Archonia, retiré) : ignorée.
+        std::fs::write(path(&tmp), "archonia_login = true\n[audio]\nmusic = 0.25\nmuted = true\n").unwrap();
+        let old = load(&tmp);
+        assert_eq!(old.audio.music, 0.25);
+        assert!(!toml::to_string(&old).unwrap().contains("archonia_login"));
         // Clé inconnue ou manquante : valeurs par défaut pour le reste.
         std::fs::write(path(&tmp), "[audio]\neffects = 0.1\nfutur = 3\n").unwrap();
         let o = load(&tmp);
