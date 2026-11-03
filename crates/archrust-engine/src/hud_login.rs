@@ -3,6 +3,10 @@
 //! personnages (`UI_LG_CHARSELECT`, 1024 × 768) avec confirmation de suppression
 //! (`UI_ConfirmDeleteChar`), création (`UI_LG_CHARCREATE`).
 //!
+//! La saisie du compte par défaut est le panneau d'ArchRust (`ui::login_panel`) ; `UI_LG_IDPASSWORD`
+//! le remplace avec l'option `archonia_login` (onglet Avancé). `UI_SelectServer` sert aux deux : toujours
+//! après `UI_LG_IDPASSWORD`, après le panneau d'ArchRust si le serveur annonce plusieurs mondes.
+//!
 //! `UI_LG_IDPASSWORD` et `UI_SelectServer` existent en trois variantes (1024 × 768, 1280 × 1024,
 //! 1600 × 1200) : la plus grande qui tient dans la fenêtre est agrandie sans déformation et centrée,
 //! sur son fond `LG_2D_Back_*.png` recadré à toute la fenêtre.

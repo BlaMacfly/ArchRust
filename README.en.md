@@ -61,7 +61,7 @@ and the [ArchCore](https://github.com/BlaMacfly/ArchCore) server emulator. This 
 | Summons and pets (`UI_TargetSummonsMenu`), world time, sky from `skyset.ini` (clouds, stars, moon, fog, light), rain and snow | 🟡 tested against ArchCore packets (headless tests), to confirm in game |
 | Shrines (`UI_Shrine_info`), Battleground announcements, boss window (`UI_Boss`), sieges (siege windows, carving), ArchLord, taxes (`UI_TaxSteward`, `UI_TaxView`) | 🟡 tested against ArchCore packets (headless tests), to confirm in game |
 | Trade between players (`UI_PrivateTrade`, request and yes/no box, "Trade" entry of the target player menu), metamorphosis and Dragon Scion evolution (form model, equipment and targeting rules), Archonia effects (particles, trails, dependencies between elements, lights), secondary stats of `Character_Status` (criticals, ignores, reflects, resistances) | 🟡 tested against ArchCore packets and data (headless tests), to be confirmed in game |
-| Weapons, shields and lances in hand (nodes 101/102, `TRANSFORM_DATA` matrices), original mounts (saddle, followed animations), Archonia key bindings (`UI_Hotkey`, keyboard movement), exit window, help and tips, login through `UI_LG_IDPASSWORD` / `UI_SelectServer`, return to character selection, quick bar stored by the server, mastery windows, titles, Cash inventory and pet bag, orb resurrection, skill reset, party recall, social actions, Shrine shop | 🟡 tested against ArchCore packets and data (headless tests), to be confirmed in game |
+| Weapons, shields and lances in hand (nodes 101/102, `TRANSFORM_DATA` matrices), original mounts (saddle, followed animations), Archonia key bindings (`UI_Hotkey`, keyboard movement), exit window, help and tips, login through the ArchRust panel (Archonia's `UI_LG_IDPASSWORD` / `UI_SelectServer` windows as an option), return to character selection, quick bar stored by the server, mastery windows, titles, Cash inventory and pet bag, orb resurrection, skill reset, party recall, social actions, Shrine shop | 🟡 tested against ArchCore packets and data (headless tests), to be confirmed in game |
 | Animated glTF mounts (skin and named animations of the `.glb`, rider on `Saddle_20` / `RideNode`), stylist 3D preview (off-screen render of the cloned character, rotation, zoom), RtAnim animations of effect objects (`effect/animation/*.EAN`, nodes followed by attached bases) | 🟡 tested against the client data (headless tests), to be confirmed in game |
 
 ## Quick start
@@ -99,7 +99,7 @@ set realmlist 127.0.0.1:11002
 
 Form `set realmlist <host>[:<port>]` (port 11002 by default, optional quotes, the last line wins).
 The file is looked up next to the executable, then in the current folder, then in the `Game`
-folder; it sets the login screen's server. Without `realmlist.wtf`, ArchRust falls back to Archonia's
+folder; it pre-fills the login screen's server. Without `realmlist.wtf`, ArchRust falls back to Archonia's
 `ArchoniaTest.ini` (XML `IPInfo/ServerGroup/GroupName/IP`, first address). `--connect user:pass@/character`
 (no host) connects to that server; a host given to `--connect` still takes precedence.
 
@@ -115,9 +115,19 @@ resource packs and game data; no pack can disable it. Restart the client after a
 server announces another fingerprint (or the folder is missing), a warning is written to the log.
 This folder is server-specific and never published (`.gitignore`). Details: `docs/FORMATS.md`.
 
-Login uses Archonia's windows: account entry (`UI_LG_IDPASSWORD`, "Confirm"), then world selection
-(`UI_SelectServer`: the login server's world list, "Connect" or a second click on a world), then character
-selection. The account is only sent on "Connect". `--connect` takes the first world. As in WoW, AddOn UI
+The login screen shows `crates/archrust-engine/assets/login-screen.png` ("ArchRust — Awakening of the
+Eternal Storm") with the illustrated panel `crates/archrust-engine/assets/login-panel.png` on top: the fields
+(server, port, account, password), the "Remember account" box and the "Connect" and "Options" buttons sit
+on their artwork. Both images are embedded in the executable. The box remembers the login, password and
+last character, encrypted for the Windows session (DPAPI, `saved-variables/compte.dat`), and restores
+them on start-up; unticked, the file is erased on the next login. If the server announces several worlds,
+their list (`UI_SelectServer`, "Connect" or a second click) appears before the account is sent; with a
+single world, it is taken directly.
+
+Archonia's login windows are still available: **Options → Advanced → "Login screen: Archonia windows"**
+(or `archonia_login = true` in `saved-variables/options.toml`), off by default. Account entry then goes
+through `UI_LG_IDPASSWORD` ("Confirm"), always followed by world selection (`UI_SelectServer`); the
+account is only sent on "Connect". In both cases, `--connect` takes the first world. As in WoW, AddOn UI
 only appears in game.
 
 After login, the selection screen uses Archonia's scene (account characters in the throne room,

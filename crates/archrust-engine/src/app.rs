@@ -5,7 +5,7 @@ use crate::assets::Assets;
 use crate::audio::Audio;
 use crate::camera::OrbitCamera;
 use crate::login_settings::{self, LoginSettings, SceneCamera};
-use crate::net::{Credentials, LoginCommand, NetEvent, NetLink};
+use crate::net::{Credentials, LoginCommand, NetEvent, NetLink, WorldChoice};
 use crate::objects::WorldObjects;
 use crate::render::{DrawItem, Mesh, Renderer};
 use crate::scene::{
@@ -218,11 +218,13 @@ pub struct Config {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Phase {
-    /// Saisie du compte (`UI_LG_IDPASSWORD`).
+    /// Saisie du compte : panneau d'ArchRust (`ui::login_panel`), ou `UI_LG_IDPASSWORD` avec l'option
+    /// `archonia_login`.
     Login,
     Connecting,
     /// Serveur de connexion joint : choix du monde (`UI_SelectServer`, la liaison attend
-    /// `LoginCommand::SelectWorld`).
+    /// `LoginCommand::SelectWorld`) ; avec le panneau d'ArchRust, seulement si le serveur annonce
+    /// plusieurs mondes.
     SelectServer,
     /// Authentifié : choix du personnage du compte (la liaison attend `NetLink::choose`).
     CharacterSelect,
@@ -797,7 +799,7 @@ impl App {
                 if let Some(name) = &character {
                     self.ui.character = name.clone();
                 }
-                self.start_connection(character, false);
+                self.start_connection(character, WorldChoice::First);
             } else {
                 log::warn!(
                     "--connect : forme attendue utilisateur:motdepasse@hôte:port/personnage"
@@ -1256,17 +1258,17 @@ impl App {
         }
     }
 
-    /// Connexion au serveur de connexion ; `choose_world` : liste des mondes à l'écran
-    /// `UI_SelectServer` avant l'authentification (sinon premier monde, `--connect`).
-    fn start_connection(&mut self, character: Option<String>, choose_world: bool) {
+    /// Connexion au serveur de connexion ; `world_choice` : liste des mondes à l'écran
+    /// `UI_SelectServer` avant l'authentification, ou premier monde (`--connect`).
+    fn start_connection(&mut self, character: Option<String>, world_choice: WorldChoice) {
         let port = self.ui.port.trim().parse().unwrap_or(11002);
         self.choosing_character = character.is_none();
         self.ui.characters.clear();
         self.ui.selected_character = None;
         self.ui.worlds.clear();
-        self.ui.choose_world = choose_world;
+        self.ui.world_choice = world_choice;
         let creds = Credentials {
-            choose_world,
+            world_choice,
             host: self.ui.host.trim().to_string(),
             port,
             user: self.ui.user.trim().to_string(),
@@ -1295,9 +1297,10 @@ impl App {
                     self.ui.status = s.clone();
                 }
                 NetEvent::Error(e) => {
-                    // Écrans de connexion : messages d'Archonia (`LG_CONNECT_FAILED_LOGIN_SERVER` avant la
-                    // liste des mondes, `LOGIN_WAITING_FAILE` après « Connect »).
-                    if matches!(self.phase, Phase::Connecting | Phase::SelectServer) && self.ui.characters.is_empty() {
+                    // Fenêtres de connexion d'Archonia : ses messages (`LG_CONNECT_FAILED_LOGIN_SERVER` avant
+                    // la liste des mondes, `LOGIN_WAITING_FAILE` après « Connect ») ; le panneau d'ArchRust
+                    // affiche l'erreur sur sa ligne d'état.
+                    if self.options.archonia_login && matches!(self.phase, Phase::Connecting | Phase::SelectServer) && self.ui.characters.is_empty() {
                         let assets = self.assets.clone();
                         let text = if self.ui.worlds.is_empty() {
                             portal_glue::ui_event_text(&assets, "LG_CONNECT_FAILED_LOGIN_SERVER")
@@ -1322,21 +1325,27 @@ impl App {
                     if !self.ui.selected_world.as_ref().is_some_and(|n| w.iter().any(|x| &x.name == n)) {
                         self.ui.selected_world = w.first().map(|x| x.name.clone());
                     }
+                    let listed = self.ui.world_choice.lists(w.len());
                     self.ui.worlds = w;
-                    if self.phase == Phase::Connecting && self.ui.choose_world {
+                    if self.phase == Phase::Connecting && listed {
                         self.phase = Phase::SelectServer;
                         self.ui.status.clear();
                     }
                 }
-                // Compte refusé : `LG_IDPASSWORD_FAILD`, puis `LG_IdPasswordInit` vide les champs.
+                // Compte refusé : `LG_IDPASSWORD_FAILD`, puis `LG_IdPasswordInit` vide les champs (fenêtres
+                // d'Archonia) ; le panneau d'ArchRust garde les champs et affiche l'erreur.
                 NetEvent::AuthRefused(why) => {
                     log::info!("compte refusé : {why}");
-                    let assets = self.assets.clone();
-                    self.ui.alert = Some(portal_glue::ui_event_text(&assets, "LG_IDPASSWORD_FAILD")).filter(|t| !t.is_empty()).or(Some(why));
-                    self.ui.user.clear();
-                    self.ui.password.clear();
                     self.ui.worlds.clear();
-                    self.ui.status.clear();
+                    if self.options.archonia_login {
+                        let assets = self.assets.clone();
+                        self.ui.alert = Some(portal_glue::ui_event_text(&assets, "LG_IDPASSWORD_FAILD")).filter(|t| !t.is_empty()).or(Some(why));
+                        self.ui.user.clear();
+                        self.ui.password.clear();
+                        self.ui.status.clear();
+                    } else {
+                        self.ui.status = format!("erreur : {why}");
+                    }
                     self.phase = Phase::Login;
                     self.net = None;
                     return;
@@ -1983,7 +1992,10 @@ impl App {
             } else {
                 crate::account::forget(&self.config.saved_dir);
             }
-            self.start_connection(None, true);
+            // Fenêtres d'Archonia : toujours `UI_SelectServer` ; panneau d'ArchRust : liste des mondes si
+            // le serveur en annonce plusieurs, sinon premier monde.
+            let choice = if self.options.archonia_login { WorldChoice::List } else { WorldChoice::ListIfSeveral };
+            self.start_connection(None, choice);
         }
         // « Connect » d'`UI_SelectServer` : authentification et choix du monde (`LG_SelectServer`).
         if let (Some(world), Phase::SelectServer) = (actions.select_world.clone(), self.phase) {
@@ -2858,9 +2870,11 @@ impl App {
                         }
                     }
                 } else {
-                    // Écrans d'Archonia (`hud_login.rs`) : saisie du compte, puis choix du monde ; pendant
-                    // l'attente, sysstr 457 (« Connecting to the Server... ») ou `LOGIN_WAITING`.
-                    let world_step = phase == Phase::SelectServer || (busy && !self.ui.worlds.is_empty());
+                    // Saisie du compte : panneau d'ArchRust (par défaut) ou `UI_LG_IDPASSWORD` (option
+                    // `archonia_login`) ; puis, si la liste s'affiche, `UI_SelectServer` (`hud_login.rs`).
+                    // Pendant l'attente des fenêtres d'Archonia, sysstr 457 (« Connecting to the
+                    // Server... ») ou `LOGIN_WAITING`.
+                    let world_step = phase == Phase::SelectServer || (busy && self.ui.world_choice.lists(self.ui.worlds.len()));
                     let waiting = busy.then(|| {
                         if world_step {
                             crate::hud::ui_message(&mut self.hud, &self.assets, "LOGIN_WAITING")
@@ -2871,6 +2885,8 @@ impl App {
                     let mut requests = Vec::new();
                     if world_step {
                         crate::hud::draw_select_server(ctx, &mut self.hud, &self.assets, &self.ui.worlds, &self.ui.folded_groups, self.ui.selected_world.as_deref(), waiting.as_deref(), &mut requests);
+                    } else if !self.options.archonia_login {
+                        ui::login_panel(ctx, &mut self.ui, busy, &mut actions);
                     } else {
                         crate::hud::draw_id_password(ctx, &mut self.hud, &self.assets, &mut self.ui.user, &mut self.ui.password, waiting.as_deref(), &mut requests);
                     }

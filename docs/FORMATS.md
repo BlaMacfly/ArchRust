@@ -252,8 +252,22 @@ bloc. Vérifié sur 1280 secteurs (tuiles 1717, 1924, 2024, 2025, 3232) : 1536 s
 ## Connexion et choix du monde
 
 Établi sur Archonia.exe et `UI_1024X768.ini` ; implémenté dans `realmlist.rs`, `net.rs`
-(`LoginCommand::SelectWorld`, `NetEvent::Worlds`, `NetEvent::AuthRefused`), `hud_login.rs`
-(`draw_id_password`, `draw_select_server`) et `app.rs` (`Phase::SelectServer`).
+(`WorldChoice`, `LoginCommand::SelectWorld`, `NetEvent::Worlds`, `NetEvent::AuthRefused`), `ui.rs`
+(`login_panel`), `hud_login.rs` (`draw_id_password`, `draw_select_server`) et `app.rs`
+(`Phase::SelectServer`).
+
+* **Écran par défaut : panneau d'ArchRust** (`ui::login_panel`, image `assets/login-panel.png`
+  1710 × 919 intégrée à l'exécutable, zones des champs dans `login_layout` ; panneau egui simple si
+  l'image est illisible) : serveur et port (préremplis par l'adresse ci-dessous), compte, mot de passe,
+  case « Enregistrer le compte » (identifiant, mot de passe et dernier personnage chiffrés par DPAPI
+  dans `saved-variables/compte.dat`, repris au démarrage, effacés à la connexion suivante si la case
+  est décochée), « Connexion » (ou Entrée dans le mot de passe), « Options », ligne d'état. Monde
+  (`WorldChoice::ListIfSeveral`) : liste `UI_SelectServer` si le serveur annonce plusieurs mondes,
+  sinon premier monde ; erreurs et compte refusé sur la ligne d'état, champs gardés.
+* **Fenêtres d'Archonia, en option** (onglet Avancé « Écran de connexion », `archonia_login = true`
+  dans `options.toml`, désactivé par défaut) : `UI_LG_IDPASSWORD`, puis toujours `UI_SelectServer`
+  (`WorldChoice::List`), avec les messages d'Archonia décrits ci-dessous. `--connect` :
+  premier monde dans les deux cas (`WorldChoice::First`).
 
 * **Adresse** — `realmlist.wtf` (`set realmlist hôte[:port]`, convention d'ArchRust) ; sans lui,
   `ArchoniaTest.ini` d'Archonia, lu en clair (FUN_1408eb790) : XML
@@ -276,8 +290,9 @@ bloc. Vérifié sur 1280 secteurs (tuiles 1717, 1924, 2024, 2025, 3232) : 1536 s
   Clic sur un monde = choix, second clic ou « Connect » (`LG_SelectServer`) = connexion ; statut 5 :
   refusé par le client. Puis `LOGIN` op 1 (compte), op 3 (monde), message `LOGIN_WAITING` ; compte
   refusé : `LG_IDPASSWORD_FAILD` et champs vidés ; échec : `LG_CONNECT_FAILED_LOGIN_SERVER` avant la
-  liste, `LOGIN_WAITING_FAILE` après. Ensuite sélection et création comme ci-dessus. `--connect`
-  garde le premier monde.
+  liste, `LOGIN_WAITING_FAILE` après (ces boîtes et le vidage des champs ne valent que pour les
+  fenêtres d'Archonia). Ensuite sélection et création comme ci-dessus. `--connect` garde le premier
+  monde.
 
 ## Barre de raccourcis gardée par le serveur (AgpmUIStatus 0x14)
 
