@@ -2500,6 +2500,7 @@ impl App {
                 crate::hud::MenuUi::Help => self.help.toggle(),
                 crate::hud::MenuUi::Exit => self.hotkey_toggle_exit(),
                 crate::hud::MenuUi::CashInventory => self.petbag.toggle_cash(),
+                crate::hud::MenuUi::MiniMap => self.minimap_toggle(),
             }
         }
     }
@@ -2598,6 +2599,10 @@ impl App {
     }
 
     fn click_ground(&mut self) {
+        // Arrêt du gacha : personnage immobile (`DONT_MOVE`).
+        if self.gacha_immobile() {
+            return;
+        }
         // Ciblage au sol en cours : tout se joue au relâchement (voir `app_groundcast.rs`).
         if self.groundcast_active() {
             return;
@@ -2914,9 +2919,12 @@ impl App {
                 }
                 // Onglets de la discussion : menus et options (voir `app_chattabs.rs`).
                 chattabs_glue::panel(ctx, &mut self.chat_tabs_ui, &player_name, &self.config.saved_dir, &mut self.hud, &self.assets, &mut self.ui);
-                // `/fps` : chiffre seul, en haut à gauche (place d'Archonia non relevée).
+                // `/fps` (FUN_1400fc870) : « FPS: %03d » en (950, 10) pixels d'écran, blanc. Archonia y ajoute heure, position,
+                // région et compteurs de débogage (« LookAt { x: … } », « Travelling Regions »…) : écartés.
                 if self.ui.show_fps {
-                    ctx.debug_painter().text(egui::Pos2::new(4.0, 4.0), egui::Align2::LEFT_TOP, format!("{:.0}", self.fps), egui::FontId::proportional(13.0), egui::Color32::WHITE);
+                    let ppp = ctx.pixels_per_point();
+                    let fps = (self.fps.round() as i64).clamp(0, 999);
+                    ctx.debug_painter().text(egui::Pos2::new(950.0 / ppp, 10.0 / ppp), egui::Align2::LEFT_TOP, format!("FPS: {fps:03}"), egui::FontId::proportional(13.0), egui::Color32::WHITE);
                 }
                 // Tableau de bord de développement (egui, pas une fenêtre d'Archonia) : seulement avec
                 // la console Lua ouverte (touche `).

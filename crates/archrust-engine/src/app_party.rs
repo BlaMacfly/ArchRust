@@ -57,6 +57,19 @@ pub struct PartyGlue {
     pub stats: HashMap<i32, MemberStats>,
     /// Rappel accepté : fenêtres d'échange, de boutique, de banque et de portail à fermer (lu par le moteur).
     pub recall_close_windows: bool,
+    /// Exclusion (`PartyConformBanishMember`) ou départ (`PartyConformLeaveParty`) en attente de confirmation.
+    confirm: Option<PartyCommand>,
+}
+
+/// Demande des menus du groupe (`PartyBanishMember` FUN_1405e31c0, `PartyLeaveParty` FUN_1405e3b40) : boîte de
+/// confirmation et commande envoyée sur « Oui » (FUN_1405e3630, FUN_1405e3680). L'exclusion n'est proposée qu'au chef,
+/// pour un autre membre ; le départ, toujours.
+fn confirmation(cmd: &PartyCommand, me: i32, leader: Option<i32>) -> Option<&'static str> {
+    match cmd {
+        PartyCommand::Banish(cid) => (leader == Some(me) && *cid != me).then_some("PartyConformBanishMember"),
+        PartyCommand::Leave => Some("PartyConformLeaveParty"),
+        _ => None,
+    }
 }
 
 /// Envoie une demande de groupe et l'annonce dans la discussion. Fonction libre : appelée depuis la
@@ -490,6 +503,17 @@ pub fn panel(
             }
         }
     }
+    // Confirmation d'exclusion ou de départ (`Action=4:1` de l'[EventMap]).
+    if let Some(cmd) = glue.confirm.clone() {
+        let key = confirmation(&cmd, view.me, glue.state.leader()).unwrap_or("PartyConformLeaveParty");
+        let text = super::portal_glue::ui_event_cached(&mut glue.events, assets, key);
+        if let Some(yes) = crate::hud::confirm_box(ctx, hud, assets, ("party-confirm", key), &text) {
+            glue.confirm = None;
+            if yes {
+                commands.push(cmd);
+            }
+        }
+    }
     for inv in glue.state.invitations.clone() {
         let text = super::guild_glue::fill_braces(&super::portal_glue::ui_event_cached(&mut glue.events, assets, "PartyRecvInvite"), &inv.name);
         match crate::hud::confirm_box(ctx, hud, assets, ("party-invitation", inv.cid), &text) {
@@ -541,8 +565,12 @@ pub fn panel(
     for r in requests {
         match r {
             crate::hud::PartyUi::Select(cid) => glue.pending_select = Some(cid),
-            crate::hud::PartyUi::Leave => commands.push(PartyCommand::Leave),
-            crate::hud::PartyUi::Banish(cid) => commands.push(PartyCommand::Banish(cid)),
+            crate::hud::PartyUi::Leave => glue.confirm = Some(PartyCommand::Leave),
+            crate::hud::PartyUi::Banish(cid) => {
+                if confirmation(&PartyCommand::Banish(cid), view.me, leader).is_some() {
+                    glue.confirm = Some(PartyCommand::Banish(cid));
+                }
+            }
             crate::hud::PartyUi::Delegate(cid) => commands.push(PartyCommand::Delegate(cid)),
             crate::hud::PartyUi::Invite(name) => commands.push(PartyCommand::Invite { cid: None, name: Some(name) }),
             crate::hud::PartyUi::SetItemDivision(t) => commands.push(PartyCommand::SetItemDivision(t as i8)),
@@ -551,5 +579,20 @@ pub fn panel(
     }
     for c in commands {
         send(net, glue, ui_state, c);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn confirmations_du_groupe() {
+        // Le chef (1) exclut un membre (2) : boîte ; un membre ordinaire ou le chef sur lui-même : rien.
+        assert_eq!(confirmation(&PartyCommand::Banish(2), 1, Some(1)), Some("PartyConformBanishMember"));
+        assert_eq!(confirmation(&PartyCommand::Banish(2), 3, Some(1)), None);
+        assert_eq!(confirmation(&PartyCommand::Banish(1), 1, Some(1)), None);
+        assert_eq!(confirmation(&PartyCommand::Leave, 3, Some(1)), Some("PartyConformLeaveParty"));
+        assert_eq!(confirmation(&PartyCommand::Delegate(2), 1, Some(1)), None);
     }
 }

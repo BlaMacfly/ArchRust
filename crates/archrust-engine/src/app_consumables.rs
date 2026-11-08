@@ -106,6 +106,24 @@ const ITEM_COMMANDS: [u32; 3] = [661, 662, 663];
 /// « The Skill Reset failed because you do not have enough room to store your Refund. »
 const SYSSTR_NO_ROOM: u32 = 748;
 
+/// Objet accepté par la barre rapide (FUN_14060b4c0, sinon `QB_Add_Invalid_Item`) : statut 2, 13, 15 ou 51, ou porté
+/// (3) s'il s'agit d'une monture (`Kind` 32) ; puis objet d'usage (`ItemType` 1) de `Type` 0 (potion), 4 (parchemin de
+/// téléportation), 7 (transformation), 12 (parchemin de compétence) ou 31 (costume), ou équipement (`ItemType` 0) monture.
+pub fn quickbelt_accepts(row: ItemRow, status: Option<i8>) -> bool {
+    const KIND_RIDE: i64 = 32;
+    let status_ok = match status {
+        Some(2 | 13 | 15 | 51) => true,
+        Some(3) => row.kind == KIND_RIDE,
+        _ => false,
+    };
+    status_ok
+        && match row.item_type {
+            1 => matches!(row.use_type, 0 | 4 | 7 | 12 | 31),
+            0 => row.kind == KIND_RIDE,
+            _ => false,
+        }
+}
+
 /// Ligne d'itemdatatable.txt utile ici.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct ItemRow {
@@ -427,6 +445,16 @@ impl ConsumablesGlue {
 
     fn row(&mut self, assets: &Assets, tid: Option<i32>) -> ItemRow {
         tid.and_then(|t| self.data(assets).items.get(&t).copied()).unwrap_or_default()
+    }
+
+    /// `Type` de RegionTemplate.ini d'une région.
+    pub(super) fn region_flags(&mut self, assets: &Assets, region: u16) -> Option<i64> {
+        self.data(assets).regions.get(&region).copied()
+    }
+
+    /// Ligne d'itemdatatable.txt d'un modèle (défaut s'il est inconnu).
+    pub(super) fn item_row(&mut self, assets: &Assets, tid: i32) -> ItemRow {
+        self.row(assets, Some(tid))
     }
 
     fn region_type(&mut self, assets: &Assets) -> Option<i64> {
@@ -785,6 +813,19 @@ impl App {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn barre_rapide() {
+        let usable = |t| ItemRow { item_type: 1, use_type: t, ..Default::default() };
+        assert!(quickbelt_accepts(usable(0), Some(2)), "potion du sac");
+        assert!(quickbelt_accepts(usable(12), Some(51)), "parchemin de l'inventaire Cash");
+        assert!(!quickbelt_accepts(usable(17), Some(2)), "boîte de loterie refusée");
+        assert!(!quickbelt_accepts(usable(0), Some(100)), "banque refusée");
+        let ride = ItemRow { item_type: 0, kind: 32, ..Default::default() };
+        assert!(quickbelt_accepts(ride, Some(3)) && quickbelt_accepts(ride, Some(2)), "monture portée ou au sac");
+        let sword = ItemRow { item_type: 0, kind: 2, ..Default::default() };
+        assert!(!quickbelt_accepts(sword, Some(2)) && !quickbelt_accepts(sword, Some(3)));
+    }
 
     fn record(id: i32, tid: i32, status: i8, grid: [i16; 3]) -> ItemRecord {
         ItemRecord { operation: 0, id, template_id: Some(tid), owner_cid: None, count: Some(1), status: Some(status), grid: Some(grid) }

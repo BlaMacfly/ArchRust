@@ -2675,3 +2675,29 @@ La compatibilité EP8 reste indéterminée ; aucune nouvelle mécanique ajoutée
 - **Clic sur un portail (point 28)** : objet visé par les triangles de son volume de sélection (colonne 25 `PICK_DFF`
   d'`objecttemplate.ini`, sinon le modèle dessiné) et non plus sa sphère englobante, et seulement si le sol n'est pas
   devant (marge 50).
+
+## Derniers messages d'Archonia (relevé du 8 novembre 2026)
+
+Messages dont la levée a été prouvée par un balayage linéaire de tout `.text` (fonctions feuilles sans `.pdata`
+comprises) : lecture `mov edx,[module+décalage]` suivie de ThrowEvent (`FUN_1405beb60`) avec le gestionnaire du même
+module. Détail et adresses : `SPEC-RESTE.md` du relevé.
+
+| Message | Quand | ArchRust |
+|---|---|---|
+| `PartyConformBanishMember` | « Banish » du menu du groupe, par le chef, sur un autre membre (`0x1405e31c0`) ; « Oui » → exclusion (`0x1405e3630`) | `app_party.rs` |
+| `PartyConformLeaveParty` | « Leave » du menu (`0x1405e3b40`) ; « Oui » → départ (`0x1405e3680`) | `app_party.rs` |
+| `MiniMap_ForcedClose` | `MiniMap_ToggleUI` (Maj+M, `MenuBtnMiniMap`) dans une région de `Type` à bit `0x200`, ou entrée dans une telle région carte ouverte (carte fermée) | `app_camera.rs` |
+| `MiniMap_YouCanOpenUI` | sortie d'une région sans minicarte, carte fermée | `app_camera.rs` |
+| `QB_Add_Invalid_Item` | objet lâché sur la barre rapide refusé (`0x14060b4c0`) : statut 2, 13, 15, 51 ou monture portée ; usage de `Type` 0, 4, 7, 12, 31 ou monture | `app_consumables.rs::quickbelt_accepts` |
+| `IC_RESULT_ALREADY_FULL`, `_EGO_ITEM`, `_DIFFER_RANK` | pierre d'esprit ratée, codes 3, 4, 6 (`0x1407c1330`), boîte d'information | `app_convert.rs::stone_messages` |
+| `Convert_SS_Result_*` | 0 réussite, 1 échec, 3 plein, 4 et 5 objet inadapté ; 2 et 6 sans ligne (`0x140883cf0`) | idem |
+| `Guild_DestroyFailTooEarly` | code de guilde 46 (`FUN_1406a44e0`) | `app_guild.rs` |
+
+Jamais levés dans Archonia (rien à faire) : `PartyBonusDamage/Defense/MaxPoint`, `NPCTMSG_ConfirmBuy`,
+`BattleRequestEnd`, `INV_MSG_Drop_Ghelld`, `Convert_Physical_Result_*`, `BuddyFullFriendList/FullBanList/BanUser/
+InvalidUser_MsgBox`, `SiegeWarCannotApplSiegeWar`, `IC_RESULT_SUCCESS/RUIN/DESTROY_ITEM/DIFFER_TYPE/NOT_EQUIP_ITEM`.
+`AC_CancelMessageBox` n'apparaît qu'en lâchant un objet de la grille de ventes (statut 8) et son « Oui » est vide.
+
+Autres points : `/fps` affiche « FPS: %03d » en (950, 10) pixels (`0x1400fc870`, les lignes de débogage d'Archonia
+sont écartées) ; pendant l'arrêt de la bande du gacha, le personnage porte `DONT_MOVE` (`0x400`, `0x1408815ed`) : les
+clics de déplacement sont ignorés.

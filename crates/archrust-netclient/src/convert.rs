@@ -79,7 +79,11 @@ pub mod stone_result {
     pub const FAILED: i32 = 1;
     pub const INVALID_STONE: i32 = 2;
     pub const FULL: i32 = 3;
+    /// Objet d'ego.
+    pub const EGO_ITEM: i32 = 4;
     pub const IMPROPER_ITEM: i32 = 5;
+    /// Rang de la pierre différent de celui de l'objet.
+    pub const INVALID_RANK: i32 = 6;
 }
 
 /// État de conversion d'un objet : champs présents dans le paquet.

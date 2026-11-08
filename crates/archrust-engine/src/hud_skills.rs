@@ -53,6 +53,8 @@ pub enum SkillUi {
     /// Bouton d'achat de l'instructeur : TID, compétence pas encore apprise.
     TrainerBuy(i32, bool),
     SlotSet { slot: usize, shortcut: Shortcut },
+    /// Objet lâché sur une case : contrôlé par le moteur (`QB_Add_Invalid_Item`) avant d'être posé.
+    SlotItem { slot: usize, iid: i32, tid: i32 },
     SlotSwap(usize, usize),
     SlotClear(usize),
     SlotUse(usize),
@@ -501,7 +503,7 @@ pub fn draw_quickbar(ctx: &egui::Context, hud: &mut HudState, assets: &Assets, s
                 out.push(SkillUi::SlotSet { slot, shortcut: Shortcut::Skill(d.tid) });
             } else if let Some(d) = resp.dnd_release_payload::<ItemDrag>() {
                 if !d.bank {
-                    out.push(SkillUi::SlotSet { slot, shortcut: Shortcut::Item(d.tid) });
+                    out.push(SkillUi::SlotItem { slot, iid: d.iid, tid: d.tid });
                 }
             } else if let Some(d) = resp.dnd_release_payload::<SlotDrag>() {
                 if d.slot != slot {

@@ -16,8 +16,7 @@
 //! * refus (`FUN_1405ffe00`) : `sysstr` 729, 730, 739, 731, 732, 733 (codes 1 à 6), boîte d'information centrée ;
 //! * « Start » et « Close » sont sans effet pendant le tirage.
 //!
-//! Écart : Archonia pose aussi le drapeau 0x400 du personnage pendant le tirage (sens non relevé) ; ArchRust ne bloque
-//! que les nouvelles demandes.
+//! * pendant l'arrêt de la bande, le personnage porte `DONT_MOVE` (0x400) : clics de déplacement et d'attaque ignorés.
 
 use super::App;
 use crate::assets::Assets;
@@ -249,6 +248,12 @@ impl App {
         if let Some(sound) = self.gacha.sound.take() {
             self.audio.play_effect(sound);
         }
+    }
+
+    /// Arrêt de la bande en cours : Archonia pose `DONT_MOVE` (0x400 de `personnage+0xb80`) au départ de l'arrêt
+    /// (`0x1408815ed`, FUN_140881500) et le retire à la fin (FUN_1405ffd40) : le joueur ne bouge pas pendant les 2 s.
+    pub(super) fn gacha_immobile(&self) -> bool {
+        self.gacha.rolling()
     }
 
     /// Clic gauche sur un socle : demande au serveur (op 0). Rend `true` si un socle est visé.

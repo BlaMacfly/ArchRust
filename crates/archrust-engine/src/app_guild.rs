@@ -1165,6 +1165,12 @@ impl App {
                     self.guild.info = self.guild.data.as_ref().and_then(|d| d.events.get("Guild_GuildMark_BuyComplete").cloned());
                 }
             }
+            // Dissolution trop tôt (code 46, FUN_1406a44e0) : boîte `Guild_DestroyFailTooEarly` (`Action=4:0`).
+            GuildEvent::System { code: guild::code::DESTROY_FAIL_TOO_EARLY, .. } => {
+                self.guild.pending_destroy = None;
+                self.guild.info = self.guild.data.as_ref().and_then(|d| d.events.get("Guild_DestroyFailTooEarly").cloned());
+                return;
+            }
             GuildEvent::System { code, text, number, number2, .. } => {
                 let d = self.guild.data.as_ref().expect("données lues");
                 if let Some((t, color)) = system_text(d, *code, text, *number, *number2) {

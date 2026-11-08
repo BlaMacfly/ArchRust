@@ -123,6 +123,8 @@ pub enum HotkeyAction {
     IgnoreList,
     /// `WorldMap_Toggle`.
     WorldMap,
+    /// `MiniMap_ToggleUI` (Maj+M, « Map »).
+    MiniMap,
     /// `SubInventory_UIUpdate` (« Pet Inventory », sac du familier, voir `app_petbag.rs`).
     PetInventory,
     /// `CInven_UIOpen` (« Chantra Bag », inventaire Cash, voir `app_petbag.rs`).
@@ -234,6 +236,7 @@ pub fn action_of(def: &HotkeyDef) -> Option<HotkeyAction> {
             "QuickBeltLayerUp" => BeltLayer(1),
             "QuickBeltLayerDown" => BeltLayer(-1),
             "WorldMap_Toggle" => WorldMap,
+            "MiniMap_ToggleUI" => MiniMap,
             "SubInventory_UIUpdate" => PetInventory,
             "CInven_UIOpen" => CashInventory,
             _ => return None,
@@ -879,6 +882,7 @@ impl App {
             Character => self.item_ui.show_character = !self.item_ui.show_character,
             IgnoreList => self.buddy.toggle_bans(),
             WorldMap => self.worldmap_toggle(),
+            MiniMap => self.minimap_toggle(),
             PetInventory => self.petbag_toggle_bag(),
             CashInventory => self.petbag.toggle_cash(),
             Titles => self.titles_toggle_current(),

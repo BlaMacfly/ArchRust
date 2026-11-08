@@ -10,6 +10,10 @@
 //! (`Minimap_CameraView_Click`) passe au mode suivant (0 → 1 → 2 → 0).
 //!
 //! **Écart** : à cheval, Archonia vise la monture (FUN_1406a6d90) ; ArchRust garde le cavalier.
+//!
+//! **Minicarte** (AgcmUIMinimap) : `MiniMap_ToggleUI` (Maj+M, entrée `MenuBtnMiniMap`) ferme ou ouvre la fenêtre
+//! `MiniMap` ; dans les 21 régions de `Type` à bit `0x200` elle ne s'ouvre pas et se ferme en y entrant
+//! (`MiniMap_ForcedClose`) ; en sortir carte fermée affiche `MiniMap_YouCanOpenUI`.
 
 use super::hotkey_glue::{dik_of, kind_of, Key};
 use super::App;
@@ -17,6 +21,8 @@ use crate::camera::CamSetting;
 use winit::keyboard::KeyCode;
 
 /// Défauts des touches tenues : gauche, droite, haut, bas, pavé −, pavé +.
+/// Bit « sans minicarte » du `Type` de RegionTemplate.ini (`+0x7d & 2`, FUN_140701930 et FUN_140701440).
+const REGION_NO_MINIMAP: i64 = 0x200;
 const HELD_KEYS: [u8; 6] = [203, 205, 200, 208, 74, 78];
 /// Défauts des touches de mode et mode choisi (FUN_14085ee60) : F10 → 1, F11 → 2, F12 → 0.
 const MODE_KEYS: [(u8, usize); 3] = [(68, 1), (87, 2), (88, 0)];
@@ -109,6 +115,52 @@ impl App {
         near.into_iter().filter_map(|(cid, pos)| self.npc_minimap_kind(cid).map(|kind| crate::hud::MinimapIcon { kind, pos })).collect()
     }
 
+    /// Région sans minicarte : bit `0x200` (`disable_minimap`, `+0x7d & 2`) du `Type` de RegionTemplate.ini.
+    fn minimap_disabled_in(&mut self, region: Option<u16>) -> bool {
+        let assets = self.assets.clone();
+        region.and_then(|r| self.consumables.region_flags(&assets, r)).is_some_and(|t| t & REGION_NO_MINIMAP != 0)
+    }
+
+    /// Message `Action=4:3` de l'[EventMap] dans la discussion.
+    fn minimap_message(&mut self, event: &str) {
+        let text = super::portal_glue::ui_events(&self.assets).get(event).cloned().unwrap_or_default();
+        self.hud.push_system(&text);
+    }
+
+    /// `MiniMap_ToggleUI` (Maj+M, `MenuBtnMiniMap` ; FUN_140701930) : ouverte → fermée ; fermée → ouverte, sauf dans
+    /// une région sans minicarte (`MiniMap_ForcedClose`).
+    pub(super) fn minimap_toggle(&mut self) {
+        if !crate::hud::minimap_closed(&self.hud) {
+            crate::hud::set_minimap_closed(&mut self.hud, true);
+            return;
+        }
+        let region = self.zone_region.as_ref().map(|z| z.region);
+        if self.minimap_disabled_in(region) {
+            self.minimap_message("MiniMap_ForcedClose");
+            return;
+        }
+        crate::hud::set_minimap_closed(&mut self.hud, false);
+    }
+
+    /// Changement de région (FUN_140701440) : entrée dans une région sans minicarte, carte ouverte → fermée et
+    /// `MiniMap_ForcedClose` ; sortie d'une telle région, carte fermée → `MiniMap_YouCanOpenUI` (la carte reste fermée).
+    fn minimap_region_frame(&mut self) {
+        let region = self.zone_region.as_ref().map(|z| z.region);
+        let old = crate::hud::swap_minimap_region(&mut self.hud, region);
+        if old == region || region.is_none() {
+            return;
+        }
+        let closed = crate::hud::minimap_closed(&self.hud);
+        if self.minimap_disabled_in(region) {
+            if !closed {
+                crate::hud::set_minimap_closed(&mut self.hud, true);
+                self.minimap_message("MiniMap_ForcedClose");
+            }
+        } else if closed && self.minimap_disabled_in(old) {
+            self.minimap_message("MiniMap_YouCanOpenUI");
+        }
+    }
+
     /// Image en jeu : bornes du fichier, hauteurs du TID du joueur, touches tenues, glissement entre
     /// modes, suivi du joueur et collision avec le sol et les objets.
     pub(super) fn camera_frame(&mut self, dt: f32) {
@@ -119,6 +171,7 @@ impl App {
                 crate::hud::MinimapUi::WorldMap => self.worldmap_toggle(),
             }
         }
+        self.minimap_region_frame();
         let Some((feet, tid)) = self.player.as_ref().map(|p| (p.position, p.tid)) else { return };
         if self.phase != super::Phase::InWorld {
             return;

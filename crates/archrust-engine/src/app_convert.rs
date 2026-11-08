@@ -1012,19 +1012,18 @@ impl App {
                         }
                     }
                     _ => {
-                        let event = match code {
-                            stone_result::SUCCESS => "Convert_SS_Result_Success",
-                            stone_result::FAILED => "Convert_SS_Result_Fail",
-                            stone_result::FULL => "Convert_SS_Result_AlreadyFull",
-                            stone_result::INVALID_STONE | stone_result::IMPROPER_ITEM => "Convert_SS_Result_ImproperItem",
-                            _ => "Convert_SS_Result_Fail",
-                        };
-                        let text = glue.data(&assets).events.get(event).cloned().unwrap_or_default();
-                        if glue.npc.is_some() && glue.tab == ConvertTab::Rune {
-                            let color = if code == stone_result::SUCCESS { "10092288" } else { "16711680" };
-                            glue.edit = format!("<C{color}>{text}");
+                        let (line, boxed) = stone_messages(code);
+                        if let Some(event) = line {
+                            let text = glue.data(&assets).events.get(event).cloned().unwrap_or_default();
+                            if glue.npc.is_some() && glue.tab == ConvertTab::Rune {
+                                let color = if code == stone_result::SUCCESS { "10092288" } else { "16711680" };
+                                glue.edit = format!("<C{color}>{text}");
+                            }
+                            self.hud.push_system(&text);
                         }
-                        self.hud.push_system(&text);
+                        if let Some(event) = boxed {
+                            glue.info = glue.data(&assets).events.get(event).cloned();
+                        }
                     }
                 }
             }
@@ -1062,6 +1061,26 @@ impl App {
             }
         }
     }
+}
+
+/// Messages d'un sertissage de pierre d'esprit (op 7) : ligne de discussion d'AgcmUIItemConvert (`0x140883cf0`) et
+/// boîte d'information d'AgcmUIItem (`0x1407c1330`), tous deux abonnés au rappel 6 d'AgpmItemConvert. Les codes 2 (pierre
+/// refusée) et 6 n'ont pas de ligne ; `IC_RESULT_FAIL` ouvre `UI_Convert_Fail`, absente du fichier d'interface : rien.
+fn stone_messages(code: i32) -> (Option<&'static str>, Option<&'static str>) {
+    let line = match code {
+        stone_result::SUCCESS => Some("Convert_SS_Result_Success"),
+        stone_result::FAILED => Some("Convert_SS_Result_Fail"),
+        stone_result::FULL => Some("Convert_SS_Result_AlreadyFull"),
+        stone_result::EGO_ITEM | stone_result::IMPROPER_ITEM => Some("Convert_SS_Result_ImproperItem"),
+        _ => None,
+    };
+    let boxed = match code {
+        stone_result::FULL => Some("IC_RESULT_ALREADY_FULL"),
+        stone_result::EGO_ITEM => Some("IC_RESULT_EGO_ITEM"),
+        stone_result::INVALID_RANK => Some("IC_RESULT_DIFFER_RANK"),
+        _ => None,
+    };
+    (line, boxed)
 }
 
 impl App {
@@ -1164,6 +1183,17 @@ impl App {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn messages_des_pierres() {
+        assert_eq!(stone_messages(0), (Some("Convert_SS_Result_Success"), None));
+        assert_eq!(stone_messages(1), (Some("Convert_SS_Result_Fail"), None));
+        assert_eq!(stone_messages(2), (None, None), "pierre refusée : rien");
+        assert_eq!(stone_messages(3), (Some("Convert_SS_Result_AlreadyFull"), Some("IC_RESULT_ALREADY_FULL")));
+        assert_eq!(stone_messages(4), (Some("Convert_SS_Result_ImproperItem"), Some("IC_RESULT_EGO_ITEM")));
+        assert_eq!(stone_messages(5), (Some("Convert_SS_Result_ImproperItem"), None));
+        assert_eq!(stone_messages(6), (None, Some("IC_RESULT_DIFFER_RANK")));
+    }
 
     #[test]
     fn potion_choisie_a_l_ouverture() {

@@ -1277,6 +1277,20 @@ impl App {
                     changed = true;
                     touched.push(slot);
                 }
+                // FUN_14060b4c0 : objet refusé (statut ou genre) → `QB_Add_Invalid_Item` dans la discussion.
+                SkillUi::SlotItem { slot, iid, tid } => {
+                    let row = self.consumables.item_row(&self.assets, tid);
+                    let status = self.items.get(&iid).and_then(|i| i.status);
+                    if !super::consumables_glue::quickbelt_accepts(row, status) {
+                        let text = super::portal_glue::ui_events(&self.assets).get("QB_Add_Invalid_Item").cloned().unwrap_or_default();
+                        self.hud.push_system(&text);
+                        continue;
+                    }
+                    let Some(cell) = self.skills.slots.get_mut(slot) else { continue };
+                    *cell = Some(Shortcut::Item(tid));
+                    changed = true;
+                    touched.push(slot);
+                }
                 SkillUi::SlotSwap(a, b) => {
                     if a < self.skills.slots.len() && b < self.skills.slots.len() {
                         self.skills.slots.swap(a, b);

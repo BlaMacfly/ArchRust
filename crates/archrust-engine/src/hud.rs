@@ -390,6 +390,25 @@ struct MinimapState {
     scale: f32,
     /// Carte masquée (`Minimap_Map_Toggle`, FUN_1407015a0 : fond `Main_Minimap_Base_hide.png`).
     hidden: bool,
+    /// Fenêtre `MiniMap` fermée (`MiniMap_ToggleUI`, FUN_140701930 : `+0x17f4` à 0).
+    closed: bool,
+    /// Région du joueur à l'image précédente (changements de région, FUN_140701440).
+    region: Option<u16>,
+}
+
+/// Fenêtre `MiniMap` fermée (`MiniMap_CloseUI`).
+pub fn minimap_closed(hud: &HudState) -> bool {
+    hud.minimap.closed
+}
+
+/// Ouvre ou ferme la fenêtre `MiniMap` (`MiniMap_OpenUI` / `MiniMap_CloseUI`).
+pub fn set_minimap_closed(hud: &mut HudState, closed: bool) {
+    hud.minimap.closed = closed;
+}
+
+/// Retient la région du joueur et rend la précédente.
+pub fn swap_minimap_region(hud: &mut HudState, region: Option<u16>) -> Option<u16> {
+    std::mem::replace(&mut hud.minimap.region, region)
 }
 
 /// Demande des boutons de la minicarte traitée par le moteur.
@@ -1146,7 +1165,7 @@ pub fn draw(ctx: &egui::Context, hud: &mut HudState, assets: &Assets, scene: &Hu
     for w in &windows {
         match w.name.as_str() {
             "UI_CharInfo" => draw_charinfo(ctx, hud, assets, &painter, &layout, w),
-            "MiniMap" => draw_minimap(ctx, hud, assets, &painter, &layout, w, scene),
+            "MiniMap" if !hud.minimap.closed => draw_minimap(ctx, hud, assets, &painter, &layout, w, scene),
             "UI_TargetInfo" => {
                 if let Some(t) = &scene.target {
                     draw_target(ctx, hud, assets, &painter, &layout, w, t);
@@ -1652,6 +1671,9 @@ fn minimap_buttons(ctx: &egui::Context, hud: &mut HudState, assets: &Assets, lay
 /// des MJ (voir `app_worldmap.rs`) : le raster de `MINIMAP_RASTER` px centré sur le joueur couvre
 /// le contrôle de type 16, comme dans `update_minimap`.
 pub fn minimap_click(ctx: &egui::Context, hud: &mut HudState, assets: &Assets, player: Vec3) -> Option<[f32; 2]> {
+    if hud.minimap.closed {
+        return None;
+    }
     let w = hud.windows(assets).iter().find(|w| w.name == "MiniMap").cloned()?;
     let view = w.controls.iter().find(|c| c.kind == 16)?;
     let layout = Layout::new(ctx.screen_rect());

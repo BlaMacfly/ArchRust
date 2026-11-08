@@ -40,6 +40,8 @@ pub enum MenuUi {
     Exit,
     /// Inventaire Cash (`UI_CashInven`, `MenuBtnRoniInventory` « Chantra Bag », `CInven_UIOpen`).
     CashInventory,
+    /// Minicarte ouverte ou fermée (`MenuBtnMiniMap`, `MiniMap_ToggleUI`).
+    MiniMap,
 }
 
 /// Bouton principal → (liste, entrées gérées).
@@ -54,7 +56,9 @@ const MENUS: [(&str, &str, &[(&str, MenuUi)]); 5] = [
         "UI_MainMenuCommunity",
         &[("MenuBtnBuddyList", MenuUi::Friends), ("MenuBtnBanList", MenuUi::IgnoreList), ("MenuBtnCreateChannel", MenuUi::CreateChannel), ("MenuBtnJoinChannel", MenuUi::JoinChannel), ("MenuBtn", MenuUi::Mailbox), ("MenuBtnGuild", MenuUi::Guild), ("CONTROL_15350", MenuUi::Party), ("CONTROL_10281", MenuUi::Emotes)],
     ),
-    ("MainBtnWorld", "UI_MainMenuWorld", &[]),
+    // Monde : la minicarte (`MenuBtnMiniMap`, `MiniMap_ToggleUI`) ; le radar d'Archonia et la carte du monde (deux
+    // contrôles `MenuBtnWorld` du même nom) ne sont pas repris ici.
+    ("MainBtnWorld", "UI_MainMenuWorld", &[("MenuBtnMiniMap", MenuUi::MiniMap)]),
     // Boutique Chantra (`CashMallOpenUI`) écartée : seule l'entrée de l'inventaire Cash.
     ("MainBtnChantra", "UI_MainMenuChantra", &[("MenuBtnRoniInventory", MenuUi::CashInventory)]),
     ("MainBtnOption", "UI_MainMenuOptions", &[("MenuBtnEnvironment", MenuUi::Options), ("MenuBtnHelp", MenuUi::Help), ("MenuBtnExit", MenuUi::Exit)]),

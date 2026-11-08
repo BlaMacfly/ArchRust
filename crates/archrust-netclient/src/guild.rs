@@ -150,6 +150,8 @@ pub mod code {
     pub const ALREADY_MEMBER2: i32 = 17;
     pub const NOT_ENOUGH_GHELD: i32 = 44;
     pub const NOT_ENOUGH_SKULL: i32 = 45;
+    /// Dissolution refusée : guilde trop jeune (« Guild_DestroyFailTooEarly », boîte d'information).
+    pub const DESTROY_FAIL_TOO_EARLY: i32 = 46;
     pub const NO_EXIST_SEARCH_GUILD: i32 = 47;
     /// Une autre guilde a le même emblème : Archonia propose de l'acheter quand même (op 33).
     pub const BUY_GUILDMARK_DUPLICATE: i32 = 59;

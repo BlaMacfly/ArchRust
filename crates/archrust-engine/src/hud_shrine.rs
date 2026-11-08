@@ -207,6 +207,9 @@ pub fn draw_shrine_hp(ctx: &egui::Context, hud: &mut HudState, assets: &Assets, 
 
 /// Bouton `CONTROL_MINIMAP_SHRINE` de la minicarte (dessiné avec elle) : `true` s'il a été cliqué.
 pub fn minimap_shrine_button(ctx: &egui::Context, hud: &mut HudState, assets: &Assets) -> bool {
+    if super::minimap_closed(hud) {
+        return false;
+    }
     let Some(w) = window(hud, assets, "MiniMap") else { return false };
     let Some(c) = w.control("CONTROL_MINIMAP_SHRINE") else { return false };
     let layout = Layout::new(ctx.screen_rect());
