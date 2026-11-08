@@ -13,8 +13,10 @@
 //!   niveau de la compétence apprise ; C, niveaux cumulés des compétences de la race et de la classe du gabarit
 //!   (« 1722;30 » : 30 niveaux de compétences du Slayer) ; D, niveaux cumulés de toutes les compétences apprises
 //!   (supérieur, FUN_1402fdc60(-1, -1)) ou points héroïques dépensés (héroïque, FUN_1402b9200). Archonia remplit les 11 cases supérieures dans l'ordre du fichier (FUN_1405dfc60, liste du
-//!   gabarit du joueur, 0x5c octets par entrée) ; le Berserker (TID 4) a deux arbres héroïques (lignes « 0 » et
-//!   « 1 », compétences décalées d'une colonne), le second rangé sous 10004 (FUN_14022a510). La ligne
+//!   gabarit du joueur, 0x5c octets par entrée) ; chez Archonia, le Berserker (TID 4) a deux arbres héroïques
+//!   (lignes « 0 » et « 1 », compétences décalées d'une colonne, FUN_14022a510) : le second (mode berserk) est un
+//!   ajout d'Archonia, absent des fichiers de Webzen que le serveur exporte (un arbre par classe) ; seul l'arbre 0
+//!   est lu. La ligne
 //!   « 10004;4 » de `SkillMastery_High.txt` porte les 15 passives du Dragon Scion (`UI_SkillDragonScion_Pas`,
 //!   15 cases) : 10004 = 10000 + race 4, l'arbre de la race que FUN_1402b8f40 consulte quand la compétence n'est
 //!   pas dans l'arbre du gabarit (race 0 : aucune condition) ; le « ;4 » n'est lu par aucun contrôle.
@@ -26,8 +28,8 @@ pub use crate::hud::SkillTab;
 
 /// Clé de l'arbre des passives du Dragon Scion dans `SkillMastery_High.txt` (ligne « 10004;4 » : 10000 + race 4).
 pub const SCION_PASSIVE_TREE: i32 = 10004;
-/// Décalage de la clé du second arbre héroïque d'une classe (Berserker : 4 → 10004, FUN_14022a510).
-pub const SECOND_TREE: i32 = 10000;
+/// Base des clés d'arbre de race (10000 + race) : pas un gabarit de personnage.
+pub const RACE_TREE_BASE: i32 = 10000;
 
 /// Une case d'un arbre de maîtrise.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -53,20 +55,19 @@ fn condition(cell: &str) -> Option<(i32, i32)> {
 /// (FUN_14022a510).
 pub fn parse_trees(text: &str, heroic: bool) -> HashMap<i32, Vec<MasteryRow>> {
     let mut out: HashMap<i32, Vec<MasteryRow>> = HashMap::new();
-    let mut class: Option<i32> = None;
     let mut key: Option<i32> = None;
     for line in text.lines().skip(1) {
         let f: Vec<&str> = line.split('\t').map(str::trim).collect();
         let cell = |i: usize| f.get(i).copied().unwrap_or("");
         if !cell(0).is_empty() {
-            class = cell(0).split(';').next().and_then(|c| c.trim().parse::<i32>().ok());
-            key = class;
+            key = cell(0).split(';').next().and_then(|c| c.trim().parse::<i32>().ok());
             continue;
         }
-        // Ligne d'arbre (numéro seul en colonne 1) : second arbre de la classe sous clé + 10000.
+        // Ligne d'arbre (numéro seul en colonne 1) : l'arbre 0 est celui de la classe, un autre (mode berserk
+        // d'Archonia) est écarté jusqu'à la classe suivante.
         if !cell(1).is_empty() && cell(2).is_empty() && (3..=7).all(|i| cell(i).is_empty()) {
-            if let (Some(c), Ok(n)) = (class, cell(1).parse::<i32>()) {
-                key = Some(if n == 0 { c } else { c + SECOND_TREE * n });
+            if cell(1) != "0" {
+                key = None;
             }
             continue;
         }
@@ -158,7 +159,7 @@ impl MasteryTables {
         let high = parse_trees(&text("SkillMastery_High.txt"), false);
         let heroic = parse_trees(&text("SkillMastery_Heroic.txt"), true);
         let categories = parse_categories(&text("SKILLMASTERY.txt"));
-        let class_of = high.keys().chain(heroic.keys()).filter(|k| **k < SECOND_TREE).filter_map(|k| Some((*k, crate::scene::template_race_class(assets, *k)?))).collect();
+        let class_of = high.keys().chain(heroic.keys()).filter(|k| **k < RACE_TREE_BASE).filter_map(|k| Some((*k, crate::scene::template_race_class(assets, *k)?))).collect();
         log::info!("maîtrises : {} arbre(s) supérieur(s), {} héroïque(s), {} section(s)", high.len(), heroic.len(), categories.sections.len());
         MasteryTables { high, heroic, categories, class_of }
     }
@@ -199,11 +200,12 @@ mod tests {
         assert_eq!((t[&1722][0].requires.clone(), t[&1722][0].class_levels), (vec![(1153, 1)], Some((1722, 30))));
         assert_eq!(t[&96][2].class_levels, None);
         assert_eq!((t[&SCION_PASSIVE_TREE][1].requires.clone(), t[&SCION_PASSIVE_TREE][1].total), (vec![(351, 1)], 20));
-        // Berserker héroïque : deux arbres, compétences décalées d'une colonne, le second sous 10004.
+        // Berserker héroïque d'Archonia : deux arbres, compétences décalées d'une colonne ; le second (mode berserk)
+        // est écarté.
         let heroic = "Class TID\tSkill TID\tSkill Name\tConditionA\tConditionB\tConditionC\tConditionD\t\n4\t\t\t\t\t\t\t\n\t0\t\t\t\t\t\t\n\t\t1472\tx\t\t\t\t\t\n\t\t1467\ty\t\t\t\t9;\t\n\t1\t\t\t\t\t\t\n\t\t4427\tz\t\t\t\t\t\n8\t\t\t\t\t\t\t\n\t1482\tw\t\t\t\t\t\n";
         let h = parse_trees(heroic, true);
         assert_eq!(h[&4].iter().map(|r| (r.tid, r.total)).collect::<Vec<_>>(), vec![(1472, 0), (1467, 9)]);
-        assert_eq!(h[&10004][0].tid, 4427);
+        assert!(!h.contains_key(&10004) && h.values().flatten().all(|r| r.tid != 4427));
         assert_eq!(h[&8][0].tid, 1482);
         // Chargeur héroïque : ConditionB et C ignorées.
         let h = parse_trees("Class TID	Skill TID	Skill Name	ConditionA	ConditionB	ConditionC	ConditionD
@@ -242,7 +244,7 @@ mod tests {
             assert_eq!(e[&k].len(), 10, "arbre héroïque {k}");
         }
         assert_eq!([1724, 1722, 1723, 1732, SCION_PASSIVE_TREE].map(|k| h[&k].len()), [18, 11, 12, 12, 15]);
-        assert_eq!(e[&10004].len(), 10);
+        assert!(!e.contains_key(&10004), "second arbre héroïque du Berserker (Archonia) écarté");
         // ConditionC des arbres du Scion : Slayer 1155, Orbiter 1165, Summoner 1178.
         let c = |k: i32, tid: i32| h[&k].iter().find(|r| r.tid == tid).and_then(|r| r.class_levels);
         assert_eq!([c(1722, 1155), c(1723, 1165), c(1732, 1178)], [Some((1722, 30)), Some((1723, 30)), Some((1732, 30))]);

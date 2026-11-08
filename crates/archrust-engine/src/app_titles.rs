@@ -3,8 +3,9 @@
 //! * **Données** : `ini/titledatatable.txt` (90 colonnes, lecture `FUN_1402452c0`, lues par leur en-tête),
 //!   `<langue>/titlestringtable.txt` (`FUN_140246170` : catégorie, ordre, nom, conditions, bonus),
 //!   `ini/titlesetting.xml` (`FUN_1405f31c0` : couleur par état 1 Ready … 7 Failed) et
-//!   `ini/charismatitletable.txt` (rangs de charisme). Cible : catégories Expert Collector, Advanced, Addict et
-//!   Researcher ; Defender of Chantra (32) et Schola 1-3 (33-35, 38-40, 43-45) seulement si le serveur les
+//!   `ini/charismatitletable.txt` (rangs de charisme). Cible : catégories de la table de Webzen (Collector,
+//!   Expert Collector, Natural Enemy, Addict, Killer, Advanced, Storyteller, Researcher : 2 768 titres, exportés
+//!   par le serveur dans `server-data/`) ; Defender of Chantra (32) et Schola 1-3 (33-35, 38-40, 43-45) seulement si le serveur les
 //!   active (TID ≠ 0 dans l'op 10, réglage `titles.schola` d'ArchCore) ou en envoie un ; écartés (ajouts
 //!   d'Archonia) : Christmas Event (11000-11005), Schola 4 / 5, `TitleRelatedSkills.txt`,
 //!   `UI_TitleSelectSkillRank` et l'op 11 (choix d'une compétence).
@@ -105,11 +106,13 @@ pub enum Scope {
     Excluded,
 }
 
-/// Catégories de l'épisode 8 (`Title_Class` de la table anglaise ; noms coréens 수집 전문가, 상급, 중독자, 연구가).
-pub const EP8_CLASSES: [&str; 4] = ["Expert Collector", "Advanced", "Addict", "Researcher"];
+/// Catégories de l'épisode 8 (`Title_Class` de la table anglaise de Webzen ; « Natural Enemy » suivi de la tranche de
+/// niveaux, « Natural Enemy (1-10) »…).
+pub const EP8_CLASSES: [&str; 8] = ["Collector", "Expert Collector", "Natural Enemy", "Addict", "Killer", "Advanced", "Storyteller", "Researcher"];
 
 pub fn scope(tid: i32, class: &str) -> Scope {
-    if EP8_CLASSES.contains(&class) {
+    let ep8 = EP8_CLASSES.iter().any(|c| class == *c || class.strip_prefix(c).is_some_and(|r| r.starts_with(" (")));
+    if ep8 && !(32..=47).contains(&tid) {
         Scope::Ep8
     } else if tid == 32 || ((33..=47).contains(&tid) && (tid - 33) % 5 < 3) {
         Scope::Optional
@@ -865,6 +868,8 @@ mod tests {
         assert_eq!(t[&140001].skills, vec![1555]);
         assert_eq!(t[&33].items, vec![(14531, 1)]);
         assert_eq!([scope(32, "Defender of Chantra"), scope(35, "x"), scope(37, "x"), scope(38, "x"), scope(11003, "Christmas Event")], [Scope::Optional, Scope::Optional, Scope::Excluded, Scope::Optional, Scope::Excluded]);
+        // Catégories de Webzen absentes de la table d'Archonia.
+        assert_eq!([scope(1, "Collector"), scope(30001, "Natural Enemy (1-10)"), scope(90001, "Killer"), scope(170001, "Storyteller"), scope(9, "Natural Enemyx")], [Scope::Ep8, Scope::Ep8, Scope::Ep8, Scope::Ep8, Scope::Excluded]);
     }
 
     #[test]

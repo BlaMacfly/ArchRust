@@ -143,6 +143,10 @@ Couche de tables de valeurs écrite par le serveur (`archcore export-client-tabl
   dans tous les dossiers : une table exportée seulement dans `ini/` l'emporte sur la copie d'Archonia de
   `ini_fr/`. Si `ItemTemplateAll.ini` vient du serveur, seul un `ItemTemplateAll2.ini` du serveur lui
   est ajouté. Les tables sont mises en cache : un nouvel export demande de relancer le client.
+* **Tables de Webzen** : après `archcore import --webzen`, l'export écrit aussi `questtemplate.ini` (3 082 quêtes,
+  textes de la langue du dossier), `questgroup.ini`, `titledatatable.txt`, `titlestringtable.txt`,
+  `SkillMastery_High.txt` et `SkillMastery_Heroic.txt` ; `LevelUpExp.txt` porte la courbe des niveaux 1 à 121, au-delà
+  de 2³² dès le niveau 113 (lue en `u64`, comme l'expérience reçue : `FACTOR_POINT` 3 + 4 << 32).
 * **Empreinte** : `tables.toml` à la racine du dossier.
 
   ```toml
@@ -1522,7 +1526,7 @@ Tables TSV d'`ini/` (en-tête sur la première ligne) :
 |---|---|
 | `SKILLMASTERY.txt` | section par race et classe (« Human Knight »… « MoonElf Elementalist », « DragonScion Monk » : `Produce` seulement), catégories `Battle`, `Enchant`, `Special`, `Passive`, `Produce` (colonne 1), noms (colonne 2) ; section `Archlord` |
 | `SkillMastery_High.txt` | ligne de classe (TID du gabarit en colonne 0), puis une compétence par case : 1 TID, 2 nom, 3–4 ConditionA–B `TID;niveau` d'une compétence, 5 ConditionC `TID;N` d'un gabarit de personnage (rangée à part, FUN_140229e10), 6 ConditionD `total;` ; classes 96, 1, 6, 4, 8, 3, 460, 9, 377 (11 cases), Scion 1724 (18), Slayer 1722 (11), Orbiter 1723 (12), Summoner 1732 (12), « 10004;4 » passives du Scion (15 ; 10004 = 10000 + race 4, le « ;4 » n'est lu par aucun contrôle) |
-| `SkillMastery_Heroic.txt` | même forme, 10 cases, seules ConditionA et D lues (FUN_14022a510) ; Berserker (4) : lignes « 0 » et « 1 » puis compétences décalées d'une colonne, le second arbre rangé sous 10004 (FUN_14022a510) ; Slayer, Orbiter, Summoner du Scion, pas le Scion de base |
+| `SkillMastery_Heroic.txt` | même forme, 10 cases, seules ConditionA et D lues (FUN_14022a510) ; Berserker (4) d'Archonia : lignes « 0 » et « 1 » puis compétences décalées d'une colonne (FUN_14022a510) ; seul l'arbre 0 est lu, le second (mode berserk) étant un ajout d'Archonia absent des fichiers de Webzen exportés par le serveur (`server-data/ini/SkillMastery_*.txt`) ; Slayer, Orbiter, Summoner du Scion, pas le Scion de base |
 | `SKILL_CONST.txt` | par niveau : `require_class_*`, `require_point`, `require_heroic_point`, `require_charisma_point`, `skill_cost`, `skill_upgrade_cost` |
 | `SKILL_SPEC.txt` | par compétence : `attribute` (reste après 40000, 20000, 10000, 1000, 200, 100, 40, puis 20 ou 10 : 8 production, 9 passive), `transform_target` (5 : « … of Evolution »), `auto_attack` (Normal Attack) |
 
@@ -2197,8 +2201,12 @@ op 11 SKILL_SELECT   0x50  @4C compétence (ajout d'Archonia, codé, ignoré par
 ```
 
 - **Données** : `ini/titledatatable.txt` (90 colonnes lues par leur en-tête), `<langue>/titlestringtable.txt`
-  (FirstCategory 200 Expert Collector, 500 Addict, 1500 Advanced, 2100 Researcher ; SecondCategory = ordre),
-  `ini/titlesetting.xml` (couleurs par état), `ini/charismatitletable.txt`. 674 titres de l'épisode 8 ; Defender of
+  (FirstCategory 100 Collector, 200 Expert Collector, 401 à 409 Natural Enemy, 500 Addict, 1000 Killer, 1500
+  Advanced, 1800 Storyteller, 2100 Researcher ; SecondCategory = ordre), `ini/titlesetting.xml` (couleurs par état),
+  `ini/charismatitletable.txt`. Avec les données du serveur importées de Webzen (`archcore import --webzen`, puis
+  `export-client-tables`) : les 2 768 titres de Webzen ; avec les seules tables d'Archonia : 674 titres. Catégories
+  de l'épisode 8 (`EP8_CLASSES`) : celles de Webzen ; `Title_Check_N` n'est lu que pour savoir si la condition existe
+  (Webzen y écrit le TID du premier titre de la famille, 10001, 30001…, Archonia un type, 2, 5…). Defender of
   Chantra (32) et Schola rangs 1-3 (10 titres) seulement si l'op 10 porte un TID ≠ 0 ou si le serveur en envoie un ;
   Christmas Event, Schola 4 / 5, `TitleRelatedSkills.txt`, `UI_TitleSelectSkillRank`, op 11 : écartés.
 - **États** : 1 Ready, 2 Running, 3 Complete (chaque compteur ≥ la valeur de sa condition), 4 Enable (possédé),

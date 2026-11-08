@@ -784,9 +784,18 @@ fn upload(ctx: &egui::Context, name: &str, img: &crate::assets::RgbaImage) -> eg
 
 fn load_exp_table(assets: &Assets) -> HashMap<i32, u64> {
     // En clair (données du serveur) ou chiffrée (client).
-    let text = assets.read_text("ini", "LevelUpExp.txt").unwrap_or_default();
-    let map: HashMap<i32, u64> = text
-        .lines()
+    let map = parse_exp_table(&assets.read_text("ini", "LevelUpExp.txt").unwrap_or_default());
+    log::info!(
+        "HUD : expérience de {} niveau(x) (LevelUpExp.txt)",
+        map.len()
+    );
+    map
+}
+
+/// `LevelUpExp.txt` (« level exp ») : expérience pour passer chaque niveau, en 64 bits (courbe de Webzen exportée par
+/// le serveur : au-delà de 2³² dès le niveau 113).
+fn parse_exp_table(text: &str) -> HashMap<i32, u64> {
+    text.lines()
         .filter_map(|l| {
             let mut it = l.split('\t');
             Some((
@@ -794,12 +803,7 @@ fn load_exp_table(assets: &Assets) -> HashMap<i32, u64> {
                 it.next()?.trim().parse().ok()?,
             ))
         })
-        .collect();
-    log::info!(
-        "HUD : expérience de {} niveau(x) (LevelUpExp.txt)",
-        map.len()
-    );
-    map
+        .collect()
 }
 
 fn load_skill_icons(assets: &Assets) -> HashMap<i32, String> {
@@ -2000,6 +2004,13 @@ mod minimap_cursor_tests {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn courbe_d_experience_en_64_bits() {
+        let t = parse_exp_table("level\texp\r\n112\t4088758693\r\n121\t6640723530\r\n");
+        assert_eq!((t[&112], t[&121]), (4_088_758_693, 6_640_723_530));
+        assert!(t[&121] > u32::MAX as u64 && !t.contains_key(&0));
+    }
 
     #[test]
     #[ignore = "nécessite ARCHRUST_GAME_DIR et les packs du client"]
