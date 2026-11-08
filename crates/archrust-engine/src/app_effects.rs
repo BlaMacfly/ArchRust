@@ -7,7 +7,10 @@
 //! * lancement d'une compétence (AGPMSKILL op 7) : le nom de la compétence (`SKILLTEMPLATE.ini`) donne
 //!   son rang dans les `UsableSkillTName<i>` du lanceur (`CharacterTemplatePublic.ini`), puis les
 //!   `SKILL_EFFECT_DATA` de `charactertemplateskill.ini` de ce rang (`rang:équipement:n°:EID:x:y:z:
-//!   échelle:nœud:délai`), pour l'ensemble d'animation de l'arme portée (sinon le premier) ;
+//!   échelle:nœud:délai`), pour l'ensemble d'animation de l'arme portée (sinon 0), condition 0x80000,
+//!   hors D1 (réservé au buff actif) ;
+//! * amélioration active (ops 4/6) : modèle du lanceur du mini SKILL_BUFF, même rang mais ensemble 0,
+//!   condition 0x80000 (notamment les lignes D1) ; retrait à l'op 5, à échéance ou à la sortie de vue ;
 //! * coup porté (0x41 réussi) : effets de condition 0x100 du modèle de la cible
 //!   (`charactertemplateeventeffect.ini`, « Defualt(Exp)_mob »…) ; mort : condition 0x200
 //!   (« mob_dead2 »…). Le sens de ces deux drapeaux est **déduit des noms des jeux** ;
@@ -70,7 +73,7 @@ use archrust_protocol::schema::action_status;
 use glam::{Mat4, Vec3};
 use std::collections::HashMap;
 use std::sync::Arc;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 /// Demi-côté de la planche d'Archonia (0x40e20c4a, FUN_1408d2e20).
 const BOARD_HALF: f32 = 7.064;
@@ -117,6 +120,20 @@ fn placed_from(fields: &[&str]) -> Option<Placed> {
     })
 }
 
+/// Effets d'apparition (condition 0x1) d'un modèle d'objet du décor, colonnes 21 `AGCMEVENTEFFECT_CONDITION_FLAGS` et 22
+/// `AGCMEVENTEFFECT_EFFECT_DATA` d'`objecttemplate.ini`, même écriture que pour les personnages.
+pub(super) fn object_spawn_effects(assets: &Assets, tid: u32) -> Vec<Placed> {
+    let Ok(t) = assets.table("ini", "objecttemplate.ini") else { return Vec::new() };
+    let Some(s) = t.section(&tid.to_string()) else { return Vec::new() };
+    let conds: HashMap<&str, u32> = s.get_all("21").filter_map(|v| v.split_once(':')).map(|(i, f)| (i.trim(), f.split(':').next().and_then(|x| x.trim().parse().ok()).unwrap_or(0))).collect();
+    s.get_all("22")
+        .filter_map(|v| {
+            let f: Vec<&str> = v.split(':').collect();
+            (conds.get(f.first()?.trim())? & 1 != 0).then(|| placed_from(&f[1..])).flatten()
+        })
+        .collect()
+}
+
 /// Catégorie d'un effet, pour les niveaux d'`OP_Effect`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Class {
@@ -131,6 +148,8 @@ enum Anchor {
 }
 
 struct Instance {
+    /// Jeu d'effets (`ExcEffTable.txt`).
+    eid: u32,
     set: Arc<EffectSetData>,
     born: Instant,
     anchor: Anchor,
@@ -147,6 +166,10 @@ struct Instance {
     permanent: bool,
     /// Effet d'une arme sertie (`app_stones.rs`) : permanent, remplacé quand la conversion change.
     stone: bool,
+    /// Effet permanent du collier, indépendant des armes et des améliorations.
+    necklace: bool,
+    /// TID de l’amélioration qui possède le contrôleur (ops 4/5/6).
+    buff: Option<i32>,
     /// Émetteurs des bases de particules (types 1 et 2), par indice de base.
     emitters: Vec<Option<particles::Emitter>>,
     /// Traînées (type 3), par indice de base.
@@ -198,7 +221,12 @@ pub struct EffectsGlue {
     /// Graine des émetteurs.
     seed: u32,
     common: Option<HashMap<String, Vec<Placed>>>,
+    /// `ExcEffTable.txt` : jeu → jeux qui l'empêchent.
+    exclusive: Option<HashMap<u32, Vec<u32>>>,
     skill_cache: HashMap<(i32, i32, u32), Vec<Placed>>,
+    buff_cache: HashMap<(i32, i32), Vec<Placed>>,
+    /// État réseau, distinct des contrôleurs : un renouvellement ne redémarre pas l’effet.
+    buffs: HashMap<(i32, i32), BuffVisual>,
     event_cache: HashMap<(i32, u32), Vec<Placed>>,
     /// Personnages apparus dont les effets d'apparition restent à lancer (l'entité n'existe qu'après
     /// le traitement de l'événement).
@@ -209,7 +237,78 @@ pub struct EffectsGlue {
     voices: Vec<((Instant, u32, i32), u64)>,
 }
 
+/// Amélioration reçue, éventuellement avant que le modèle du porteur soit chargé.
+struct BuffVisual {
+    caster_tid: i32,
+    expires: Option<Instant>,
+    started: bool,
+}
+
+impl EffectsGlue {
+    fn note_buff(&mut self, owner: i32, tid: i32, ms: u64, caster_tid: i32, now: Instant) {
+        let expires = (ms > 0).then(|| now.checked_add(Duration::from_millis(ms))).flatten();
+        let b = self.buffs.entry((owner, tid)).or_insert(BuffVisual { caster_tid, expires, started: false });
+        b.expires = expires;
+        // Un serveur ancien peut omettre le modèle : attendre une annonce complète, sans en inventer un.
+        if caster_tid != 0 { b.caster_tid = caster_tid; }
+    }
+
+    fn remove_buff(&mut self, owner: i32, tid: i32) {
+        self.buffs.remove(&(owner, tid));
+        self.active.retain(|i| !(i.buff == Some(tid) && matches!(i.anchor, Anchor::Character(c) if c == owner)));
+    }
+}
+
 /// `ee_common_char.txt` : NAME → effets (EID, OFFSET_X/Y/Z, SCALE, NODE_ID, GAP).
+/// Effet commun d'un effet secondaire (AGPMSKILL op 10, rappel 9, `FUN_140568d70`) joué sur le personnage
+/// du champ 2 par `FUN_1405720f0`. Le code d'Archonia est le rang de la ligne dans `ee_common_char.txt`
+/// (`FUN_14082dd10`, à partir de 0) : 0xd, 0xe, 0x11, 0x12, 0x1c, 0x20, 0x2a, 0x4d, soit ces noms. Genres 5 et 7 :
+/// aucun effet. Les genres 1 et 8 dépendent en plus de l'option `ADV_LENS_SKILL_EFF` (`+0x3fd0`, allumée
+/// d'office, `FUN_140712e20`), option avancée d'Archonia qu'ArchRust ne reprend pas : toujours joués.
+pub fn additional_effect_common(kind: i32) -> Option<&'static str> {
+    Some(match kind {
+        1 => "TIMEATTACK",
+        2 => "TELEPORT",
+        3 => "ABSORBMANA",
+        4 => "ABSORBLIFE",
+        6 => "MENTALCIRCUIT",
+        8 => "LENS_STONE",
+        9 => "DETECT_SCROLL",
+        10 => "CURE",
+        _ => return None,
+    })
+}
+
+/// `ExcEffTable.txt` (`KeyEffID`, `ExcEffID1`… , `FUN_140576fb0`) : jeu exclu → jeux clés ; une clé répétée est ignorée,
+/// et un jeu qui est lui-même une clé n'est jamais empêché (`FUN_140576be0`).
+pub fn parse_exclusive(text: &str) -> HashMap<u32, Vec<u32>> {
+    let mut lines = text.lines();
+    let header: Vec<&str> = lines.next().unwrap_or_default().split('\t').collect();
+    let mut keys: Vec<u32> = Vec::new();
+    let mut out: HashMap<u32, Vec<u32>> = HashMap::new();
+    for l in lines {
+        let c: Vec<&str> = l.split('\t').collect();
+        let Some(key) = c.first().and_then(|v| v.trim().parse::<u32>().ok()) else { continue };
+        if keys.contains(&key) {
+            continue;
+        }
+        keys.push(key);
+        for (h, v) in header.iter().zip(&c).skip(1) {
+            if !h.trim().to_ascii_lowercase().starts_with("exceffid") {
+                continue;
+            }
+            if let Ok(exc) = v.trim().parse::<u32>() {
+                let list = out.entry(exc).or_default();
+                if !list.contains(&key) {
+                    list.push(key);
+                }
+            }
+        }
+    }
+    out.retain(|exc, _| !keys.contains(exc));
+    out
+}
+
 fn load_common(assets: &Assets) -> HashMap<String, Vec<Placed>> {
     let text = super::npc_glue::client_text_in(assets, "ini", "ee_common_char.txt");
     let mut lines = text.lines();
@@ -252,27 +351,53 @@ pub fn skill_rank(assets: &Assets, char_tid: i32, skill_tid: i32) -> Option<u32>
 /// Effets de la compétence `skill_tid` lancée par le modèle `char_tid` avec l'ensemble d'animation
 /// `equip` (voir l'en-tête du module).
 pub fn skill_effects(assets: &Assets, char_tid: i32, skill_tid: i32, equip: u32) -> Vec<Placed> {
+    selected_skill_effects(assets, char_tid, skill_tid, equip, false)
+}
+
+/// Amélioration active : ensemble 0 et condition 0x80000 (`FUN_140572c00`, `FUN_1405748b0`).
+/// Sélecteur D de `CUST_DATA` (`FUN_1405686b0`, voir [`cust_d`]) : le buff exige D=1, le lancement D≤0.
+fn buff_effects(assets: &Assets, caster_tid: i32, skill_tid: i32) -> Vec<Placed> {
+    selected_skill_effects(assets, caster_tid, skill_tid, 0, true)
+}
+
+/// Valeur D de `SKILL_EFFECT_CUST_DATA` (`N(L v|…)`) : −1 si absente ; le parseur d'Archonia
+/// (`FUN_14056b7e0`) garde la dernière occurrence d'une lettre.
+fn cust_d(cust: &str) -> i32 {
+    cust.split(['(', ')', '|']).filter_map(|v| v.trim().strip_prefix('D').and_then(|v| v.trim().parse::<i32>().ok())).last().unwrap_or(-1)
+}
+
+fn selected_skill_effects(assets: &Assets, char_tid: i32, skill_tid: i32, equip: u32, buff: bool) -> Vec<Placed> {
     let Some(rank) = skill_rank(assets, char_tid, skill_tid) else { return Vec::new() };
     let Ok(t) = assets.table("ini", "charactertemplateskill.ini") else { return Vec::new() };
     let (Some(header), Some(sec)) = (t.section(""), t.section(&char_tid.to_string())) else { return Vec::new() };
-    let data_cols: std::collections::HashSet<&str> = header.entries.iter().filter(|(_, v)| v.starts_with("SKILL_EFFECT_DATA")).map(|(k, _)| k.as_str()).collect();
-    // (équipement, effet) pour ce rang.
-    let mut by_equip: Vec<(u32, Placed)> = Vec::new();
+    // L’identité de la ligne est dans sa valeur (rang:ensemble:indice), pas dans le suffixe du nom.
+    let mut conditions = HashMap::new();
+    let mut custom = HashMap::new();
+    let key = |f: &[&str]| -> Option<(u32, u32, u32)> {
+        Some((f.first()?.trim().parse().ok()?, f.get(1)?.trim().parse().ok()?, f.get(2)?.trim().parse().ok()?))
+    };
     for (k, v) in &sec.entries {
-        if !data_cols.contains(k.as_str()) {
-            continue;
-        }
-        let f: Vec<&str> = v.split(':').collect();
-        if f.first().and_then(|r| r.trim().parse::<u32>().ok()) != Some(rank) {
-            continue;
-        }
-        let Some(e) = f.get(1).and_then(|e| e.trim().parse::<u32>().ok()) else { continue };
-        if let Some(p) = f.get(3..).and_then(placed_from) {
-            by_equip.push((e, p));
+        let name = header.get(k).unwrap_or("");
+        let f: Vec<_> = v.splitn(4, ':').collect();
+        let Some(id) = key(&f).filter(|id| id.0 == rank) else { continue };
+        if name.starts_with("SKILL_EFFECT_CONDITION") {
+            // Le lecteur d'Archonia cumule les conditions d'une même entrée par OU.
+            *conditions.entry(id).or_insert(0u32) |= f.get(3).and_then(|v| v.trim().parse::<u32>().ok()).unwrap_or(0);
+        } else if name.starts_with("SKILL_EFFECT_CUST_DATA") {
+            custom.insert(id, f.get(3).copied().unwrap_or(""));
         }
     }
-    let chosen = if by_equip.iter().any(|(e, _)| *e == equip) { equip } else { by_equip.iter().map(|(e, _)| *e).min().unwrap_or(0) };
-    by_equip.into_iter().filter(|(e, _)| *e == chosen).map(|(_, p)| p).collect()
+    let chosen = if !buff && conditions.iter().any(|(id, bits)| id.1 == equip && bits & 0x80000 != 0) { equip } else { 0 };
+    sec.entries.iter().filter_map(|(k, v)| {
+        if !header.get(k).unwrap_or("").starts_with("SKILL_EFFECT_DATA") { return None }
+        let f: Vec<_> = v.split(':').collect();
+        let id = key(&f)?;
+        if id.0 != rank || id.1 != chosen || conditions.get(&id).copied().unwrap_or(0) & 0x80000 == 0 { return None }
+        let cust = custom.get(&id).copied().unwrap_or("");
+        let d = cust_d(cust);
+        if (buff && d != 1) || (!buff && d > 0) { return None }
+        placed_from(f.get(3..)?)
+    }).collect()
 }
 
 /// Effets d'un modèle de personnage (`charactertemplateeventeffect.ini`) dont la condition porte `flag`.
@@ -614,6 +739,21 @@ impl App {
         }
     }
 
+    /// Effet d'un objet du décor posé au point `at`, relancé quand il finit tant que l'appelant le demande, au niveau
+    /// « terrain » d'`OP_Effect`. `key` : clé négative (jamais un CID) qui le distingue des autres ; sans personnage, la
+    /// position reste `at`.
+    pub(super) fn effects_keep_at(&mut self, key: i32, placed: Placed, at: Vec3) {
+        if self.options.video.effect_levels().0 == 0 || self.effects.active.iter().any(|i| matches!(i.anchor, Anchor::Character(c) if c == key) && i.eid == placed.eid) {
+            return;
+        }
+        self.effects_spawn(placed, Anchor::Character(key), (at, 0.0));
+    }
+
+    /// Effets `placed` joués sur le personnage `cid`, au niveau « combat » d'`OP_Effect` (`app_stones.rs`).
+    pub(super) fn effects_play_combat(&mut self, cid: i32, placed: &[Placed]) {
+        self.effects_play_on(cid, placed, Class::Combat);
+    }
+
     /// Hauteur du modèle (`HEIGHT` de `charactertemplateclient.ini`).
     fn effects_height_of(&self, cid: i32) -> f32 {
         let Some(tid) = self.effects_tid_of(cid) else { return 0.0 };
@@ -639,6 +779,13 @@ impl App {
     /// Lance un jeu ; `false` s'il n'est pas joué (absent, dépendances invalides, nœuds manquants).
     fn effects_spawn(&mut self, p: Placed, anchor: Anchor, at: (Vec3, f32)) -> bool {
         let assets = self.assets.clone();
+        // Effets exclusifs (FUN_140576be0, appelé au départ d'un jeu par FUN_140839b20) : pas de jeu sur un personnage qui
+        // porte l'un des jeux « clé » qui l'excluent.
+        let Anchor::Character(c) = anchor;
+        let table = self.effects.exclusive.get_or_insert_with(|| parse_exclusive(&super::npc_glue::client_text_in(&assets, "ini", "ExcEffTable.txt")));
+        if table.get(&p.eid).is_some_and(|keys| self.effects.active.iter().any(|i| matches!(i.anchor, Anchor::Character(o) if o == c) && keys.contains(&i.eid))) {
+            return false;
+        }
         let Some(set) = self.effects.set(&assets, p.eid) else {
             log::debug!("effet {} : jeu absent ou non décodé", p.eid);
             return false;
@@ -667,7 +814,7 @@ impl App {
             emitters.push(b.particles.is_some().then(|| particles::Emitter::new(self.effects.seed)));
         }
         let trails = set.bases.iter().map(|b| b.tail.is_some().then(particles::Trail::default)).collect();
-        self.effects.active.push(Instance { sounded: vec![false; set.bases.len()], set, born: Instant::now(), anchor, last: at, offset: p.offset, scale: p.scale, life, node: p.node, delay: p.delay, permanent: self.effects.spawning, stone: false, emitters, trails, attach });
+        self.effects.active.push(Instance { eid: p.eid, sounded: vec![false; set.bases.len()], set, born: Instant::now(), anchor, last: at, offset: p.offset, scale: p.scale, life, node: p.node, delay: p.delay, permanent: self.effects.spawning, stone: false, necklace: false, buff: None, emitters, trails, attach });
         true
     }
 
@@ -708,9 +855,28 @@ impl App {
         self.effects.active.iter().any(|i| i.stone && matches!(i.anchor, Anchor::Character(c) if c == cid))
     }
 
+    /// Remplace uniquement le visuel du collier, sans retirer celui de l'arme ni les améliorations.
+    pub(super) fn effects_set_necklace(&mut self, cid: i32, placed: &[Placed]) {
+        self.effects.active.retain(|i| !(i.necklace && matches!(i.anchor, Anchor::Character(c) if c == cid)));
+        if !self.effects_class_on(Class::Combat) { return }
+        let Some(at) = self.effects_anchor_of(cid) else { return };
+        for p in placed {
+            if self.effects_spawn(*p, Anchor::Character(cid), at) {
+                if let Some(i) = self.effects.active.last_mut() {
+                    i.permanent = true;
+                    i.necklace = true;
+                }
+            }
+        }
+    }
+
+    pub(super) fn effects_has_necklace(&self, cid: i32) -> bool {
+        self.effects.active.iter().any(|i| i.necklace && matches!(i.anchor, Anchor::Character(c) if c == cid))
+    }
+
     /// Effets d'apparition (condition 0x1) d'un personnage entré dans la vue : remplacent les siens.
     fn effects_spawn_permanent(&mut self, cid: i32) {
-        self.effects.active.retain(|i| !(i.permanent && !i.stone && matches!(i.anchor, Anchor::Character(c) if c == cid)));
+        self.effects.active.retain(|i| !(i.permanent && !i.stone && !i.necklace && i.buff.is_none() && matches!(i.anchor, Anchor::Character(c) if c == cid)));
         self.effects.spawning = true;
         self.effects_event(cid, COND_SPAWN);
         self.effects.spawning = false;
@@ -720,8 +886,25 @@ impl App {
     pub(super) fn effects_observe(&mut self, ev: &WorldEvent) {
         let me = self.player.as_ref().map_or(0, |p| p.cid);
         match ev {
-            WorldEvent::Connected | WorldEvent::Disconnected(_) => self.effects.active.clear(),
+            WorldEvent::Connected | WorldEvent::Disconnected(_) => {
+                self.effects.active.clear();
+                self.effects.buffs.clear();
+                self.effects.pending_spawn.clear();
+            }
+            WorldEvent::BuffAdded(b) => self.effects.note_buff(b.owner, b.skill_tid, b.duration_ms, b.caster_tid, Instant::now()),
+            WorldEvent::BuffRemoved { owner, skill_tid } => self.effects.remove_buff(*owner, *skill_tid),
+            WorldEvent::Skill(SkillEvent::Buffs { owner, buffs }) => {
+                let removed: Vec<_> = self.effects.buffs.keys().filter(|(c, t)| c == owner && !buffs.iter().any(|(tid, _, _)| tid == t)).copied().collect();
+                for (c, t) in removed { self.effects.remove_buff(c, t); }
+                let now = Instant::now();
+                for &(tid, ms, caster_tid) in buffs { self.effects.note_buff(*owner, tid, ms, caster_tid, now); }
+            }
             WorldEvent::LevelUp { cid } => self.effects_common(*cid, "LV_UP", Class::Ui),
+            WorldEvent::Skill(SkillEvent::AdditionalEffect { kind, caster, .. }) => {
+                if let Some(name) = additional_effect_common(*kind) {
+                    self.effects_common(*caster, name, Class::Skill);
+                }
+            }
             WorldEvent::Skill(SkillEvent::Learned { result, .. }) if *result == learn_result::SUCCESS => self.effects_common(me, "LEARN_SK", Class::Ui),
             WorldEvent::Skill(SkillEvent::Cast { caster, tid, .. }) => {
                 let other_player = *caster != me && self.entities.iter().any(|e| e.cid == *caster && e.is_player);
@@ -736,15 +919,52 @@ impl App {
                 self.effects_play_on(*caster, &list, Class::Skill);
             }
             WorldEvent::CharacterSeen(s) => self.effects.pending_spawn.push(s.cid),
-            WorldEvent::CharacterRemoved { cid, .. } => self.effects.active.retain(|i| !(i.permanent && matches!(i.anchor, Anchor::Character(c) if c == *cid))),
+            WorldEvent::CharacterRemoved { cid, .. } => {
+                self.effects.active.retain(|i| !(i.permanent && matches!(i.anchor, Anchor::Character(c) if c == *cid)));
+                self.effects.buffs.retain(|(c, _), _| c != cid);
+                self.effects.pending_spawn.retain(|c| c != cid);
+            }
             WorldEvent::CharacterAction { cid, target_cid, result, .. } => {
                 self.effects_event(*cid, COND_ATTACK);
                 if matches!(result, Some(archrust_netclient::combat::outcome::SUCCESS | archrust_netclient::combat::outcome::CRITICAL)) {
                     self.effects_event(*target_cid, COND_STRUCK);
+                    // `ee_ss_target.txt` selon l'arme de l'attaquant (voir `app_stones.rs`).
+                    self.stones_on_hit(*cid, *target_cid);
                 }
             }
             WorldEvent::CharacterUpdated { cid, action_status: Some(s), .. } if *s == action_status::DEAD => self.effects_event(*cid, COND_DEAD),
             _ => {}
+        }
+    }
+
+    /// Démarre les contrôleurs une seule fois, une fois le porteur prêt. Les boucles sont celles
+    /// des bases du fichier .eff, conservées sans inventer de cycle de relancement.
+    fn effects_update_buffs(&mut self) {
+        let now = Instant::now();
+        let expired: Vec<_> = self.effects.buffs.iter().filter(|(_, b)| b.expires.is_some_and(|t| t <= now)).map(|(k, _)| *k).collect();
+        for (c, t) in expired { self.effects.remove_buff(c, t); }
+        let hidden: Vec<_> = self.effects.buffs.keys().filter(|(cid, _)| {
+            !self.effects_class_on(Class::Skill) || (self.options.video.hide_other_effects && self.entities.iter().any(|e| e.cid == *cid && e.is_player))
+        }).copied().collect();
+        for (cid, tid) in hidden {
+            self.effects.active.retain(|i| !(i.buff == Some(tid) && matches!(i.anchor, Anchor::Character(c) if c == cid)));
+            if let Some(b) = self.effects.buffs.get_mut(&(cid, tid)) { b.started = false; }
+        }
+        let pending: Vec<_> = self.effects.buffs.iter().filter(|(_, b)| !b.started && b.caster_tid != 0).map(|(&(c, t), b)| (c, t, b.caster_tid)).collect();
+        for (cid, tid, caster_tid) in pending {
+            if !self.effects_class_on(Class::Skill) || (self.options.video.hide_other_effects && self.entities.iter().any(|e| e.cid == cid && e.is_player)) { continue }
+            let ready = self.player.as_ref().filter(|p| p.cid == cid).or_else(|| self.entities.iter().find(|e| e.cid == cid)).is_some_and(|e| !e.meshes.is_empty());
+            if !ready { continue }
+            let assets = self.assets.clone();
+            let list = self.effects.buff_cache.entry((caster_tid, tid)).or_insert_with(|| buff_effects(&assets, caster_tid, tid)).clone();
+            let Some(at) = self.effects_anchor_of(cid) else { continue };
+            for p in list {
+                let p = self.effects_resolve_node(cid, p);
+                if self.effects_spawn(p, Anchor::Character(cid), at) {
+                    if let Some(i) = self.effects.active.last_mut() { i.buff = Some(tid); i.permanent = true; }
+                }
+            }
+            if let Some(b) = self.effects.buffs.get_mut(&(cid, tid)) { b.started = true; }
         }
     }
 
@@ -770,14 +990,16 @@ impl App {
 
     /// Chaque image : sons des bases atteintes, triangles des effets pour le moteur de rendu.
     pub(super) fn effects_frame(&mut self) {
-        if self.options.video.effect == 0 {
+        if self.options.video.effect_levels() == (0, 0, 0, 0) {
             self.effects.active.clear();
+            for b in self.effects.buffs.values_mut() { b.started = false; }
         }
         for cid in std::mem::take(&mut self.effects.pending_spawn) {
             if self.effects_anchor_of(cid).is_some() {
                 self.effects_spawn_permanent(cid);
             }
         }
+        self.effects_update_buffs();
         let now = Instant::now();
         let view = self.camera.view();
         // Axes de la caméra dans le monde (lignes de la vue).
@@ -1030,6 +1252,15 @@ impl App {
 mod tests {
     use super::*;
 
+    /// Sélecteur D : absent = −1, dernière occurrence retenue (`FUN_14056b7e0`).
+    #[test]
+    fn selecteur_d_des_donnees_d_effet() {
+        assert_eq!(cust_d("2(G1|J3)"), -1);
+        assert_eq!(cust_d("3(G1|D1|O1)"), 1);
+        assert_eq!(cust_d("3(D1|G1|D0)"), 0);
+        assert_eq!(cust_d(""), -1);
+    }
+
     #[test]
     fn effect_data_fields_and_anim_time() {
         // `0:150:0:1` après l'EID (données de compétence `0:1:0:5001:0:150:0:1:0:0`).
@@ -1062,6 +1293,61 @@ mod tests {
         assert_eq!(set_life(&EffectSetData { life: 0, ..Default::default() }), DEFAULT_LIFE_MS);
     }
 
+    #[test]
+    fn effets_exclusifs() {
+        let t = parse_exclusive("KeyEffID\tExcEffID1\tExcEffID2\n10\t20\t30\n11\t20\t10\n10\t99\t\n");
+        assert_eq!(t[&20], vec![10, 11]);
+        assert_eq!(t[&30], vec![10]);
+        // La clé 10 n'est jamais exclue ; la seconde ligne de la clé 10 est ignorée.
+        assert!(!t.contains_key(&10) && !t.contains_key(&99));
+    }
+
+    #[test]
+    fn renouvellement_et_retrait_des_buffs_par_porteur() {
+        let mut effects = EffectsGlue::default();
+        let now = Instant::now();
+        effects.note_buff(42, 4, 10_000, 96, now);
+        effects.buffs.get_mut(&(42, 4)).unwrap().started = true;
+        effects.note_buff(42, 4, 30_000, 96, now);
+        let b = &effects.buffs[&(42, 4)];
+        assert!(b.started, "un renouvellement ne redémarre pas le contrôleur");
+        assert_eq!(b.expires, now.checked_add(Duration::from_secs(30)));
+        effects.note_buff(43, 4, 0, 96, now);
+        let instance = |cid, buff, stone| Instance {
+            eid: 3455, set: Arc::new(EffectSetData::default()), born: now,
+            anchor: Anchor::Character(cid), last: (Vec3::ZERO, 0.0),
+            offset: Vec3::ZERO, scale: 1.0, sounded: Vec::new(), life: 0,
+            node: 0, delay: 0, permanent: true, stone, necklace: false, buff,
+            emitters: Vec::new(), trails: Vec::new(), attach: Vec::new(),
+        };
+        // Même EID : le retrait suit la propriété du contrôleur, pas le numéro du jeu.
+        effects.active = vec![instance(42, Some(4), false), instance(43, Some(4), false),
+            instance(42, Some(8), false), instance(42, None, true)];
+        effects.remove_buff(42, 4);
+        assert!(!effects.buffs.contains_key(&(42, 4)));
+        assert!(effects.buffs.contains_key(&(43, 4)), "le retrait ne touche pas un autre CID");
+        assert!(effects.buffs[&(43, 4)].expires.is_none());
+        assert_eq!(effects.active.len(), 3);
+        assert!(effects.active.iter().any(|i| i.stone));
+        assert!(effects.active.iter().any(|i| i.buff == Some(8)));
+    }
+
+    #[test]
+    fn buffs_du_client_ensemble_zero_et_noeuds() {
+        let Some(dir) = std::env::var_os("ARCHRUST_GAME_DIR") else { return };
+        let assets = Assets::new(Some(std::path::PathBuf::from(dir)), &[]);
+        let speed = buff_effects(&assets, 96, 4);
+        assert_eq!(speed.iter().map(|p| (p.eid, p.node)).collect::<Vec<_>>(), vec![(3455, 101), (3455, 102)]);
+        // D1 appartient au buff actif : il ne doit pas être lancé une seconde fois par l'op 7.
+        assert!(!skill_effects(&assets, 96, 4, 1).iter().any(|p| p.eid == 3455));
+        for (tid, eid) in [(8, 3452), (130, 3475), (227, 3475), (229, 3454), (457, 3560)] {
+            let list = buff_effects(&assets, 96, tid);
+            assert!(list.iter().any(|p| p.eid == eid), "TID {tid} : {list:?}");
+            assert!(assets.effect_sets().decode(eid).is_some(), "jeu {eid} absent");
+        }
+        assert!(buff_effects(&assets, 0, 4).is_empty(), "ne pas remplacer le modèle du lanceur par celui du porteur");
+    }
+
     /// Avec les données du client (`ARCHRUST_GAME_DIR`) : effets de « Dual Slash » du chevalier (TID 96,
     /// épée à une main) = jeu 5001 ; montée de niveau = jeux 3610 et 3611 ; coup sur le chevalier.
     #[test]
@@ -1076,6 +1362,12 @@ mod tests {
         let common = load_common(&assets);
         assert_eq!(common["LV_UP"].iter().map(|p| p.eid).collect::<Vec<_>>(), vec![3610, 3611]);
         assert_eq!(common["LEARN_SK"][0].eid, 3614);
+        // Effets secondaires (op 10) : une ligne par genre, celle du rang relevé dans FUN_140568d70.
+        for (kind, eid) in [(1, 11017), (2, 11021), (3, 11584), (4, 11585), (6, 8532), (8, 3559), (9, 3570), (10, 2157)] {
+            let row = &common[additional_effect_common(kind).unwrap()];
+            assert_eq!((row.len(), row[0].eid), (1, eid), "genre {kind}");
+        }
+        assert_eq!((additional_effect_common(5), additional_effect_common(7)), (None, None));
         assert!(event_effects(&assets, 96, COND_STRUCK).iter().any(|p| p.eid == 3551));
         // Effets d'apparition (0x1) et d'attaque (0x40) : présents pour une partie des modèles.
         let t = assets.table("ini", "charactertemplateeventeffect.ini").unwrap();
@@ -1136,7 +1428,7 @@ mod tests {
         let child = EffBase { kind: base_kind::BOARD, position: [10.0, 0.0, 0.0], ..Default::default() };
         let set = Arc::new(EffectSetData { deps: vec![archrust_data::effset::EffDep { parent: 0, node: None, child: 1, flags: 0 }], bases: vec![parent, child], ..Default::default() });
         let attach = set.attachments().unwrap();
-        let inst = Instance { set, born: Instant::now(), anchor: Anchor::Character(0), last: (Vec3::ZERO, 0.0), offset: Vec3::ZERO, scale: 1.0, sounded: vec![false; 2], life: 1000, node: 0, delay: 0, permanent: false, stone: false, emitters: vec![None, None], trails: vec![None, None], attach };
+        let inst = Instance { set, born: Instant::now(), anchor: Anchor::Character(0), eid: 0, last: (Vec3::ZERO, 0.0), offset: Vec3::ZERO, scale: 1.0, sounded: vec![false; 2], life: 1000, node: 0, delay: 0, permanent: false, stone: false, necklace: false, buff: None, emitters: vec![None, None], trails: vec![None, None], attach };
         let assets = Assets::new(None, &[]);
         let mut glue = EffectsGlue::default();
         let mut frames = vec![None; 2];
@@ -1163,7 +1455,7 @@ mod tests {
             let set = glue.set(&assets, eid).expect("jeu");
             let attach = set.attachments().unwrap();
             let n = set.bases.len();
-            let inst = Instance { set: set.clone(), born: Instant::now(), anchor: Anchor::Character(0), last: (Vec3::ZERO, 0.0), offset: Vec3::ZERO, scale: 1.0, sounded: vec![false; n], life: 1000, node: 0, delay: 0, permanent: false, stone: false, emitters: vec![None; n], trails: vec![None; n], attach: attach.clone() };
+            let inst = Instance { set: set.clone(), born: Instant::now(), anchor: Anchor::Character(0), eid: 0, last: (Vec3::ZERO, 0.0), offset: Vec3::ZERO, scale: 1.0, sounded: vec![false; n], life: 1000, node: 0, delay: 0, permanent: false, stone: false, necklace: false, buff: None, emitters: vec![None; n], trails: vec![None; n], attach: attach.clone() };
             for (i, b) in set.bases.iter().enumerate() {
                 let (Some(p), Some(a)) = (&b.tail, attach[i]) else { continue };
                 let mut frames = vec![None; n];
@@ -1239,7 +1531,7 @@ mod tests {
         assert!(moved.iter().zip(&clump.geometries[gi].vertices).any(|(a, b)| (*a - *b).length() > 0.5), "peau immobile");
         let node = a.node.unwrap();
         let n = set.bases.len();
-        let inst = Instance { set: set.clone(), born: Instant::now(), anchor: Anchor::Character(0), last: (Vec3::ZERO, 0.0), offset: Vec3::ZERO, scale: 1.0, sounded: vec![false; n], life: 1000, node: 0, delay: 0, permanent: false, stone: false, emitters: vec![None; n], trails: vec![None; n], attach };
+        let inst = Instance { set: set.clone(), born: Instant::now(), anchor: Anchor::Character(0), eid: 0, last: (Vec3::ZERO, 0.0), offset: Vec3::ZERO, scale: 1.0, sounded: vec![false; n], life: 1000, node: 0, delay: 0, permanent: false, stone: false, necklace: false, buff: None, emitters: vec![None; n], trails: vec![None; n], attach };
         let t = parent.delay + 5000;
         let mut frames = vec![None; n];
         let pm = glue.base_frame(&assets, &inst, Mat4::IDENTITY, t, a.parent, &mut frames);

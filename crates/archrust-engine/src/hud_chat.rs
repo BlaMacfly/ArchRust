@@ -10,12 +10,274 @@
 
 use super::convert_ui::edit_box;
 use super::dialogs_ui::draw_dialog;
-use super::npc_ui::{button, window};
-use super::portal_ui::{control_text, static_text};
+use super::npc_ui::{button, frame, window};
+use super::portal_ui::{control_text, state_button, static_text};
 use super::*;
 
 /// Fenêtres chargées avec le HUD.
-pub(super) const CHAT_WINDOWS: [&str; 7] = ["UI_CreateChatRoom", "UI_EnterChatRoom", "UI_InviteChatRoom", "UI_InviteChatRoom2", "UI_QueryPassword", "UI_FindFriend", "UI_ChatRoom"];
+pub(super) const CHAT_WINDOWS: [&str; 8] = ["UI_CreateChatRoom", "UI_EnterChatRoom", "UI_InviteChatRoom", "UI_InviteChatRoom2", "UI_QueryPassword", "UI_FindFriend", "UI_ChatRoom", TAB_OPTION];
+/// Options d'un onglet de la discussion (voir `app_chattabs.rs`).
+const TAB_OPTION: &str = "UI_ChatTab_Option";
+/// Canaux d'`UI_ChatTab_Option`, bit par bit : sysstr (`FUN_140516e10`) et clé de `color.ini` (`FUN_140516c60`).
+const CHANNELS: [(u32, &str); 12] = [(821, "NORMAL_CHAT"), (822, "GUILD_CHAT"), (823, "PARTY_CHAT"), (824, "WHISPER_SEND"), (825, "SYSTEM_CHAT1"), (828, "NOTICE_CHAT1"), (829, "QUEST_CHAT"), (830, "SHRINE_CHAT"), (836, "Yellow"), (838, "WORD_BALLON"), (839, "RACE_TRUMPET"), (840, "Yellow")];
+const ALL_CHANNELS: u16 = 0xFFF;
+
+/// Choix d'un menu flottant de la discussion.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ChatMenuAction {
+    Font(u8),
+    TabEnable(bool),
+    AddTab,
+    Delete,
+    Change,
+    Close,
+}
+
+/// Clics d'`UI_ChatTab_Option`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TabOptionUi {
+    Ok,
+    Close,
+}
+
+/// Une entrée : libellé, sous-menu rattaché (rang), choix, actif (le choix courant est grisé).
+struct MenuEntry {
+    label: String,
+    submenu: Option<u8>,
+    action: Option<ChatMenuAction>,
+    enabled: bool,
+}
+
+/// Fond d'un menu en neuf morceaux (`PopupBtn_Base1…9`, de gauche à droite, de haut en bas : découpage déduit des noms).
+fn popup_frame(ctx: &egui::Context, hud: &mut HudState, assets: &Assets, painter: &egui::Painter, r: Rect) {
+    let parts: Vec<_> = (1..=9).map(|i| hud.image(ctx, assets, &format!("PopupBtn_Base{i}.png"))).collect();
+    let uv = Rect::from_min_max(Pos2::ZERO, Pos2::new(1.0, 1.0));
+    let (Some((_, c1)), Some((_, c9))) = (parts[0], parts[8]) else {
+        painter.rect_filled(r, 2.0, Color32::from_black_alpha(220));
+        return;
+    };
+    let xs = [r.left(), r.left() + c1[0], r.right() - c9[0], r.right()];
+    let ys = [r.top(), r.top() + c1[1], r.bottom() - c9[1], r.bottom()];
+    for j in 0..3 {
+        for i in 0..3 {
+            if let Some((tex, _)) = parts[j * 3 + i] {
+                painter.image(tex, Rect::from_min_max(Pos2::new(xs[i], ys[j]), Pos2::new(xs[i + 1], ys[j + 1])), uv, Color32::WHITE);
+            }
+        }
+    }
+}
+
+/// Barre de l'entrée survolée (`PopupBtn_Select1…3`).
+fn popup_select(ctx: &egui::Context, hud: &mut HudState, assets: &Assets, painter: &egui::Painter, r: Rect) {
+    let parts: Vec<_> = (1..=3).map(|i| hud.image(ctx, assets, &format!("PopupBtn_Select{i}.png"))).collect();
+    let uv = Rect::from_min_max(Pos2::ZERO, Pos2::new(1.0, 1.0));
+    let (left, right) = (parts[0].map_or(0.0, |(_, s)| s[0]), parts[2].map_or(0.0, |(_, s)| s[0]));
+    let xs = [r.left(), r.left() + left, r.right() - right, r.right()];
+    for i in 0..3 {
+        if let Some((tex, _)) = parts[i] {
+            painter.image(tex, Rect::from_min_max(Pos2::new(xs[i], r.top()), Pos2::new(xs[i + 1], r.bottom())), uv, Color32::WHITE);
+        }
+    }
+}
+
+/// Dessine une colonne d'entrées vers le haut depuis `bottom_left` ; rend (survol d'un sous-menu, clic).
+fn popup_column(ctx: &egui::Context, hud: &mut HudState, assets: &Assets, id: &str, bottom_left: Pos2, entries: &[MenuEntry], font: f32) -> (Option<(u8, Pos2)>, Option<ChatMenuAction>, Rect) {
+    let width = entries.iter().map(|e| ctx.fonts(|f| f.layout_no_wrap(e.label.clone(), FontId::proportional(font), Color32::WHITE).size().x)).fold(0.0, f32::max) + 32.0;
+    let row = font + 8.0;
+    let rect = Rect::from_min_size(bottom_left - Vec2::new(0.0, row * entries.len() as f32 + 12.0), Vec2::new(width, row * entries.len() as f32 + 12.0));
+    let (mut sub, mut action) = (None, None);
+    egui::Area::new(egui::Id::new(("archonia-chat-popup", id))).fixed_pos(rect.min).order(egui::Order::Foreground).show(ctx, |ui| {
+        ui.allocate_rect(rect, egui::Sense::click());
+        let painter = ui.painter().clone();
+        popup_frame(ctx, hud, assets, &painter, rect);
+        for (i, e) in entries.iter().enumerate() {
+            let r = Rect::from_min_size(rect.min + Vec2::new(4.0, 6.0 + row * i as f32), Vec2::new(width - 8.0, row));
+            let resp = ui.interact(r, egui::Id::new(("archonia-chat-popup-row", id, i)), egui::Sense::click());
+            if resp.hovered() && e.enabled {
+                popup_select(ctx, hud, assets, &painter, r);
+            }
+            let color = if e.enabled { Color32::WHITE } else { Color32::GRAY };
+            shadow_text(&painter, r.left_center() + Vec2::new(6.0, 0.0), Align2::LEFT_CENTER, &e.label, font, color);
+            if let Some(index) = e.submenu {
+                shadow_text(&painter, r.right_center() - Vec2::new(6.0, 0.0), Align2::RIGHT_CENTER, ">", font, color);
+                if resp.hovered() {
+                    sub = Some((index, Pos2::new(r.right(), r.bottom())));
+                }
+            }
+            if resp.clicked() && e.enabled {
+                action = e.action;
+            }
+        }
+    });
+    (sub, action, rect)
+}
+
+/// Menus flottants de la discussion (voir `app_chattabs.rs`) ; rend le choix, ou `Close` sur un clic ailleurs.
+pub fn draw_chat_menu(ctx: &egui::Context, hud: &mut HudState, assets: &Assets, menu: crate::ui::ChatMenu, font_now: u8, tab_enable: bool) -> Option<ChatMenuAction> {
+    // Lu une fois : pas de `sysstr.txt` à chaque image.
+    let text = |id: u32| ctx.data_mut(|d| d.get_temp_mut_or_insert_with(egui::Id::new(("archonia-chat-menu-text", id)), || crate::app::npc_glue::sysstr(assets, id).unwrap_or_default()).clone());
+    let entry = |label: String, action: ChatMenuAction, enabled: bool| MenuEntry { label, submenu: None, action: Some(action), enabled };
+    let layout = Layout::new(ctx.screen_rect());
+    let font = (11.0 * layout.scale).max(9.0);
+    let (at, root) = match menu {
+        crate::ui::ChatMenu::Option { at } => (
+            at,
+            vec![
+                MenuEntry { label: text(833), submenu: Some(0), action: None, enabled: true },
+                MenuEntry { label: text(834), submenu: Some(1), action: None, enabled: true },
+                entry(text(835), ChatMenuAction::AddTab, true),
+            ],
+        ),
+        crate::ui::ChatMenu::Tab { at, .. } => (at, vec![entry(text(814), ChatMenuAction::Delete, true), entry(text(815), ChatMenuAction::Change, true)]),
+    };
+    let (hover, mut action, root_rect) = popup_column(ctx, hud, assets, "root", at, &root, font);
+    // Le sous-menu reste ouvert tant que le pointeur est dans l'un des deux.
+    let open_id = egui::Id::new("archonia-chat-popup-open");
+    if hover.is_some() {
+        ctx.data_mut(|d| d.insert_temp(open_id, hover));
+    }
+    let open = ctx.data(|d| d.get_temp::<Option<(u8, Pos2)>>(open_id)).flatten();
+    let mut sub_rect = None;
+    if let Some((index, pos)) = open {
+        let entries: Vec<MenuEntry> = if index == 0 {
+            crate::app::chattabs_glue::FONT_CHOICES.iter().map(|(f, px)| entry(format!("{px:.0}"), ChatMenuAction::Font(*f), *f != font_now)).collect()
+        } else {
+            vec![entry("ON".to_string(), ChatMenuAction::TabEnable(true), !tab_enable), entry("OFF".to_string(), ChatMenuAction::TabEnable(false), tab_enable)]
+        };
+        let (_, a, r) = popup_column(ctx, hud, assets, "sub", pos, &entries, font);
+        action = action.or(a);
+        sub_rect = Some(r);
+    }
+    if action.is_some() {
+        ctx.data_mut(|d| d.remove::<Option<(u8, Pos2)>>(open_id));
+        return action;
+    }
+    let outside = ctx.input(|i| i.pointer.any_pressed() && i.pointer.interact_pos().is_some_and(|p| !root_rect.contains(p) && !sub_rect.is_some_and(|r: Rect| r.contains(p))));
+    if outside || ctx.input(|i| i.key_pressed(egui::Key::Escape)) {
+        ctx.data_mut(|d| d.remove::<Option<(u8, Pos2)>>(open_id));
+        return Some(ChatMenuAction::Close);
+    }
+    None
+}
+
+/// Libellé et couleur des 12 canaux.
+fn channel_rows(assets: &Assets) -> Vec<(String, Color32)> {
+    let mut colors = std::collections::HashMap::new();
+    if let Ok(t) = assets.table("ini", "color.ini") {
+        for (k, v) in t.sections.iter().flat_map(|s| s.entries.iter()) {
+            if let Ok(c) = u32::from_str_radix(v.trim(), 16) {
+                colors.entry(k.trim().to_string()).or_insert(c);
+            }
+        }
+    }
+    CHANNELS
+        .iter()
+        .map(|(id, key)| {
+            let rgb: u32 = colors.get(*key).copied().unwrap_or(0xFF_FFFF);
+            (crate::app::npc_glue::sysstr(assets, *id).unwrap_or_default(), Color32::from_rgb((rgb >> 16) as u8, (rgb >> 8) as u8, rgb as u8))
+        })
+        .collect()
+}
+
+/// Case de la liste : `Btn_Check_a` vide, `Btn_Check_b` cochée (seules images du contrôle ; sens déduit de `Chat_CheckDisplay`).
+#[allow(clippy::too_many_arguments)]
+fn tab_check(ctx: &egui::Context, ui: &mut egui::Ui, hud: &mut HudState, assets: &Assets, painter: &egui::Painter, r: Rect, c: &UiControl, on: bool, id: impl std::hash::Hash) -> bool {
+    let resp = ui.interact(r, egui::Id::new(id), egui::Sense::click());
+    if let Some((_, tex)) = c.textures.get(on as usize).or(c.textures.first()) {
+        control_image(ctx, hud, assets, painter, r, c.size, tex, 1.0);
+    }
+    resp.clicked()
+}
+
+/// `UI_ChatTab_Option` : nom, liste des 12 canaux (lignes de 28, `CONTROL_17321`, avec case et nom), « Tout sélectionner »,
+/// barre de défilement, OK ; Annuler et la croix ferment. Positions de l'ini, déjà absolues dans la fenêtre.
+pub fn draw_tab_option(ctx: &egui::Context, hud: &mut HudState, assets: &Assets, name: &mut String, mask: &mut u16) -> Option<TabOptionUi> {
+    let w = window(hud, assets, TAB_OPTION)?;
+    let (check, label, row) = (w.control("CONTROL_6171")?.clone(), w.control("CONTROL_11160")?.clone(), w.control("CONTROL_17321")?.clone());
+    let list_h = w.control("CONTROL_TABOPTION_LIST")?.size[1];
+    // Rangées entières sous la marge de la liste (10).
+    let per_page = (((list_h - (row.pos[1] - w.control("CONTROL_TABOPTION_LIST")?.pos[1])) / row.size[1]).floor() as usize).max(1);
+    let last = CHANNELS.len().saturating_sub(per_page);
+    // Libellés et couleurs lus une fois : ni `sysstr.txt` ni `color.ini` à chaque image.
+    let rows = ctx.data_mut(|d| d.get_temp_mut_or_insert_with(egui::Id::new("archonia-chat-tab-channels"), || std::sync::Arc::new(channel_rows(assets))).clone());
+    let first_id = egui::Id::new("archonia-chat-tab-first");
+    let mut first = ctx.data(|d| d.get_temp::<usize>(first_id)).unwrap_or(0).min(last);
+    let out = frame(ctx, hud, assets, &w, "archonia-chat-tab-option", |ui, hud, layout, origin, painter| {
+        let font = (11.0 * layout.scale).max(9.0);
+        let mut out = None;
+        for (i, (text, color)) in rows.iter().enumerate().skip(first).take(per_page) {
+            let dy = (i - first) as f32 * row.size[1];
+            let bit = 1u16 << i;
+            let r = layout.rect(origin, [check.pos[0], check.pos[1] + dy], check.size);
+            if tab_check(ctx, ui, hud, assets, painter, r, &check, *mask & bit != 0, ("archonia-chat-tab-channel", i)) {
+                *mask ^= bit;
+            }
+            control_text(painter, layout.rect(origin, [label.pos[0], label.pos[1] + dy], label.size), &label, text, font, Some(*color));
+        }
+        for c in &w.controls {
+            let r = layout.rect(origin, c.pos, c.size);
+            match c.name.as_str() {
+                "CONTROL_TABOPTION_LIST" => {
+                    if ui.rect_contains_pointer(r) {
+                        let wheel = ui.input(|i| i.raw_scroll_delta.y);
+                        if wheel < 0.0 {
+                            first = (first + 1).min(last);
+                        } else if wheel > 0.0 {
+                            first = first.saturating_sub(1);
+                        }
+                    }
+                }
+                // Lignes : dessinées ci-dessus ; piste sans image.
+                "CONTROL_17321" | "CONTROL_6171" | "CONTROL_11160" | "CONTROL_2654" => {}
+                // Curseur, entre les deux boutons (177 → 294).
+                "CONTROL_5597" => {
+                    let course = (294.0 - c.pos[1] - c.size[1]).max(0.0);
+                    let y = first as f32 / last.max(1) as f32 * course;
+                    if let Some((_, tex)) = c.textures.first() {
+                        control_image(ctx, hud, assets, painter, r.translate(Vec2::new(0.0, y * layout.scale)), c.size, tex, 1.0);
+                    }
+                }
+                "CONTROL_30971" => {
+                    if state_button(ctx, ui, hud, assets, painter, r, c, "", font, first > 0, "archonia-chat-tab-up").clicked() {
+                        first -= 1;
+                    }
+                }
+                "CONTROL_747" => {
+                    if state_button(ctx, ui, hud, assets, painter, r, c, "", font, first < last, "archonia-chat-tab-down").clicked() {
+                        first += 1;
+                    }
+                }
+                "CONTROL_TABNAME_EDIT" => {
+                    if let Some((_, tex)) = c.textures.first() {
+                        control_image(ctx, hud, assets, painter, r, c.size, tex, 1.0);
+                    }
+                    edit_line(ui, r, "chat-tab-name", name, 32, false, font);
+                }
+                "CONTROL_TAB_SELECT_ALL" => {
+                    let all = *mask & ALL_CHANNELS == ALL_CHANNELS;
+                    if tab_check(ctx, ui, hud, assets, painter, r, c, all, "archonia-chat-tab-all") {
+                        *mask = if all { 0 } else { ALL_CHANNELS };
+                    }
+                }
+                "CONTROL_TAB_OK" => {
+                    if state_button(ctx, ui, hud, assets, painter, r, c, static_text(c), font, true, "archonia-chat-tab-ok").clicked() {
+                        out = Some(TabOptionUi::Ok);
+                    }
+                }
+                "CONTROL_TAB_CANCEL" | "CONTROL_TAB_X" => {
+                    if state_button(ctx, ui, hud, assets, painter, r, c, static_text(c), font, true, ("archonia-chat-tab-close", c.name.as_str())).clicked() {
+                        out = Some(TabOptionUi::Close);
+                    }
+                }
+                _ => control_text(painter, r, c, static_text(c), font, None),
+            }
+        }
+        out
+    })
+    .flatten();
+    ctx.data_mut(|d| d.insert_temp(first_id, first));
+    out
+}
 /// Lignes de la liste des membres (`List=8`).
 const MEMBER_ROWS: usize = 8;
 /// Couleurs d'une ligne de salon (`FUN_1406e4f70` : `<C-26368>%s: <C%d>%s`) : nom orange, texte gris pour soi.
@@ -251,6 +513,26 @@ pub fn draw_chat_room(ctx: &egui::Context, hud: &mut HudState, assets: &Assets, 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Avec les données du client : `UI_ChatTab_Option`, 12 canaux nommés et colorés, textures des menus.
+    #[test]
+    fn options_d_onglet() {
+        let Some(dir) = std::env::var_os("ARCHRUST_GAME_DIR") else { return };
+        let assets = Assets::new(Some(dir.into()), &[]);
+        let mut hud = HudState::default();
+        let w = window(&mut hud, &assets, TAB_OPTION).expect("UI_ChatTab_Option absente");
+        for c in ["CONTROL_TABOPTION_LIST", "CONTROL_17321", "CONTROL_6171", "CONTROL_11160", "CONTROL_TABNAME_EDIT", "CONTROL_TAB_SELECT_ALL", "CONTROL_5597", "CONTROL_30971", "CONTROL_747", "CONTROL_TAB_OK", "CONTROL_TAB_CANCEL", "CONTROL_TAB_X"] {
+            assert!(w.control(c).is_some(), "{c} absent");
+        }
+        for t in ["MainChat_Btn_Option_a.png", "MainChat_Btn_Option_c.png", "PopupBtn_Base1.png", "PopupBtn_Base9.png", "PopupBtn_Select1.png", "PopupBtn_Select3.png"] {
+            assert!(assets.texture_found(t), "{t}");
+        }
+        let rows = channel_rows(&assets);
+        assert_eq!(rows[0].1, Color32::WHITE);
+        assert_eq!(rows[1].1, Color32::from_rgb(0xFF, 0xA5, 0x00));
+        assert_eq!(rows[8].1, Color32::from_rgb(0xFF, 0xFF, 0x00), "Yellow");
+        assert!(rows.iter().all(|(l, _)| !l.is_empty()));
+    }
 
     /// Avec les données du client (`ARCHRUST_GAME_DIR`) : fenêtres des salons, du coiffeur et des avis, et les
     /// contrôles dont dépendent les fonctions de dessin.

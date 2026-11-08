@@ -571,6 +571,18 @@ impl App {
         }
     }
 
+    /// Clips lancés sur les montures depuis le dernier appel : (cavalier, TID de la monture, clips).
+    pub(super) fn ride_take_started(&mut self) -> Vec<(i32, i32, Vec<(u32, std::sync::Arc<crate::animation::Clip>)>)> {
+        self.ride
+            .mounts
+            .iter_mut()
+            .filter_map(|(cid, m)| {
+                let list = m.model.as_mut()?.animator.as_mut()?.take_started();
+                (!list.is_empty()).then_some((*cid, m.tid, list))
+            })
+            .collect()
+    }
+
     /// `RIDER_HEIGHT` de la monture du personnage, ajouté à la hauteur de son panneau.
     pub(super) fn ride_board_height(&mut self, cid: i32) -> f32 {
         let Some(tid) = self.ride.mounts.get(&cid).map(|m| m.tid) else { return 0.0 };

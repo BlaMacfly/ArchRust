@@ -36,6 +36,14 @@ pub struct UiState {
     /// Onglets de la discussion : nom (`Chat_Tab_*` de uimessage) et masque (`u16::MAX` = tout).
     pub chat_tabs: Vec<(String, u16)>,
     pub chat_tab: usize,
+    /// `/fps` (CallBack_OnViewFPS, FUN_1407826e0) : images par seconde affichées.
+    pub show_fps: bool,
+    /// « Font Size » : police d'Archonia (voir `app_chattabs.rs`).
+    pub chat_font: u8,
+    /// « Tab Function » : barre d'onglets montrée.
+    pub chat_tab_enable: bool,
+    /// Menu flottant ouvert.
+    pub chat_menu: Option<ChatMenu>,
     pub chat_input: String,
     /// Message d'Archonia à afficher dans sa boîte « OK » (refus de création…).
     pub alert: Option<String>,
@@ -123,6 +131,10 @@ impl Default for UiState {
             chat_masks: Vec::new(),
             chat_tabs: Vec::new(),
             chat_tab: 0,
+            show_fps: false,
+            chat_font: 0,
+            chat_tab_enable: true,
+            chat_menu: None,
             chat_input: String::new(),
             alert: None,
             chat_scroll: 0,
@@ -806,15 +818,38 @@ pub fn chat_panel(
         });
 }
 
+/// Menu flottant de la discussion (voir `app_chattabs.rs`) : bouton Option, ou clic droit sur un onglet.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum ChatMenu {
+    Option { at: egui::Pos2 },
+    Tab { index: usize, at: egui::Pos2 },
+}
+
 /// Onglets au-dessus des lignes (`MainChat_Tab` repos, survol, choisi ; noms `Chat_Tab_*`). Leur
 /// place exacte dans Archonia (FUN_1407a30a0 et suivantes) n'est pas établie : ArchRust les aligne
 /// au-dessus des lignes, à leur taille d'origine.
 fn chat_tabs(ctx: &egui::Context, st: &mut UiState, bar: &crate::hud::ChatBar, lines_rect: egui::Rect, font: &egui::FontId) {
-    if st.chat_tabs.is_empty() {
-        return;
-    }
     // Taille d'origine de la texture, élargie au libellé (étirée).
     let base = bar.tabs[0].map_or(egui::Vec2::new(60.0, 18.0), |(_, s)| egui::Vec2::new(s[0], s[1])) * bar.scale;
+    // Bouton `MainChat_Btn_Option` (a repos, b survol, c enfoncé), au bout de la barre (place déduite) ; il reste
+    // visible quand « Tab Function » cache les onglets.
+    if let Some((_, size)) = bar.option[0] {
+        let sz = egui::Vec2::new(size[0], size[1]) * bar.scale;
+        let r = egui::Rect::from_min_size(egui::Pos2::new(lines_rect.right() - sz.x, lines_rect.top() - sz.y - 2.0), sz);
+        egui::Area::new(egui::Id::new("archonia-chat-option")).fixed_pos(r.min).order(egui::Order::Background).show(ctx, |ui| {
+            let resp = ui.interact(r, egui::Id::new("archonia-chat-option-button"), egui::Sense::click());
+            let state = if resp.is_pointer_button_down_on() { 2 } else if resp.hovered() { 1 } else { 0 };
+            if let Some((tex, _)) = bar.option[state] {
+                ui.painter().image(tex, r, egui::Rect::from_min_max(egui::Pos2::ZERO, egui::Pos2::new(1.0, 1.0)), Color32::WHITE);
+            }
+            if resp.clicked() {
+                st.chat_menu = Some(ChatMenu::Option { at: r.left_top() });
+            }
+        });
+    }
+    if st.chat_tabs.is_empty() || !st.chat_tab_enable {
+        return;
+    }
     let label_font = egui::FontId::proportional(font.size * 0.9);
     let widths: Vec<f32> = st.chat_tabs.iter().map(|(n, _)| ctx.fonts(|f| f.layout_no_wrap(n.clone(), label_font.clone(), Color32::WHITE).size().x + 12.0).max(base.x)).collect();
     let top = lines_rect.top() - base.y - 2.0;
@@ -828,6 +863,9 @@ fn chat_tabs(ctx: &egui::Context, st: &mut UiState, bar: &crate::hud::ChatBar, l
             if resp.clicked() {
                 st.chat_tab = i;
                 st.chat_scroll = 0;
+            }
+            if resp.secondary_clicked() {
+                st.chat_menu = Some(ChatMenu::Tab { index: i, at: r.left_top() });
             }
             let state = if st.chat_tab == i { 2 } else if resp.hovered() { 1 } else { 0 };
             match bar.tabs[state] {
@@ -853,7 +891,8 @@ fn archonia_chat(
 ) {
     const VISIBLE_LINES: f32 = 9.0;
     let s = bar.scale;
-    let font = egui::FontId::proportional((12.0 * s).max(10.0));
+    let px = crate::app::chattabs_glue::FONT_CHOICES.iter().find(|(f, _)| *f == st.chat_font).map_or(13.0, |(_, px)| *px);
+    let font = egui::FontId::proportional((px * s).max(10.0));
     let line_h = font.size + 3.0;
     let bottom = bar.window.top() - 4.0 * s;
     let lines_rect = egui::Rect::from_min_max(

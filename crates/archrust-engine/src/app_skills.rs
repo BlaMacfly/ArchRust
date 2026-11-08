@@ -6,7 +6,8 @@
 //! * Un instructeur enseigne les compétences dont le niveau 1 admet la classe de sa vue (race et
 //!   classe de la fonction 25), comme la règle du serveur.
 //! * Lancement : sur la cible choisie, sinon sur soi ; le serveur mène la marche jusqu'à portée et
-//!   annonce le lancement (op 7), d'où vient le délai de relance affiché.
+//!   annonce le lancement (op 7), d'où vient le délai de relance affiché. Compétences au sol : repère puis
+//!   clic, voir `app_groundcast.rs`.
 //! * Maîtrises (`app_mastery.rs`, `hud_mastery.rs`) : onglets Combat… Passive filtrés par `SKILLMASTERY.txt`, AL
 //!   (compétences d'ArchLord), arbres Combo (supérieur), Heroic et du Dragon Scion ; un instructeur d'un
 //!   Dragon Scion (race 4) ouvre `UI_SkillUpDragonScion_Scion` (`Skill_OpenUpUIScion`), les autres
@@ -68,6 +69,26 @@ fn class_column(race: i32, class: i32) -> Option<usize> {
     CLASS_COLUMNS.iter().position(|c| *c == col)
 }
 
+/// Événement `Skill_Cast_*` d'un type d'action refusé (AGPMSKILL op 7 ; énumération de la référence, noms de
+/// `FUN_1405d5d40`). 13 (carreaux) : Archonia n'a pas de texte.
+fn cast_refused_event(kind: i32) -> Option<&'static str> {
+    Some(match kind {
+        5 => "Skill_Cast_Miss",
+        6 => "Skill_Cast_Failed",
+        7 => "Skill_Cast_InvalidTarget",
+        8 => "Skill_Cast_NeedRequirement",
+        9 => "Skill_Cast_NotEnoughHP",
+        10 => "Skill_Cast_NotEnoughMP",
+        11 => "Skill_Cast_NotEnoughSP",
+        12 => "Skill_Cast_NotEnoughArrow",
+        14 => "Skill_Cast_AlreadyUse",
+        15 => "Skill_Cast_NotReadyCast",
+        16 => "Skill_Cast_InvalidTargetToGather",
+        17 => "Skill_Cast_NotEnoughProduct",
+        _ => return None,
+    })
+}
+
 /// Un niveau de compétence (`SKILL_CONST.txt`).
 #[derive(Debug, Clone, Default)]
 struct Level {
@@ -87,6 +108,8 @@ struct Level {
     cast_ms: i64,
     recast_ms: i64,
     duration_ms: i64,
+    /// `area_r` × 100 (`+0x6148`) : largeur du repère du ciblage au sol (voir `app_groundcast.rs`).
+    area_r: f32,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -112,6 +135,8 @@ struct Spec {
     evolution: bool,
     /// `auto_attack` rempli (attaque normale, `+0x13e60`).
     auto_attack: bool,
+    /// `range` 7, 701 ou 702 : compétence au sol (drapeau 0x4 de `+0xf0`, `FUN_14023d850`, `FUN_1402fed30`).
+    ground: bool,
 }
 
 /// Reste d'`attribute` une fois ôtés, dans l'ordre, 40000, 20000, 10000, 1000, 200, 100, 40, puis 20 ou 10
@@ -137,7 +162,7 @@ fn parse_spec(text: &str) -> HashMap<String, Spec> {
     let mut lines = text.lines();
     let header: Vec<&str> = lines.next().unwrap_or("").split('\t').map(str::trim).collect();
     let col = |n: &str| header.iter().position(|h| h.eq_ignore_ascii_case(n));
-    let (c_attr, c_transform, c_auto) = (col("attribute"), col("transform_target"), col("auto_attack"));
+    let (c_attr, c_transform, c_auto, c_range) = (col("attribute"), col("transform_target"), col("auto_attack"), col("range"));
     let mut out = HashMap::new();
     for line in lines {
         let f: Vec<&str> = line.split('\t').map(str::trim).collect();
@@ -153,6 +178,7 @@ fn parse_spec(text: &str) -> HashMap<String, Spec> {
             product: rest == Some(8),
             evolution: num(c_transform) == 5,
             auto_attack: !get(c_auto).is_empty(),
+            ground: matches!(num(c_range), 7 | 701 | 702),
         });
     }
     out
@@ -289,6 +315,7 @@ fn load_tables(assets: &Assets) -> SkillTables {
             cast_ms: num(col("cast_time")) as i64,
             recast_ms: num(col("recast_time")) as i64,
             duration_ms: num(col("duration")) as i64,
+            area_r: num(col("area_r")) as f32 * 100.0,
         });
     }
     // SKILL_SPEC.txt : drapeaux du décompte des maîtrises.
@@ -326,6 +353,9 @@ pub struct SkillsGlue {
     trainer_selected: Option<i32>,
     /// Fin du délai de relance par identifiant (et durée totale).
     cooldowns: HashMap<i32, (Instant, Duration)>,
+    /// Blocage local du lancement et dernier ordre de marche demandé pendant celui-ci.
+    cast_until: Option<Instant>,
+    cast_move: Option<(i32, Vec3)>,
     /// Cases : potions, barre principale, puis les barres en plus (`QUICK_SLOTS`).
     slots: Vec<Option<Shortcut>>,
     /// Barres en plus affichées (`UI_QuickBelt_1…`, flèches de la barre).
@@ -350,6 +380,8 @@ pub struct SkillsGlue {
     auto_moved: [Option<Instant>; 2],
     /// Arbres et catégories des maîtrises (`app_mastery.rs`).
     mastery: Option<MasteryTables>,
+    /// Infobulles déjà composées, par (TID, niveau connu, bonus de niveau).
+    tips_cache: HashMap<(i32, i32, i32), Vec<(String, Color32)>>,
     /// Onglet du livre (`None` : celui d'ouverture, Combat ou Scion) et de l'instructeur.
     book_tab: Option<SkillTab>,
     trainer_tab: SkillTab,
@@ -363,6 +395,8 @@ pub struct SkillsGlue {
     rollback_ok: Option<i32>,
     /// Confirmation en attente : TID et apprentissage (sinon amélioration).
     confirm: Option<(i32, bool)>,
+    /// Cette confirmation vient de l'instructeur (`Skill_ConfirmBuySkill`) et non d'un arbre.
+    confirm_buy: bool,
     /// Boîte d'information (`Action=4:…` des événements `Skill_*` de l'[EventMap]).
     info: Option<String>,
     /// Messages des événements d'interface (`[EventMap]`).
@@ -416,7 +450,20 @@ impl SkillsGlue {
     /// * pas apprise : les lignes du premier niveau, sans en-tête (FUN_14087cb70 sans compétence).
     /// Lignes (FUN_14087c340) : celles que `skilltooltip.txt` marque (libellés de `sysstr.txt` 67 à 79 : niveau
     /// requis, points, incantation, relance, durée, coûts).
+    ///
+    /// Gardée par (TID, niveau, bonus) : les vues sont refaites à chaque image pour toute la barre, l'arbre ou la
+    /// liste de l'instructeur, et le texte ne dépend de rien d'autre.
     fn tooltip(&mut self, assets: &Assets, tid: i32, owned: i32) -> Vec<(String, Color32)> {
+        let key = (tid, owned, if owned > 0 { skill_level_bonus(self, tid) } else { 0 });
+        if let Some(lines) = self.tips_cache.get(&key) {
+            return lines.clone();
+        }
+        let lines = self.tooltip_lines(assets, tid, owned);
+        self.tips_cache.insert(key, lines.clone());
+        lines
+    }
+
+    fn tooltip_lines(&mut self, assets: &Assets, tid: i32, owned: i32) -> Vec<(String, Color32)> {
         let name = self.name(assets, tid);
         let tables = self.tables(assets);
         let data = tables.by_tid.get(&tid).cloned();
@@ -644,6 +691,53 @@ impl App {
         tids.iter().filter(|t| tables.by_tid.get(t).and_then(|d| d.levels.first()).is_some_and(|l| super::tax_glue::taxed(l.cost) != 0)).count()
     }
 
+    /// FUN_1404b1e40 : le dernier clic attend la fin du blocage local.
+    pub(super) fn skills_defer_move(&mut self, destination: Vec3) -> bool {
+        if !self.skills.cast_until.is_some_and(|until| Instant::now() < until) { return false; }
+        self.skills.cast_move = self.player.as_ref().map(|p| (p.cid, destination));
+        true
+    }
+
+    /// Cast reçu : arrêt avant le clip, pour tout sort, buffs sur soi compris.
+    fn skills_start_animation(&mut self, caster: i32, skill_tid: i32, target: i32) {
+        let assets = self.assets.clone();
+        let mine = self.player.as_ref().is_some_and(|p| p.cid == caster);
+        let target_position = if target == caster { None } else {
+            self.player.as_ref().filter(|p| p.cid == target).map(|p| p.position)
+                .or_else(|| self.entities.iter().find(|e| e.cid == target).map(|e| e.position))
+        };
+        // Facteurs distants non conservés dans Entity ; vitesse nominale dans ce cas.
+        // Plafond global et réductions régionales de FUN_1402fb110 encore inconnus.
+        let modifier = if mine { self.hud.stats.factors.get(&(factor_part::ATTACK, 3)).copied().unwrap_or(0).max(0) as f32 } else { 0.0 };
+        let current = self.anim_equip_of(caster);
+        let riding = self.ride.riding(caster);
+        let entity = if mine { self.player.as_mut() } else { self.entities.iter_mut().find(|e| e.cid == caster) };
+        let Some(entity) = entity else { return };
+        entity.destination = entity.position;
+        if let Some(turn) = target_position.and_then(|p| crate::scene::turn_towards(entity.position, p)) {
+            entity.turn_y = turn;
+        }
+        let tid = entity.tid;
+        let equip = crate::worn::anim_equip_for(&assets, tid, entity.is_player, riding, &entity.equipment, current);
+        let sig = crate::animation::signature(&entity.meshes);
+        let slot = if mine { self.player_animator.get_or_insert((sig, None)) } else { self.animators.entry(caster).or_insert((sig, None)) };
+        if slot.0 != sig || slot.1.as_ref().is_none_or(|a| equip >= 0 && a.equip != equip) {
+            *slot = (sig, crate::animation::Animator::new(&assets, tid, &entity.meshes, (caster as u32).wrapping_mul(0x9e37_79b9) | 1, equip, entity.is_player));
+        }
+        if mine {
+            self.skills.cast_until = None;
+            self.skills.cast_move = None;
+            self.walking = false;
+            self.buddy.follow = None;
+        }
+        let Some(rank) = super::effects_glue::skill_rank(&assets, tid, skill_tid) else { return };
+        let Some(file) = crate::animation::skill_file(&assets, tid, rank, equip.max(0) as u32) else { return };
+        let played = slot.1.as_mut().and_then(|a| a.play_skill(&assets, &file, modifier));
+        if mine {
+            self.skills.cast_until = played.map(|seconds| Instant::now() + Duration::from_secs_f32(seconds * (1.0 - modifier * 0.01).max(0.0)));
+        }
+        log::debug!("sort {skill_tid}, lanceur {caster}, rang {rank}, ensemble {equip} : {file}, duree {played:?}");
+    }
     /// Compétences du joueur et réponses des instructeurs.
     pub(super) fn on_skill_event(&mut self, ev: SkillEvent) {
         let assets = self.assets.clone();
@@ -669,25 +763,50 @@ impl App {
                     log::info!("compétence {tid} : niveau {level}");
                 }
             }
-            SkillEvent::Cast { caster, id, tid, cast_ms, recast_ms, .. } if caster == me => {
-                let total = Duration::from_millis(cast_ms as u64 + recast_ms as u64);
-                self.skills.cooldowns.insert(id, (Instant::now() + total, total));
-                log::debug!("compétence {tid} lancée");
+            SkillEvent::Cast { caster, id, tid, target, cast_ms, recast_ms, .. } => {
+                log::debug!(target: "archrust_buffs", "moteur_cast lanceur={caster} joueur={me} id={id} tid_recu={tid} tid_connu={:?} cible={target} incantation_ms={cast_ms} relance_ms={recast_ms} annonce_buff=false", self.skills.known.get(&id).filter(|_| caster == me).map(|s| s.0));
+                if caster == me {
+                    let total = Duration::from_millis(cast_ms as u64 + recast_ms as u64);
+                    self.skills.cooldowns.insert(id, (Instant::now() + total, total));
+                }
+                self.skills_start_animation(caster, if tid == 0 && caster == me { self.skills.known.get(&id).map_or(0, |s| s.0) } else { tid }, target);
             }
-            SkillEvent::Cast { .. } => {}
+            // Refus : message d'Archonia (`Action=4:3`) ; la recharge affichée reste.
+            SkillEvent::CastRefused { caster, kind, .. } => {
+                log::debug!(target: "archrust_buffs", "moteur_refus lanceur={caster} joueur={me} type={kind}");
+                if caster == me {
+                    if let Some(key) = cast_refused_event(kind) {
+                        let text = super::portal_glue::ui_event_cached(&mut self.skills.events, &assets, key);
+                        self.hud.push_system(&text);
+                    }
+                }
+            }
             // Expérience de production : relevée par `product_observe` (voir `app_product.rs`).
             SkillEvent::Exp { .. } => {}
             // Op 6 : la liste des effets du joueur remplace l'ancienne (FUN_1402f5b70, rappel 12).
             SkillEvent::Buffs { owner, buffs } => {
+                log::debug!(target: "archrust_buffs", "moteur_liste porteur={owner} joueur={me} accepte_hud={} avant={} buffs_tid_ms_modele={buffs:?}", owner == me, self.hud.buffs.len());
                 if owner == me {
                     self.hud.buffs.clear();
-                    for (tid, ms) in buffs {
+                    for (tid, ms, _caster_tid) in buffs {
                         self.hud.add_buff(tid, ms);
                     }
                 }
             }
             // Op 10 : rappel 9 sans abonné identifié dans Archonia (rien d'affiché).
-            SkillEvent::AdditionalEffect { kind, caster, target } => log::debug!("effet secondaire {kind} de {caster} sur {target}"),
+            // Genre 7 : ce personnage n'est plus ni attaqué ni ciblé par le joueur (`FUN_140698c30`) ; les effets
+            // visibles des autres genres sont joués par `effects_observe` (voir `app_effects.rs`).
+            SkillEvent::AdditionalEffect { kind: 7, caster, .. } => {
+                if self.player.as_ref().is_some_and(|p| p.cid != caster) {
+                    if self.combat_is_attacking(caster) {
+                        self.combat_interrupt();
+                    }
+                    if self.addons.target_cid() == Some(caster) {
+                        self.addons.set_target(None);
+                    }
+                }
+            }
+            SkillEvent::AdditionalEffect { .. } => {}
             SkillEvent::LevelBonus { owner, bonus } if owner == me || me == 0 => self.skills.level_bonus = bonus.clamp(0, 30),
             SkillEvent::SkillBonus { owner, id, level } if owner == me || me == 0 => {
                 self.skills.skill_bonus.insert(id, level);
@@ -766,18 +885,39 @@ impl App {
 
     /// Lance la compétence `tid` sur la cible choisie, sinon sur soi.
     pub(super) fn skills_cast(&mut self, tid: i32) {
+        self.skills_cast_at(tid, None);
+    }
+
+    /// `FUN_14069a0c0` : `at`, point cliqué d'une compétence au sol (voir `app_groundcast.rs`), le joueur pour cible.
+    pub(super) fn skills_cast_at(&mut self, tid: i32, at: Option<[f32; 3]>) {
+        if self.skills.cast_until.is_some_and(|until| Instant::now() < until) { return; }
         let assets = self.assets.clone();
         let name = self.skills.name(&assets, tid);
         let Some(id) = self.skills.id_of(tid) else {
             log::debug!("compétence {name} inconnue : rien n'est lancé");
             return;
         };
+        // Compétence au sol, première demande : repère sous le curseur, rien n'est vérifié ni envoyé.
+        let level = self.skills.known.get(&id).map_or(1, |(_, l)| *l);
+        let (ground, area) = self.skills.tables(&assets).by_tid.get(&tid).map_or((false, 0.0), |d| {
+            (d.spec.ground, usize::try_from(counted_level(d, level) - 1).ok().and_then(|l| d.levels.get(l).or(d.levels.last())).map_or(0.0, |l| l.area_r))
+        });
+        if ground {
+            if self.ground_cast.pending.is_none() {
+                self.groundcast_begin(tid, area);
+                return;
+            }
+            if let Some(p) = at {
+                self.ground_cast.last_pos = p;
+            }
+        }
+        self.ground_cast.pending = None;
         if self.skills.cooldown(id) > 0.0 {
             return;
         }
         let Some(me) = self.player.as_ref().map(|p| p.cid) else { return };
         // Compétences d'évolution du Dragon Scion (`target` 100 de SKILL_SPEC) : sur soi, quelle que soit la cible.
-        let target = if self.morph_is_evolution_skill(tid) { me } else { self.addons.target_cid().unwrap_or(me) };
+        let target = if at.is_some() || self.morph_is_evolution_skill(tid) { me } else { self.addons.target_cid().unwrap_or(me) };
         // Métamorphosé : aucune compétence, sauf pour l'ArchLord (voir `app_morph.rs`).
         if !self.morph_allows_skill(tid) {
             return;
@@ -803,8 +943,13 @@ impl App {
         // Le serveur mène la marche jusqu'à portée : pas d'arrêt du client, qui interromprait.
         self.walking = false;
         // Ctrl : attaque forcée sur un joueur (combat entre joueurs, voir `app_pvp.rs`).
-        let forced = self.addon_glue.modifiers.control_key();
-        send(self.net.as_ref(), SkillCommand::Cast { id, target, forced });
+        // Après un clic au sol, jamais d'attaque forcée (`FUN_1404e4080`).
+        let forced = at.is_none() && self.addon_glue.modifiers.control_key();
+        if ground {
+            send(self.net.as_ref(), SkillCommand::CastGround { id, target, pos: self.ground_cast.last_pos, forced });
+        } else {
+            send(self.net.as_ref(), SkillCommand::Cast { id, target, forced });
+        }
     }
 
     fn skills_use_slot(&mut self, slot: usize) {
@@ -1112,6 +1257,10 @@ impl App {
                 SkillUi::CloseTrainer => self.skills.trainer = None,
                 SkillUi::Cast(tid) => self.skills_cast(tid),
                 SkillUi::SelectTrainer(tid) => self.skills.trainer_selected = Some(tid),
+                SkillUi::TrainerBuy(tid, learn) => {
+                    self.skills.confirm = Some((tid, learn));
+                    self.skills.confirm_buy = learn;
+                }
                 SkillUi::Learn(tid) => {
                     if let Some((npc, _)) = self.skills.trainer {
                         send(self.net.as_ref(), SkillCommand::Learn { npc, tid });
@@ -1170,6 +1319,7 @@ impl App {
                 SkillUi::TreeLearn(tid) => {
                     let learn = self.skills.id_of(tid).is_none();
                     self.skills.confirm = Some((tid, learn));
+                    self.skills.confirm_buy = false;
                 }
                 // Seuil : envoyé une seconde après le dernier mouvement (`skills_send_auto`).
                 SkillUi::AutoGauge { hp, value } => {
@@ -1192,6 +1342,19 @@ impl App {
     /// À chaque image : demandes des fenêtres, barre du personnage chargée, instructeur fermé en
     /// s'éloignant.
     pub(super) fn skills_frame(&mut self) {
+        if self.skills.cast_until.is_some_and(|until| Instant::now() >= until) {
+            self.skills.cast_until = None;
+            if let Some((cid, destination)) = self.skills.cast_move.take() {
+                if let Some(p) = self.player.as_mut().filter(|p| p.cid == cid && p.hp != Some(0)) {
+                    let position = p.position;
+                    p.destination = destination;
+                    self.walking = true;
+                    if let Some(net) = &self.net { net.send(Command::MoveTo { position, destination }); }
+                    self.combat_interrupt();
+                    self.buddy.follow = None;
+                }
+            }
+        }
         let requests = std::mem::take(&mut self.skills.pending);
         if !requests.is_empty() {
             self.skills_apply(requests);
@@ -1257,6 +1420,7 @@ impl App {
         };
         // Noms de l'onglet à liste du livre : catégorie de `SKILLMASTERY.txt`, ou liste « Archlord ».
         let book_names: Option<Vec<String>> = match book_tab {
+            _ if !self.skills.show_book => None,
             SkillTab::Al | SkillTab::ScionAl => Some(self.skills.mastery(&assets).categories.archlord.clone()),
             t => t.category().map(|c| self.skills.mastery(&assets).categories.names(race, class, c).to_vec()),
         };
@@ -1305,14 +1469,22 @@ impl App {
         }
         if let Some((_, learn)) = self.skills.confirm {
             // Messages de l'[EventMap] d'Archonia (Skill_ConfirmLearnSkill, Skill_ConfirmUpgradeSkill), sans le nom.
-            v.confirm = Some(super::portal_glue::ui_event_cached(&mut self.skills.events, &assets, if learn { "Skill_ConfirmLearnSkill" } else { "Skill_ConfirmUpgradeSkill" }));
+            let key = match (learn, self.skills.confirm_buy) {
+                (true, true) => "Skill_ConfirmBuySkill",
+                (true, false) => "Skill_ConfirmLearnSkill",
+                _ => "Skill_ConfirmUpgradeSkill",
+            };
+            v.confirm = Some(super::portal_glue::ui_event_cached(&mut self.skills.events, &assets, key));
         }
         let trainer_names: Option<Vec<String>> = self.skills.trainer_tab.category().map(|c| self.skills.mastery(&assets).categories.names(race, class, c).to_vec());
         if let Some((npc, (race, class))) = self.skills.trainer {
             let col = class_column(race, class);
             let (level, money, points) = (self.hud.stats.level.unwrap_or(1), self.hud.stats.money.unwrap_or(0), self.hud.stats.skill_points.unwrap_or(0));
             let mut seen_names = std::collections::HashSet::new();
-            let mut tids: Vec<(i32, SkillData)> = self
+            // Liste des onglets Combat… Passive seulement : les onglets à arbre (Combo, Heroic, Scion) n'ont pas de liste,
+            // et sans catégorie pour filtrer ils refaisaient à chaque image l'infobulle de toutes les compétences de la classe.
+            let tree = self.skills.trainer_tab.is_tree();
+            let mut tids: Vec<i32> = self
                 .skills
                 .tables(&assets)
                 .by_tid
@@ -1320,15 +1492,18 @@ impl App {
                 // Compétences ordinaires de la classe : niveau requis et prix renseignés (les
                 // héroïques et spéciales n'en ont pas) ; les variantes « <ASY>… » sont écartées.
                 .filter(|(tid, d)| {
-                    **tid != NORMAL_ATTACK
+                    !tree
+                        && **tid != NORMAL_ATTACK
                         && !d.name.starts_with('<')
                         && d.levels.first().is_some_and(|l| l.require_level > 0 && l.cost > 0 && col.is_some_and(|c| l.classes & (1 << c) != 0))
                 })
-                .map(|(t, d)| (*t, d.clone()))
+                .map(|(t, _)| *t)
                 .collect();
-            tids.sort_by_key(|(t, _)| *t);
+            tids.sort_unstable();
             let mut entries = Vec::new();
-            for (tid, d) in tids {
+            for tid in tids {
+                let owned = known.iter().find(|(_, (t, _))| *t == tid).map(|(_, (_, l))| *l).unwrap_or(0);
+                let d = &self.skills.tables(&assets).by_tid[&tid];
                 if !seen_names.insert(d.name.clone()) {
                     continue;
                 }
@@ -1336,14 +1511,14 @@ impl App {
                 if trainer_names.as_ref().is_some_and(|n| !n.is_empty() && !n.contains(&d.name.to_lowercase())) {
                     continue;
                 }
-                let owned = known.iter().find(|(_, (t, _))| *t == tid).map(|(_, (_, l))| *l).unwrap_or(0);
                 let next = d.levels.get(owned as usize);
                 // Prix de l'instructeur avec la taxe de la région (`FUN_1402b8aa0`…, voir `app_tax.rs`).
                 let cost = super::tax_glue::taxed(next.map(|l| if owned == 0 { l.cost } else { l.upgrade_cost }).unwrap_or(0));
                 let require_level = next.map(|l| l.require_level).unwrap_or(0);
                 let possible = next.is_some_and(|l| level >= l.require_level && points >= l.require_point && money >= cost);
+                let (name, max_level) = (d.name.clone(), d.levels.len() as i32);
                 let tip = self.skills.tooltip(&assets, tid, owned);
-                entries.push(TrainerEntry { tid, name: d.name.clone(), level: owned, max_level: d.levels.len() as i32, require_level, cost, possible, tip });
+                entries.push(TrainerEntry { tid, name, level: owned, max_level, require_level, cost, possible, tip });
             }
             entries.sort_by_key(|e| (e.require_level, e.tid));
             let npc_name = self.entities.iter().find(|e| e.cid == npc).map(|e| e.name.clone()).unwrap_or_default();
@@ -1550,6 +1725,57 @@ impl App {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn refus_de_lancement() {
+        assert_eq!(cast_refused_event(7), Some("Skill_Cast_InvalidTarget"));
+        assert_eq!(cast_refused_event(12), Some("Skill_Cast_NotEnoughArrow"));
+        assert_eq!(cast_refused_event(17), Some("Skill_Cast_NotEnoughProduct"));
+        assert_eq!((cast_refused_event(13), cast_refused_event(1)), (None, None));
+    }
+
+    #[test]
+    fn competences_au_sol_selon_range() {
+        let spec = parse_spec("Name\tattribute\trange\nA\t1\t701\nB\t1\t702\nC\t1\t7\nD\t1\t304\nE\t1\t\n");
+        assert!(spec["A"].ground && spec["B"].ground && spec["C"].ground);
+        assert!(!spec["D"].ground && !spec["E"].ground);
+    }
+
+    /// Avec les données du client (`ARCHRUST_GAME_DIR`) : les six compétences au sol et leur `area_r` × 100.
+    #[test]
+    fn competences_au_sol_du_client() {
+        let Some(dir) = std::env::var_os("ARCHRUST_GAME_DIR") else { return };
+        let assets = Assets::new(Some(dir.into()), &[]);
+        let t = load_tables(&assets);
+        let mut ground: Vec<(&str, f32)> = t.by_tid.values().filter(|d| d.spec.ground).map(|d| (d.name.as_str(), d.levels.first().map_or(0.0, |l| l.area_r))).collect();
+        ground.sort_by(|a, b| a.0.cmp(b.0));
+        assert_eq!(ground.len(), 6, "{ground:?}");
+        assert!(ground.contains(&("Meteoric Shower", 2000.0)) && ground.contains(&("Narcolepsy", 700.0)) && ground.contains(&("Imposed Fatigue", 800.0)), "{ground:?}");
+    }
+
+    /// Avec les données du client (`ARCHRUST_GAME_DIR`) : coût d'une image d'instructeur, soit les infobulles de toute
+    /// une classe (ce que refaisaient les onglets Combo et Heroic) après la première image.
+    #[test]
+    fn infobulles_gardees_en_memoire() {
+        let Some(dir) = std::env::var_os("ARCHRUST_GAME_DIR") else { return };
+        let dir = std::path::PathBuf::from(dir);
+        let server = dir.join("server-data");
+        let assets = Assets::new(Some(dir), &[]).with_server_data(server.is_dir().then_some(server.as_path()));
+        let mut glue = SkillsGlue::default();
+        let col = class_column(3, 1);
+        let mut tids: Vec<i32> = glue.tables(&assets).by_tid.iter().filter(|(_, d)| d.levels.first().is_some_and(|l| l.require_level > 0 && l.cost > 0 && col.is_some_and(|c| l.classes & (1 << c) != 0))).map(|(t, _)| *t).collect();
+        tids.sort_unstable();
+        assert!(!tids.is_empty());
+        let first = Instant::now();
+        let lines: usize = tids.iter().map(|t| glue.tooltip(&assets, *t, 1).len()).sum();
+        let first = first.elapsed();
+        let next = Instant::now();
+        let again: usize = tids.iter().map(|t| glue.tooltip(&assets, *t, 1).len()).sum();
+        let next = next.elapsed();
+        eprintln!("{} compétences de la guerrière, {lines} lignes : première image {first:?}, suivantes {next:?}", tids.len());
+        assert_eq!(lines, again);
+        assert!(next < Duration::from_millis(5), "{next:?}");
+    }
 
     #[test]
     fn return_orb_dans_un_arbre() {

@@ -99,6 +99,8 @@ pub mod packet_type {
     pub const EVENT_ITEM_CONVERT: u8 = 0x38;
     pub const REFINERY: u8 = 0x4b;
     pub const EVENT_REFINERY: u8 = 0x3f;
+    /// AgpmEventGacha : socles de tirage des villes (« Fortune Gate », fonction d'objet 38).
+    pub const EVENT_GACHA: u8 = 0x57;
     pub const EVENT_GUILD: u8 = 0x39;
     pub const GUILD_WAREHOUSE: u8 = 0x54;
     pub const EVENT_NPC_DIALOG: u8 = 0x37;
@@ -557,6 +559,20 @@ pub mod main {
     // AgpmEventRefinery (0x3F) — drapeaux 1 : op (0 demande, 1 accord), événement, CID du joueur.
     schema!(pub EVENT_REFINERY = "AGPMEVENTREFINERY", T::EVENT_REFINERY, 1, [f!(Int8), f!(Packet), f!(Int32)]);
 
+    // AgpmEventGacha (0x57) — drapeaux 2 (constructeur 0x14027cd00 d'Archonia) : op 0 demande, 1 ouverture, 2 tirage,
+    // 3 résultat ; le sens des champs 3 à 7 dépend de l'op (voir `archrust_netclient::gacha`).
+    schema!(pub EVENT_GACHA = "AGPMEVENTGACHA", T::EVENT_GACHA, 2, [
+        f!(Int8),           // 0 opération
+        f!(Packet),         // 1 événement (EVENT_BASE, fonction 38)
+        f!(Int32),          // 2 CID
+        f!(Int32),          // 3 op 1 : code ; op 3 : TID tiré
+        f!(Int32),          // 4 op 1 : TID de l'objet demandé ; op 3 : code
+        f!(Int32),          // 5 op 1 : nombre d'objets demandés
+        f!(Int32),          // 6 op 1 : or demandé
+        f!(Int32),          // 7 op 1 : charisme demandé
+        f!(MemoryBlock),    // 8 op 1 : TID de la bande (u32 à la suite)
+    ]);
+
     // AgpmEventQuest (0x3E) — drapeaux 1 : op, événement, CID, entier.
     schema!(pub EVENT_QUEST = "AGPMEVENTQUEST", T::EVENT_QUEST, 1, [f!(Int8), f!(Packet), f!(Int32), f!(Int32)]);
 
@@ -770,6 +786,7 @@ pub mod main {
             T::EVENT_ITEM_CONVERT => EVENT_ITEM_CONVERT,
             T::REFINERY => REFINERY,
             T::EVENT_REFINERY => EVENT_REFINERY,
+            T::EVENT_GACHA => EVENT_GACHA,
             T::GUILD => GUILD,
             T::EVENT_GUILD => EVENT_GUILD,
             T::GUILD_WAREHOUSE => GUILD_WAREHOUSE,

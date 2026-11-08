@@ -48,6 +48,12 @@ pub const WT_LANCE: i64 = 17;
 pub const WT_KARON: i64 = 24;
 pub const WT_XENON: i64 = 26;
 
+/// Un casque possède son propre modèle : sa partie déclarée prime sur l'estimation par les os.
+/// Sans cela, un casque lié au seul os de tête est classé corps et supprimé par le plastron.
+pub fn equipment_piece_part(part: Option<i64>, inferred: Option<i64>) -> Option<i64> {
+    if part == Some(3) { part } else { inferred }
+}
+
 /// Pièce d'objet porté d'un maillage (`Mesh::worn`).
 #[derive(Debug, Clone)]
 pub struct Worn {
@@ -523,6 +529,17 @@ mod tests {
     }
 
     #[test]
+    fn casque_preserve_lors_du_remplacement_du_corps() {
+        let casque = equipment_piece_part(Some(3), Some(2));
+        let corps = equipment_piece_part(Some(2), Some(2));
+        let mut pieces = vec![casque, corps];
+        pieces.retain(|p| *p != Some(2));
+        assert_eq!(pieces, vec![Some(3)]);
+        assert_eq!(equipment_piece_part(Some(2), Some(5)), Some(5));
+        assert_eq!(equipment_piece_part(None, None), None);
+    }
+
+    #[test]
     fn matrice_transform_data() {
         // Bastard Sword (TID 2) pour le chevalier 96.
         let m = transform_matrix("-0.130897:0.056741:-1.193403:0.240501:1.1772:0.02959:1.170306:-0.235583:-0.139565:5.938569:-5.940835:-2.858799:-842150451").unwrap();
@@ -647,6 +664,15 @@ mod tests {
         let Some(dir) = std::env::var_os("ARCHRUST_GAME_DIR") else { return };
         let assets = Assets::new(Some(dir.into()), &[]);
         let look = |t| item_look(&assets, t).unwrap_or_else(|| panic!("objet {t}"));
+        // Amento : le casque lié à la tête ne doit pas être retiré comme une pièce du corps.
+        let helm = look(22116);
+        assert_eq!((helm.part, look(22117).part), (3, 2));
+        let clump = assets.clump("character", &helm.model_file().unwrap()).unwrap();
+        assert!(!clump.atomics.is_empty());
+        for atomic in &clump.atomics {
+            let inferred = crate::scene::atomic_part(&clump, atomic.geometry as usize);
+            assert_eq!(equipment_piece_part(Some(helm.part), inferred), Some(3));
+        }
         let near = |a: Vec3, b: Vec3| (a - b).length() < 0.02;
         // Short Axe (10) pour le chevalier 96 : main droite, matrice relevée.
         let axe = look(10);

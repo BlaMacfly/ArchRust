@@ -12,7 +12,8 @@
 //! 0x3B op 1 (4 TID)                          → AGPMSKILL op 0, puis op 6 (4 TID, 5 résultat : 0 réussi,
 //!                                              1 échec ou argent, 2 déjà apprise, 3 points, 4 niveau, 5 classe)
 //! 0x3B op 2 (3 identifiant)                  → AGPMSKILL op 2, puis op 3
-//! AGPMSKILL op 7 (1 identifiant, 6 action : 0 type, 1 cible en mini SKILL_BASE (3, CID))
+//! AGPMSKILL op 7 (1 identifiant, 6 action : 0 type, 1 cible en mini SKILL_BASE (3, CID), 3 point visé d'une
+//!     compétence au sol)
 //!     → op 7 diffusé (2 lanceur ; action : 1 cible, 5 incantation, 6 durée, 7 relance en ms)
 //!     → op 8 (action 2 : 1 cible, 2 facteurs du résultat comme pour le combat)
 //! AGPMSKILL op 3 (2 base (3, CID), 9 bloc de 220 octets) : part des compétences des caractéristiques secondaires
@@ -21,7 +22,8 @@
 //!     op 6 (2 base, 8 minis SKILL_BUFF) : tous les effets du personnage (remplace sa liste, rappel 12)
 //!     op 10 (1 genre d'effet, 2 base du lanceur, 4 CID de la cible) : effet secondaire (1 explosion de fin
 //!         d'effet, 2 téléport, 3 / 4 absorption PM / PV, 5 / 6 conversion, 7 libération, 8 pierre de lentille,
-//!         9 parchemin de détection, 10 soin) ; rappel 9, abonné non identifié : rien d'affiché
+//!         9 parchemin de détection, 10 soin) ; rappel 9 : effet commun sur le personnage du champ 2
+//!         (`FUN_140568d70`, voir `app_effects.rs`), 7 fait lâcher ce personnage comme cible (`FUN_140698c30`)
 //!     op 14 (1 bonus, 2 base) : bonus de niveau de toutes les compétences (attache+0x854, < 31)
 //!     op 15 (1 identifiant, 2 base, 4 TID) : recharge de la compétence remise à zéro (FUN_1402ff450)
 //!     op 16 (1 identifiant, 2 base, 4 niveau) : bonus de niveau d'une compétence (compétence+0x188)
@@ -53,6 +55,9 @@ pub mod op {
 pub mod action_type {
     pub const CAST: i8 = 0;
     pub const CANCEL: i8 = 4;
+    /// Refus reçus : 5 manquée, 6 échec, 7 cible invalide, 8 condition (arme), 9 PV, 10 PM, 11 PC, 12 flèches,
+    /// 13 carreaux, 14 déjà en cours, 15 pas prête, 16 cible de récolte invalide, 17 plus rien à récolter.
+    pub const REFUSED: std::ops::RangeInclusive<i32> = 5..=17;
 }
 
 /// Opérations d'AGPMEVENTSKILLMASTER (0x3B).
@@ -163,6 +168,9 @@ pub enum SkillCommand {
     /// `forced` : attaque forcée (Ctrl, champ 4 du mini SKILL_ACTION), nécessaire contre un joueur qui n'est pas
     /// un ennemi déclaré.
     Cast { id: i32, target: i32, forced: bool },
+    /// Lancer une compétence au sol (`range` 7, 701, 702 de SKILL_SPEC) : comme `Cast`, avec le point visé au
+    /// champ 3 du mini SKILL_ACTION (`FUN_14069a0c0` → `FUN_14033c440`) ; après un clic, la cible est le joueur.
+    CastGround { id: i32, target: i32, pos: [f32; 3], forced: bool },
     /// Annuler une compétence en cours (action de type 4, cible = soi) : clic sur l'icône d'annulation de
     /// l'évolution (`FUN_1404b6ee0` → `FUN_14033c440`), avec l'identifiant de la compétence possédée.
     CancelCast { id: i32 },
@@ -192,6 +200,11 @@ pub fn command_packet(cmd: &SkillCommand, me: i32) -> (&'static Schema, Vec<Opti
             let action = Value::Packet(build_mini(a, &sparse(a, &[(0, Value::I8(0)), (1, base(*target)), (4, Value::I8(*forced as i8))])).unwrap_or_default());
             (main::SKILL, sparse(main::SKILL, &[(0, Value::I8(op::CAST as i8)), (1, Value::I32(*id)), (2, base(me)), (6, action)]))
         }
+        SkillCommand::CastGround { id, target, pos, forced } => {
+            let a = mini::SKILL_ACTION;
+            let action = Value::Packet(build_mini(a, &sparse(a, &[(0, Value::I8(action_type::CAST)), (1, base(*target)), (3, Value::Vec3(*pos)), (4, Value::I8(*forced as i8))])).unwrap_or_default());
+            (main::SKILL, sparse(main::SKILL, &[(0, Value::I8(op::CAST as i8)), (1, Value::I32(*id)), (2, base(me)), (6, action)]))
+        }
         SkillCommand::CancelCast { id } => {
             let a = mini::SKILL_ACTION;
             let action = Value::Packet(build_mini(a, &sparse(a, &[(0, Value::I8(action_type::CANCEL)), (1, base(me))])).unwrap_or_default());
@@ -217,6 +230,8 @@ pub enum SkillEvent {
     Exp { id: i32, exp: i32 },
     /// Lancement commencé (op 7) : lanceur, compétence, cible, durées en ms.
     Cast { caster: i32, id: i32, tid: i32, target: i32, cast_ms: u32, recast_ms: u32 },
+    /// Lancement refusé (op 7, type d'action 5 à 17, seul le lanceur le reçoit) : voir [`action_type`].
+    CastRefused { caster: i32, id: i32, kind: i32 },
     /// Fenêtre d'un instructeur ouverte (0x3B op 5).
     MasterOpened { npc: i32 },
     /// Résultat d'un apprentissage (0x3B op 6).
@@ -225,8 +240,8 @@ pub enum SkillEvent {
     Upgraded { id: i32, result: i32 },
     /// Part des compétences des caractéristiques secondaires d'un personnage (AGPMSKILL champ 9).
     Attach { cid: i32, data: SkillAttach },
-    /// Tous les effets actifs d'un personnage (op 6) : (TID de l'effet, durée en ms).
-    Buffs { owner: i32, buffs: Vec<(i32, u64)> },
+    /// Tous les effets actifs d'un personnage (op 6) : (TID de l'effet, durée en ms, TID du modèle du lanceur).
+    Buffs { owner: i32, buffs: Vec<(i32, u64, i32)> },
     /// Effet secondaire (op 10) : genre, lanceur, cible.
     AdditionalEffect { kind: i32, caster: i32, target: i32 },
     /// Bonus de niveau de toutes les compétences du personnage (op 14).
@@ -278,7 +293,8 @@ pub fn translate(t: u8, values: &[Option<Value>]) -> Option<WorldEvent> {
                     Some(Value::Packet(b)) => vec![b.as_slice()],
                     _ => Vec::new(),
                 };
-                let buffs = list
+                let entries = list.len();
+                let buffs: Vec<_> = list
                     .into_iter()
                     .filter_map(|b| decode_mini(mini::SKILL_BUFF, b).ok())
                     .filter_map(|(_, v)| {
@@ -287,10 +303,12 @@ pub fn translate(t: u8, values: &[Option<Value>]) -> Option<WorldEvent> {
                             Some(x) => x.as_i64().unwrap_or(0).max(0) as u64,
                             None => 0,
                         };
-                        Some((int(&v, 0)? as i32, ms)).filter(|(t, _)| *t != 0)
+                        Some((int(&v, 0)? as i32, ms, int(&v, 2).unwrap_or(0) as i32)).filter(|(t, _, _)| *t != 0)
                     })
                     .collect();
-                Some(WorldEvent::Skill(SkillEvent::Buffs { owner: base_cid(bytes(values, 2))?, buffs }))
+                let owner = base_cid(bytes(values, 2))?;
+                log::debug!(target: "archrust_buffs", "reseau_decode op=6 porteur={owner} entrees={entries} retenues={} buffs_tid_ms_modele={buffs:?}", buffs.len());
+                Some(WorldEvent::Skill(SkillEvent::Buffs { owner, buffs }))
             }
             op::ADDITIONAL_EFFECT => Some(WorldEvent::Skill(SkillEvent::AdditionalEffect {
                 kind: int(values, 1)? as i32,
@@ -318,6 +336,15 @@ pub fn translate(t: u8, values: &[Option<Value>]) -> Option<WorldEvent> {
             }
             op::CAST => {
                 let (_, a) = decode_mini(mini::SKILL_ACTION, bytes(values, 6)?).ok()?;
+                // Type d'action : 0 / 1 lancement ; 5 à 17 refus (`action_type::REFUSED`), qui ne touche ni
+                // l'incantation ni la recharge ; 2 à 4 sans lancement à annoncer ici.
+                match int(&a, 0).unwrap_or(1) as i32 {
+                    0 | 1 => {}
+                    k if action_type::REFUSED.contains(&k) => {
+                        return Some(WorldEvent::Skill(SkillEvent::CastRefused { caster: base_cid(bytes(values, 2)).unwrap_or(0), id: int(values, 1)? as i32, kind: k }));
+                    }
+                    _ => return None,
+                }
                 Some(WorldEvent::Skill(SkillEvent::Cast {
                     caster: base_cid(bytes(values, 2)).unwrap_or(0),
                     id: int(values, 1)? as i32,
@@ -426,6 +453,17 @@ mod tests {
         assert_eq!(s.id, packet_type::SKILL);
         let (_, a) = decode_mini(mini::SKILL_ACTION, bytes(&v, 6).unwrap()).unwrap();
         assert_eq!((int(&v, 0), int(&v, 1), base_cid(bytes(&a, 1))), (Some(7), Some(2), Some(77)));
+        // Refus (type d'action 12) : pas un lancement, donc pas de recharge remise à zéro.
+        let a = mini::SKILL_ACTION;
+        let act = build_mini(a, &sparse(a, &[(0, Value::I8(12)), (1, base(42))])).unwrap();
+        let v = sparse(main::SKILL, &[(0, Value::I8(op::CAST as i8)), (1, Value::I32(9)), (2, base(42)), (6, Value::Packet(act))]);
+        assert!(matches!(translate(packet_type::SKILL, &v), Some(WorldEvent::Skill(SkillEvent::CastRefused { caster: 42, id: 9, kind: 12 }))));
+        // Compétence au sol : le joueur pour cible, le point visé au champ 3 de l'action, après passage par le paquet complet.
+        let (s, v) = command_packet(&SkillCommand::CastGround { id: 2, target: 42, pos: [100.5, -3.0, 2000.25], forced: false }, 42);
+        let p = decode_packet(s, &build_packet(s, &v).unwrap()).unwrap();
+        let (_, a) = decode_mini(mini::SKILL_ACTION, bytes(&p.values, 6).unwrap()).unwrap();
+        assert_eq!((int(&p.values, 0), int(&p.values, 1), base_cid(bytes(&p.values, 2)), int(&a, 0), base_cid(bytes(&a, 1)), int(&a, 4)), (Some(7), Some(2), Some(42), Some(0), Some(42), Some(0)));
+        assert!(matches!(a.get(3), Some(Some(Value::Vec3(pos))) if *pos == [100.5, -3.0, 2000.25]));
         // Annulation de l'évolution : action de type 4 sur la compétence possédée, cible = soi.
         let (_, v) = command_packet(&SkillCommand::CancelCast { id: 5 }, 42);
         let (_, a) = decode_mini(mini::SKILL_ACTION, bytes(&v, 6).unwrap()).unwrap();
@@ -442,9 +480,9 @@ mod tests {
         let k = main::SKILL;
         let d = |pairs: &[(usize, Value)]| decode_packet(k, &build_packet(k, &sparse(k, pairs)).unwrap()).unwrap().values;
         let b = mini::SKILL_BUFF;
-        let buff = |tid: i32, ms: u64| build_mini(b, &sparse(b, &[(0, Value::I32(tid)), (1, Value::U64(ms))])).unwrap();
+        let buff = |tid: i32, ms: u64| build_mini(b, &sparse(b, &[(0, Value::I32(tid)), (1, Value::U64(ms)), (2, Value::I32(96))])).unwrap();
         let v = d(&[(0, Value::I8(6)), (2, base(42)), (8, Value::PacketList(vec![buff(57, 30_000), buff(58, 1_000)]))]);
-        assert!(matches!(translate(packet_type::SKILL, &v), Some(WorldEvent::Skill(SkillEvent::Buffs { owner: 42, buffs })) if buffs == vec![(57, 30_000), (58, 1_000)]));
+        assert!(matches!(translate(packet_type::SKILL, &v), Some(WorldEvent::Skill(SkillEvent::Buffs { owner: 42, buffs })) if buffs == vec![(57, 30_000, 96), (58, 1_000, 96)]));
         let v = d(&[(0, Value::I8(10)), (1, Value::I32(8)), (2, base(42)), (4, Value::I32(77))]);
         assert!(matches!(translate(packet_type::SKILL, &v), Some(WorldEvent::Skill(SkillEvent::AdditionalEffect { kind: 8, caster: 42, target: 77 }))));
         let v = d(&[(0, Value::I8(14)), (1, Value::I32(2)), (2, base(42))]);

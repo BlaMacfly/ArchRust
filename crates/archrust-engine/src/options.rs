@@ -119,6 +119,46 @@ pub struct VideoOptions {
     /// `NaturalObj` (`OP_NaturalObj`, « Objets ») : herbe du monde, 0 aucune, 1 type de distance 2,
     /// 2 et 3 type 3 (`FUN_140711350` → `FUN_140597390`, voir `grass.rs`).
     pub natural_obj: u8,
+    /// `Option_Detail_Effect` (terrain, combat, interface, compétences) ; `None` tant qu'`OP_Effect` décide.
+    pub effect_detail: Option<(u8, u8, u8, u8)>,
+    /// `Option_Detail_Shadow` ; `None` tant qu'`OP_Shadow` décide.
+    pub shadow_detail: Option<ShadowDetail>,
+    /// `WideView` (`OP_WideView`, « Large », Oui/Non, FUN_1407080f0). Enregistré seulement : Archonia range le drapeau en
+    /// `caméra+0x770` et recalcule la projection à angle inchangé (`FUN_1404a6ad0`, `FUN_1404a6920`).
+    pub wide_view: bool,
+    /// `Bloom` (`OP_Bloom`, libellé « Luminosité » de la fenêtre, 0 à 4 : `Option_Msg_OFF`, `TYPE1` à `TYPE4`, FUN_140705400). Recopie `AutoExposure`. Enregistré
+    /// seulement : traitement AgcmPostFX (`+0x1798`), que le rendu d'ArchRust n'a pas.
+    pub bloom: u8,
+    /// `AutoExposure` (`OP_AutoExposure`, libellé « Bloom » de la fenêtre, FUN_140705180) : passe `Light_Adapt` d'AgcmPostFX
+    /// (`FUN_14070ee50`). Enregistré seulement.
+    pub auto_exposure: bool,
+    /// `MatEffect` (`OP_MatEffect`, libellé « Texte détaillé », FUN_140706800) : `+0x1708 + 0x1808` = inverse de la valeur
+    /// (`FUN_140711210`). Enregistré seulement.
+    pub mat_effect: bool,
+    /// `ImpactFX` (`OP_Impact`, FUN_140706430) : AgcmPostFX lancé ou arrêté (`FUN_140710eb0`). Enregistré seulement.
+    pub impact_fx: bool,
+    /// `GlowIntensity` (`OP_BloomVal`, 0 à 100, défaut de `COption.ini` : 20). Enregistré seulement.
+    pub glow_intensity: u8,
+    /// `AUTOTUNING` (`OP_SpeedTuning`, « Optimiser la vitesse du jeu ») : réglage automatique d'AgcmTuner, coupé par
+    /// `AutoExposure`, `MatEffect` et `ImpactFX` (`FUN_14070ee50`, `FUN_140711210`, `FUN_140710eb0`). Enregistré seulement.
+    pub speed_tuning: bool,
+    /// `Water` (`OP_Water`, 0 à 4). Enregistré seulement, comme dans Archonia où il est sans effet visible :
+    /// `FUN_1407128a0` passe 4 − valeur à `FUN_1405909a0`, qui ramène tout ce qui est sous 2 à 2 ; l'eau « HWater » des modes
+    /// 0 et 1 n'est donc jamais atteinte et les modes 2 à 4 rendent la même eau (`SPEC-MONDE.md` §1.2).
+    pub water: u8,
+}
+
+/// Réglages d'`Option_Detail_Shadow`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ShadowDetail {
+    /// `ShadowChar` (0 à 3, `+0x19f0`, FUN_140711a70) : ombre ronde des personnages.
+    pub character: u8,
+    /// `ShadowObject` (`+0x1a10`, FUN_140711b70) : AgcmShadow2, ombres projetées des objets.
+    pub object: bool,
+    /// `ShadowSelf` (`+0x1a00`) : enregistré seulement. Archonia n'y lie pas l'ombre ronde (AgcmShadow, `+0x16d8`) : il
+    /// allume ou éteint par `FUN_1406ef690` le module `+0x1738` (`FUN_1406ee1d0` / `FUN_1406edf10`, caméra et rasters
+    /// propres, carte d'ombre), qu'ArchRust n'a pas.
+    pub own: u8,
 }
 
 impl Default for VideoOptions {
@@ -126,7 +166,7 @@ impl Default for VideoOptions {
     /// `DisableOtherPlayerSkillEffect=0`, `Shadow=3`, `WindowMode=1`, `Multisampling=1`, `VSync=1`, `NaturalObj=1` ;
     /// gamma 50 (valeur du constructeur d'AgcmUIOption, FUN_140703da0 : courbe neutre).
     fn default() -> Self {
-        Self { char_view: 3, map_view: 1, nature: 2, sky: true, fog: true, lens_flare: true, effect: 2, hide_other_effects: false, shadow: 3, resolution: None, window_mode: 1, multisampling: true, vsync: true, bright: 50, natural_obj: 1 }
+        Self { char_view: 3, map_view: 1, nature: 2, sky: true, fog: true, lens_flare: true, effect: 2, hide_other_effects: false, shadow: 3, resolution: None, window_mode: 1, multisampling: true, vsync: true, bright: 50, natural_obj: 1, effect_detail: None, shadow_detail: None, wide_view: false, bloom: 0, auto_exposure: false, mat_effect: false, impact_fx: false, glow_intensity: 20, speed_tuning: false, water: 2 }
     }
 }
 
@@ -144,12 +184,26 @@ pub fn gamma_ramp(bright: u8) -> [u16; 256] {
 impl VideoOptions {
     /// Niveaux (terrain, combat, interface, compétences) d'`OP_Effect`, comme FUN_14070fb80 :
     /// 0 → (0, 0, 0, 0) ; 1 → (1, 1, 0, 1) ; 2 → (2, 2, 1, 1) ; 3 → (3, 3, 1, 1) ; 4 → (4, 4, 1, 1).
+    /// `Option_Detail_Effect` les remplace une fois touchée.
     pub fn effect_levels(&self) -> (u8, u8, u8, u8) {
+        if let Some(d) = self.effect_detail {
+            return d;
+        }
         match self.effect.min(4) {
             0 => (0, 0, 0, 0),
             1 => (1, 1, 0, 1),
             n => (n, n, 1, 1),
         }
+    }
+
+    /// Niveau de l'ombre ronde des personnages : `ShadowChar` du détail, sinon `Shadow`.
+    pub fn shadow_char(&self) -> u8 {
+        self.shadow_detail.map_or(self.shadow.min(3), |d| d.character)
+    }
+
+    /// Ombres projetées des objets : `ShadowObject` du détail, sinon `Shadow` ≥ 2.
+    pub fn shadow_object(&self) -> bool {
+        self.shadow_detail.map_or(crate::shadow::enabled(self.shadow), |d| d.object)
     }
 
     /// Facteur de densité des particules de météo selon `Nature` (hypothèse : 1/3, 2/3, 1).

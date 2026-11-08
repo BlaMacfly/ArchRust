@@ -320,6 +320,50 @@ fn named_color(assets: &Assets, name: &str) -> Color32 {
     Color32::from_rgb((rgb >> 16) as u8, (rgb >> 8) as u8, rgb as u8)
 }
 
+/// « race classe » de `ini/chartype.ini` (`Race=1:Human`, `Class=1:Knight:Berserker:Warrior:Slayer:…`, une colonne par
+/// race) : FUN_1401a3b90, FUN_1401a3be0, chaîne « %s » puis « %s ».
+pub(super) fn race_class_name(assets: &Assets, race: i32, class: i32) -> String {
+    let Ok(t) = assets.table("ini", "chartype.ini") else { return String::new() };
+    let Some(s) = t.sections.iter().find(|s| s.name.eq_ignore_ascii_case("CharType")) else { return String::new() };
+    let (values, column) = (|k: &str| s.get_all(k).map(str::to_string).collect::<Vec<_>>(), usize::try_from(race).unwrap_or(0));
+    parse_race_class(&values("Race"), &values("Class"), race, class, column)
+}
+
+fn parse_race_class(races: &[String], classes: &[String], race: i32, class: i32, column: usize) -> String {
+    let row = |list: &[String], id: i32| list.iter().find_map(|l| l.trim().strip_prefix(&format!("{id}:")).map(str::to_string));
+    let race_name = row(races, race).unwrap_or_default();
+    let class_name = row(classes, class).and_then(|l| l.split(':').nth(column.saturating_sub(1)).map(str::to_string)).unwrap_or_default();
+    format!("{race_name} {class_name}").trim().to_string()
+}
+
+/// Découpe `text` en deux lignes au blanc le plus proche du milieu (`None` : un seul mot).
+fn split_two_lines(text: &str) -> Option<(&str, &str)> {
+    let middle = text.len() / 2;
+    let at = text.match_indices(' ').map(|(i, _)| i).min_by_key(|i| i.abs_diff(middle))?;
+    Some((&text[..at], &text[at + 1..]))
+}
+
+/// Libellé d'une ligne de propriété, gardé dans sa colonne `width` : les colonnes d'origine (110 et 94 px jusqu'à la
+/// valeur) sont faites pour l'anglais et les textes français les débordent. Police réduite, puis deux lignes dans la
+/// hauteur de la ligne (20 px).
+fn fit_label(ctx: &egui::Context, painter: &egui::Painter, r: Rect, text: &str, width: f32, font: f32, color: Color32) {
+    let measure = |t: &str, size: f32| ctx.fonts(|f| f.layout_no_wrap(t.to_string(), FontId::proportional(size), color).size().x);
+    for size in [font, font * 0.9] {
+        if measure(text, size) <= width {
+            shadow_text(painter, r.left_center(), Align2::LEFT_CENTER, text, size, color);
+            return;
+        }
+    }
+    let Some((a, b)) = split_two_lines(text) else {
+        shadow_text(painter, r.left_center(), Align2::LEFT_CENTER, text, (font * width / measure(text, font)).max(font * 0.65), color);
+        return;
+    };
+    let size = [font * 0.9, font * 0.8, font * 0.72].into_iter().find(|s| measure(a, *s).max(measure(b, *s)) <= width).unwrap_or(font * 0.72);
+    let half = size * 0.52;
+    shadow_text(painter, r.left_center() - Vec2::new(0.0, half), Align2::LEFT_CENTER, a, size, color);
+    shadow_text(painter, r.left_center() + Vec2::new(0.0, half), Align2::LEFT_CENTER, b, size, color);
+}
+
 /// Caractéristiques, onglets et lignes de propriétés, posés dans `Character_Status`.
 #[allow(clippy::too_many_arguments)]
 pub(super) fn draw_status(ctx: &egui::Context, ui: &mut egui::Ui, hud: &mut HudState, assets: &Assets, painter: &egui::Painter, layout: &Layout, origin: Pos2, w: &UiWindow, st: &CharacterStats, basis: &Basis, font: f32) {
@@ -364,7 +408,9 @@ pub(super) fn draw_status(ctx: &egui::Context, ui: &mut egui::Ui, hud: &mut HudS
         if let Some(c) = w.control(&p.name_ctrl) {
             let r = layout.rect(origin, c.pos, c.size);
             let label = super::ui_message(hud, assets, &p.label_key);
-            shadow_text(painter, r.left_center(), Align2::LEFT_CENTER, &label, font * 0.95, Color32::from_rgb(255, 240, 200));
+            // Largeur : jusqu'à la valeur de la même ligne (`Edit_Value_NN`).
+            let width = w.control(&p.value_ctrl).map_or(c.size[0], |v| v.pos[0] - c.pos[0] - 4.0) * layout.scale;
+            fit_label(ctx, painter, r, &label, width, font * 0.95, Color32::from_rgb(255, 240, 200));
         }
         if let (Some(c), Some((text, tone))) = (w.control(&p.value_ctrl), property_text(p, st, basis)) {
             let r = layout.rect(origin, c.pos, c.size);
@@ -404,6 +450,21 @@ mod tests {
     </Property>
   </CharacterPropertyAttribute>
 </CharacterPropertyView>"#;
+
+    #[test]
+    fn noms_de_race_et_de_classe() {
+        let races = ["1:Human", "2:Orc", "3:MoonElf", "4:DragonScion", "11:Monster"].map(String::from);
+        let classes = ["1:Knight:Berserker:Warrior:Slayer:MonClass1:", "4:Mage:Sorcerer:Elementalist:Summoner:MonClass4:"].map(String::from);
+        assert_eq!(parse_race_class(&races, &classes, 3, 1, 3), "MoonElf Warrior");
+        assert_eq!(parse_race_class(&races, &classes, 2, 4, 2), "Orc Sorcerer");
+        assert_eq!(parse_race_class(&races, &classes, 9, 9, 9), "");
+    }
+
+    #[test]
+    fn libelles_coupes_en_deux_lignes() {
+        assert_eq!(split_two_lines("Temps d'incantation de competence"), Some(("Temps d'incantation", "de competence")));
+        assert_eq!(split_two_lines("Precision"), None);
+    }
 
     #[test]
     fn onglets_et_valeurs() {

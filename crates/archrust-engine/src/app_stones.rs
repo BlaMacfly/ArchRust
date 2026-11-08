@@ -26,11 +26,21 @@
 //!   Palier (`FUN_14082cf80`) : premier de la liste dont `POINT` ≤ total, soit le plus haut.
 //!   ArchRust : [`ArmorGlow`] posée sur les pièces d'armure de corps du personnage (`Mesh::glow`),
 //!   dessinée par `shader.wgsl` (second étage de texture, voir `docs/FORMATS.md`).
-//! * **`ee_ss_target.txt`** : joué par Archonia sur l'**arme** (`Kind` 2, `Type` 0, non expirée) —
-//!   `FUN_14082d0b0` choisit une entrée par tranche (1–2, 3–4 … 9–10) d'une valeur de l'objet lue par
-//!   `FUN_1403416e0` (donnée attachée d'AgpmItemConvert, nature non relevée), jouée sur l'objet
-//!   (`FUN_1405706d0`) et gardée sous la clé 0x14d pour être retirée (`FUN_14056ea10`). La lecture du
-//!   fichier vers ces tranches n'est pas relevée : **non reproduit**.
+//! * **Effet par tranches de renforcement : rien à jouer.** `FUN_1405725e0` (arme `Kind` 2, `Type` 0, non
+//!   expirée) lit le niveau de renforcement (`FUN_1403416e0`, premier entier de la donnée attachée, comme
+//!   `FUN_14028e900`) et cherche une entrée par tranche 1–2 … 9–10 (`FUN_14082d0b0`, `+0xe18…+0xe38`). Ces
+//!   cases ne sont remplies que par `FUN_14082fe60` (lignes `W1`…`W5` d'un fichier), joignable seulement par
+//!   `FUN_14056de70`, qui n'a aucun appelant ni pointeur dans l'exécutable : elles restent vides. **Écarté.**
+//! * **`ee_ss_target.txt`** (`FUN_140830a80` : `LEVEL`, `SPIRIT_STONE`, 10 lignes au plus par couple) : ce n'est
+//!   **pas** la table des tranches. Joué à chaque coup qui touche (`FUN_140573960` → `FUN_140572e20`), selon
+//!   l'arme de l'attaquant (partie 10, sinon 9) dont `n` sockets sont remplies (runes comprises, `FUN_14032eac0` ;
+//!   sans socket remplie : autre chemin, non repris). Pour chaque rang de ligne, `FUN_14082dac0` tire : chance
+//!   `30 + 29(n−1)/9 + 11(Rank−1)/4` sur 100 (divisions entières, `Rank` : facteur 10, 2 de l'objet), puis la
+//!   catégorie au prorata des pierres (`FUN_14032eb80`) : WATER, FIRE, EARTH, AIR, MAGIC dans cet ordre, le reste
+//!   (runes, glace, foudre, poison) ne donnant rien. `LEVEL` = moitié de `n` arrondie au-dessus. La première
+//!   case vide ou le premier tirage perdu arrête la boucle. L'effet part de l'attaquant vers sa cible
+//!   (`FUN_1405706d0` : `+0x6dc`, options `G1` et `J1` de `FUN_140572e20`) ; ArchRust le pose **sur la cible**
+//!   (déduit : sens exact de ces options non relevé).
 
 use super::App;
 use crate::app::effects_glue::Placed;
@@ -243,6 +253,59 @@ pub fn change_effects(rows: &[ChangeRow], total: i32) -> Vec<Placed> {
     out
 }
 
+/// `ee_ss_target.txt` (`FUN_140830a80`) : lignes par (catégorie, `LEVEL`), dans l'ordre du fichier, 10 au plus.
+pub fn parse_target(text: &str) -> HashMap<(usize, i32), Vec<Placed>> {
+    let mut lines = text.lines();
+    let header: Vec<&str> = lines.next().unwrap_or_default().split('\t').map(str::trim).collect();
+    let col = |n: &str| header.iter().position(|h| h.eq_ignore_ascii_case(n));
+    let mut out: HashMap<(usize, i32), Vec<Placed>> = HashMap::new();
+    let (Some(level), Some(name), Some(eid)) = (col("LEVEL"), col("SPIRIT_STONE"), col("EID")) else { return out };
+    let (x, y, z, s, node, gap) = (col("OFFSET_X"), col("OFFSET_Y"), col("OFFSET_Z"), col("SCALE"), col("NODE_ID"), col("GAP"));
+    for l in lines {
+        let c: Vec<&str> = l.split('\t').collect();
+        let get = |i: Option<usize>| i.and_then(|i| c.get(i)).map(|v| v.trim()).unwrap_or("");
+        let Some(cat) = CATEGORIES.iter().position(|n| n.eq_ignore_ascii_case(get(Some(name)))) else { continue };
+        let (Ok(lv), Ok(e)) = (get(Some(level)).parse::<i32>(), get(Some(eid)).parse::<u32>()) else { continue };
+        let num = |i| get(i).parse::<f32>().ok();
+        let placed = Placed {
+            eid: e,
+            offset: Vec3::new(num(x).unwrap_or(0.0), num(y).unwrap_or(0.0), num(z).unwrap_or(0.0)),
+            scale: num(s).filter(|v| *v > 0.0).unwrap_or(1.0),
+            node: get(node).parse().unwrap_or(0),
+            delay: get(gap).parse::<u32>().unwrap_or(0).min(60_000),
+        };
+        let rows = out.entry((cat, lv)).or_default();
+        if rows.len() < 10 {
+            rows.push(placed);
+        }
+    }
+    out
+}
+
+/// Tirage de `FUN_14082dac0` : (catégorie, `LEVEL`) d'une ligne d'`ee_ss_target.txt`, ou `None` s'il est perdu.
+/// `fills` : sockets remplies de l'arme ; `rank` : facteur 10, 2 de l'objet ; `roll` : entier de 0 à 99.
+pub fn target_draw(fills: &[crate::app::convert_glue::SocketFill], rank: i64, mut roll: impl FnMut() -> i32) -> Option<(usize, i32)> {
+    let n = fills.len() as i32;
+    if n == 0 {
+        return None;
+    }
+    if roll() + 1 > (rank as i32 * 11 - 11) / 4 + 30 + (n * 29 - 29) / 9 {
+        return None;
+    }
+    let share = 1.0 / n as f32;
+    let count = |spirit: i64| fills.iter().filter(|f| !f.rune && f.spirit == spirit).count() as f32;
+    let r = roll();
+    let mut edge = 0;
+    // Ordre de FUN_14056be90 : eau (2), feu (3), terre (4), air (5), magie (1).
+    for (spirit, cat) in [(2, 2), (3, 0), (4, 4), (5, 1), (1, 3)] {
+        edge += (count(spirit) * share * 100.0) as i32;
+        if r < edge {
+            return Some((cat, (n + 1) / 2));
+        }
+    }
+    None
+}
+
 /// `Kind` d'une armure, `Part` du corps.
 const KIND_ARMOR: i64 = 1;
 const PART_BODY: i64 = 2;
@@ -321,6 +384,9 @@ pub(super) struct StonesGlue {
     points: Option<ConvertPoints>,
     change: Option<HashMap<usize, Vec<ChangeRow>>>,
     fx: Option<HashMap<usize, Vec<FxRow>>>,
+    target: Option<Arc<HashMap<(usize, i32), Vec<Placed>>>>,
+    /// Générateur des tirages d'`ee_ss_target.txt` (xorshift ; 0 : pas encore amorcé).
+    rng: u32,
     /// Effets en cours par personnage : (IID de l'arme, EID joués).
     current: HashMap<i32, (i32, Vec<u32>)>,
     last: Option<Instant>,
@@ -332,7 +398,47 @@ fn load_tables(assets: &Assets) -> (ConvertPoints, HashMap<usize, Vec<ChangeRow>
     (points, change)
 }
 
+impl StonesGlue {
+    /// Entier de 0 à 99.
+    fn roll(&mut self) -> i32 {
+        if self.rng == 0 {
+            self.rng = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(1, |d| d.subsec_nanos() | 1);
+        }
+        self.rng ^= self.rng << 13;
+        self.rng ^= self.rng >> 17;
+        self.rng ^= self.rng << 5;
+        (self.rng % 100) as i32
+    }
+}
+
 impl App {
+    /// Coup qui touche (`FUN_140573960` → `FUN_140572e20`) : effets d'`ee_ss_target.txt` selon l'arme de
+    /// l'attaquant, posés sur la cible.
+    pub(super) fn stones_on_hit(&mut self, attacker: i32, target: i32) {
+        let assets = self.assets.clone();
+        let weapons: Vec<(i64, i32, i32)> = self
+            .player
+            .iter()
+            .chain(self.entities.iter())
+            .find(|e| e.cid == attacker)
+            .map(|e| e.equipment.iter().filter_map(|q| crate::worn::item_look(&assets, q.template_id).filter(|l| l.kind == KIND_WEAPON).map(|l| (l.part, q.item_id, q.template_id))).collect())
+            .unwrap_or_default();
+        // Partie 10, sinon 9 (`FUN_1403116e0`).
+        let Some(&(_, iid, tid)) = weapons.iter().find(|w| w.0 == 10).or_else(|| weapons.iter().find(|w| w.0 == 9)) else { return };
+        let Some((_, _, fills)) = self.convert.socket_fills(&assets, iid) else { return };
+        let rank = self.convert.item_rank(&assets, tid);
+        let table = self.stones.target.get_or_insert_with(|| Arc::new(parse_target(&super::npc_glue::client_text_in(&assets, "ini", "ee_ss_target.txt")))).clone();
+        let mut placed = Vec::new();
+        for i in 0..10 {
+            let stones = &mut self.stones;
+            let Some(p) = target_draw(&fills, rank, || stones.roll()).and_then(|key| table.get(&key)?.get(i).copied()) else { break };
+            placed.push(p);
+        }
+        if !placed.is_empty() {
+            self.effects_play_combat(target, &placed);
+        }
+    }
+
     /// Effets des armes serties des personnages en vue (toutes les 500 ms).
     pub(super) fn stones_frame(&mut self) {
         if self.stones.last.is_some_and(|l| l.elapsed() < REFRESH) {
@@ -485,6 +591,34 @@ mod tests {
         assert_eq!(eids(100), vec![3156]);
     }
 
+    #[test]
+    fn effet_sur_la_cible_selon_les_pierres() {
+        let text = "LEVEL\tSPIRIT_STONE\tEID\tOFFSET_X\tOFFSET_Y\tOFFSET_Z\tSCALE\tNODE_ID\tGAP\n1\tEARTH\t3202\t0\t0\t0\t0\t-4\t0\n3\tWATER\t3104\t0\t0\t0\t0.5\t-4\t0\n";
+        let t = parse_target(text);
+        assert_eq!((t[&(4, 1)][0].eid, t[&(4, 1)][0].scale, t[&(4, 1)][0].node), (3202, 1.0, -4));
+        assert_eq!((t[&(2, 3)][0].eid, t[&(2, 3)][0].scale), (3104, 0.5));
+        let rolls = |v: Vec<i32>| {
+            let mut i = v.into_iter();
+            move || i.next().unwrap()
+        };
+        // Aucune socket remplie : rien.
+        assert_eq!(target_draw(&[], 1, rolls(vec![])), None);
+        // 1 pierre, rang 1 : chance de 30 sur 100 (29 passe, 30 non) ; LEVEL 1.
+        assert_eq!(target_draw(&[stone(4, 1)], 1, rolls(vec![29, 0])), Some((4, 1)));
+        assert_eq!(target_draw(&[stone(4, 1)], 1, rolls(vec![30])), None);
+        // Rang 5, 8 sockets : 30 + 29×7/9 (22) + 11×4/4 (11) = 63.
+        assert_eq!(target_draw(&[stone(2, 1); 8], 5, rolls(vec![62, 99])), Some((2, 4)));
+        assert_eq!(target_draw(&[stone(2, 1); 8], 5, rolls(vec![63])), None);
+        // Eau 2, feu 1, magie 1 (25 % par pierre) : eau jusqu'à 49, feu jusqu'à 74, magie ensuite ; LEVEL 2.
+        let mix = [stone(2, 1), stone(2, 1), stone(3, 1), stone(1, 1)];
+        assert_eq!(target_draw(&mix, 1, rolls(vec![0, 49])), Some((2, 2)));
+        assert_eq!(target_draw(&mix, 1, rolls(vec![0, 50])), Some((0, 2)));
+        assert_eq!(target_draw(&mix, 1, rolls(vec![0, 75])), Some((3, 2)));
+        // Rune et glace comptent dans n, mais ne donnent aucune catégorie.
+        let other = [stone(6, 1), SocketFill { rune: true, spirit: 0, rank: 1 }];
+        assert_eq!(target_draw(&other, 1, rolls(vec![0, 0])), None);
+    }
+
     const FX: &str = "TYPE\tPOINT\tFX\tTEXTURE\tAMBIENT\tDIFFUSE\tSPECULAR\tUv Translation\tUV Scale\tUV Rotation\tUV Anim weight\tU Selection vector\tV Selection vector\t\t\n\
         AIR\t2\tuvAnim.fx\tSOUL_SKYBLUE_00.tif\t\"255,255,255\"\t\"255,255,255\"\t\"60,60,60\"\t\"0,0.040,0,0\"\t\"0.001,0.001,0,0\"\t0\t0.3\t\"1,0,0,0\"\t\"0,1,0,0\"\t\t\n\
         AIR\t45\tuvAnim.fx\tSOUL_SKYBLUE_00.tif\t\"255,255,255\"\t\"255,255,255\"\t\"60,60,60\"\t\"0.230,0.230,0,0\"\t\"0.050,0.050,0,0\"\t0\t0.65\t\"0,0,0.330,0\"\t\"0,0,0.330,0\"\t\t\n\
@@ -523,6 +657,9 @@ mod tests {
         assert_eq!(points.socket.get(8), Some(&16));
         assert_eq!(change.values().map(Vec::len).sum::<usize>(), 35);
         assert_eq!(change_effects(&change[&2], 45).iter().map(|p| p.eid).collect::<Vec<_>>(), vec![3106]);
+        // `ee_ss_target.txt` : 3 niveaux × 8 catégories, une ligne chacun.
+        let target = parse_target(&super::super::npc_glue::client_text_in(&assets, "ini", "ee_ss_target.txt"));
+        assert_eq!((target.len(), target[&(4, 1)][0].eid, target[&(2, 3)][0].eid), (24, 3202, 3104));
         // `ee_ss_fx.txt` : 7 catégories × 5 paliers (2, 20, 30, 45, 60), textures `SOUL_*` présentes.
         let fx = parse_fx(&super::super::npc_glue::client_text_in(&assets, "ini", "ee_ss_fx.txt"));
         assert_eq!(fx.len(), 7);

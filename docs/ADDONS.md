@@ -309,7 +309,8 @@ Jetons d'unité : `player`, `target`, `nameplate1`…`nameplateN` (unités en vu
 | `ArchRust.GetUnits()` | liste des unités en vue : `{guid, token, cid, tid, name, level, hp, hpMax, x, y, z, facing, moving}` |
 | `ArchRust.GetUnit(unité)` / `GetNumUnits()` | une unité (même forme) / leur nombre |
 | `ArchRust.GetInventory()` | objets : `{id, tid, name, count, where = "bag"/"equipped"/"other", tab, row, col}` |
-| `ArchRust.GetItemTemplate(tid)` | modèle d'objet du client (`ItemTemplateAll.ini`), possédé ou non : `{tid, name, icon, level, type, kind, part, stack, category}` ou `nil` (voir ci-dessous) |
+| `ArchRust.GetItemTemplate(tid)` | modèle d'objet du client (`ItemTemplateAll.ini`), possédé ou non : `{tid, name, icon, level, type, kind, part, stack, category, server, classes, races, minSocket, maxSocket, stats}` ou `nil` (voir ci-dessous) |
+| `ArchRust.GetMonsterTemplates()` | tous les monstres (`CharacterDataTable.txt`, bit 0x4 de `Type`), par TID croissant : `{ {tid, name, level}, … }` ; nom dans la langue du client si la table existe ; liste vide hors jeu. Le serveur reste juge (`/simloot` refuse un modèle qu'il n'a pas chargé) |
 | `ArchRust.SearchItems(texte, [catégorie], [max])` | modèles dont le nom contient `texte` (casse ignorée) ou dont le TID commence par `texte` s'il est numérique ; texte vide : tous. Rend la liste (TID croissant, `max` = 200 par défaut, 5 000 au plus) et le nombre total trouvé |
 | `ArchRust.GetNumItemTemplates()` | nombre de modèles du catalogue (0 hors jeu ou si les tables manquent) |
 | `ArchRust.GetCamera()` | distance, lacet°, tangage°, champ de vision° |
@@ -338,6 +339,20 @@ bloc `RestrictFactor`), `type` (0 se porte, 1 s'utilise, 2 autre), `kind` (1 arm
 8 anneau, 16 collier, 32 monture), `part` (partie du corps), `stack` (taille de pile, 1 si l'objet ne
 s'empile pas), `category` : `weapon`, `armor` (boucliers compris), `jewel` (anneaux, colliers), `mount`,
 `usable`, `other` — à passer aussi à `SearchItems` (`all` ou `nil` : toutes).
+
+Le moteur lit aussi `ini/itemdatatable.txt` (`server-data/` d'abord). Champs ajoutés : `server` (booléen, seulement avec une
+table `server-data/` : `false` si le serveur ne connaît pas l'objet, qui reste listé pour expliquer un refus ; sinon `nil`),
+`classes` et `races` (listes d'entiers des colonnes `Class` et `Race`, vides si la colonne ou la ligne manque ; leur présence dit
+que ce client donne ces champs), `minSocket` et `maxSocket` (absents si vides). `GetItemTemplate` seul ajoute `stats`, table
+« nom de colonne → nombre » des valeurs non nulles : `Physical_Min_Damage`, `Physical_Max_Damage`, `<E>_Min_Damage`,
+`<E>_Max_Damage`, `Physical_Defense_Point`, `PDR`, `BlockRate`, `<E>_Defense_Point`, `<E>_Defense_Rate`, `ATK Speed`,
+`ATK Range`, `Physical_ATKRate`, `Magic_ATKRate`, `CON_Bonus_Point`, `STR_Bonus_Point`, `DEX_Bonus_Point`, `INT_Bonus_Point`,
+`Wis_Bonus_Point`, `HP`, `SP`, `MP`, `Hp_Buff`, `Mp_Buff`, `Attack_Buff`, `Defense_Buff`, `Run_Buff`, `Rank`, `DUR`, avec `<E>` parmi
+`Magic`, `Water`, `Fire`, `Earth`, `Air`, `Poison`, `Ice`, `Linghtning` (orthographe de la colonne).
+
+**Messages du serveur en `/`.** Une ligne reçue qui commence par `/` n'est écartée que dans les discussions de joueurs (écho d'une
+commande). Les refus des commandes MJ d'ArchCore (type `WHOLE_WORLD`, `/create : objet inconnu : TID 15151. Syntaxe : …`) passent par
+les filtres et les événements `CHAT_MSG_*` comme les autres messages du serveur.
 
 ```lua
 local list, total = ArchRust.SearchItems("shield", "armor", 50)

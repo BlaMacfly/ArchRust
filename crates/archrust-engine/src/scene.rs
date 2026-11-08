@@ -708,10 +708,11 @@ pub fn entity_meshes_with_head(
         // Une armure (corps, mains, jambes, pieds) partage son modèle avec toute sa panoplie : comme
         // Archonia, seule la pièce de sa partie est gardée, et elle remplace la pièce de cette partie
         // (vêtement par défaut ou autre objet). Tout ajouter superposait les pièces, qui clignotaient.
-        let part = item_part_for_tid(assets, item.template_id).filter(|p| matches!(p, 2 | 5 | 6 | 7));
+        let part = item_part_for_tid(assets, item.template_id).filter(|p| matches!(p, 2 | 3 | 5 | 6 | 7));
+        let pieces = pieces.into_iter().map(|(m, t, q)| (m, t, crate::worn::equipment_piece_part(part, q)));
         let (kept, others): (Vec<_>, Vec<_>) = match part {
-            Some(p) => pieces.into_iter().partition(|(_, _, q)| *q == Some(p)),
-            None => (Vec::new(), pieces),
+            Some(p) => pieces.partition(|(_, _, q)| *q == Some(p)),
+            None => (Vec::new(), pieces.collect()),
         };
         if let (Some(p), false) = (part, kept.is_empty()) {
             meshes.retain(|(_, _, q)| *q != Some(p));

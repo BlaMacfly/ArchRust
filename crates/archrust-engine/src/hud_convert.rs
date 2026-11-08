@@ -175,6 +175,7 @@ pub fn draw_convert(ctx: &egui::Context, hud: &mut HudState, assets: &Assets, vi
     let dragging = egui::DragAndDrop::payload::<ItemDrag>(ctx).map(|p| *p);
     egui::Area::new(egui::Id::new("archonia-convert"))
         .default_pos(layout.window_origin(&w))
+        .default_size(size)
         .movable(true)
         .constrain(true)
         .order(egui::Order::Middle)
@@ -350,5 +351,61 @@ mod tests {
         assert_eq!(ConvertTab::of_tab_button(79.0), ConvertTab::Socket);
         let parts = colored_segments("A <HFF0000>B 3<HFFFFFF>___", Color32::WHITE);
         assert_eq!(parts[1], ("B 3".to_string(), Color32::from_rgb(0xff, 0, 0)));
+    }
+
+    /// Avec les données du client (`ARCHRUST_GAME_DIR`) : objet du sac glissé sur les cases du forgeron, sans fenêtre
+    /// (souris simulée sur egui).
+    #[test]
+    fn objet_du_sac_glisse_chez_le_forgeron() {
+        let Some(dir) = std::env::var_os("ARCHRUST_GAME_DIR") else { return };
+        let assets = Assets::new(Some(dir.into()), &[]);
+        let mut hud = HudState::default();
+        let screen = Rect::from_min_size(Pos2::ZERO, Vec2::new(1920.0, 1080.0));
+        let layout = Layout::new(screen);
+        let inv = hud.windows(&assets).iter().find(|w| w.name == "UI_Inventory").cloned().unwrap();
+        let conv = window(&mut hud, &assets, "UI_ConvertPhysics").unwrap();
+        let bag_grid = inv.controls.iter().find(|c| c.name == "CONTROL_Inventory_Grid").unwrap();
+        let cell = layout.window_origin(&inv) + Vec2::new(bag_grid.pos[0] + 25.0, bag_grid.pos[1] + 25.0) * layout.scale;
+        for (grid, material) in [("Convert_Grid", false), ("Convert_Grid_Socket", true), ("CONTROL_531", false)] {
+            let trash = grid == "CONTROL_531";
+            let w = if trash { &inv } else { &conv };
+            let c = w.controls.iter().find(|c| c.grid_name.as_deref() == Some(grid) || c.name == grid).unwrap();
+            let slot = layout.window_origin(w) + Vec2::new(c.pos[0] + c.size[0] / 2.0, c.pos[1] + c.size[1] / 2.0) * layout.scale;
+            let ctx = egui::Context::default();
+            let item = ItemRecord { operation: 0, id: 7, template_id: Some(486), owner_cid: None, count: Some(1), status: Some(2), grid: Some([0, 0, 0]) };
+            let items = vec![(item, "Potion".to_string())];
+            let mut events = Vec::new();
+            let mut bag_events = Vec::new();
+            let press = |pos: Pos2, pressed: bool| egui::Event::PointerButton { pos, button: egui::PointerButton::Primary, pressed, modifiers: Default::default() };
+            let steps = [
+                vec![egui::Event::PointerMoved(cell)],
+                vec![egui::Event::PointerMoved(cell)],
+                vec![press(cell, true)],
+                vec![egui::Event::PointerMoved(cell + Vec2::new(30.0, 0.0))],
+                vec![egui::Event::PointerMoved(slot)],
+                vec![egui::Event::PointerMoved(slot)],
+                vec![press(slot, false)],
+                vec![],
+            ];
+            let mut time = 0.0;
+            for frame in steps {
+                let input = egui::RawInput { screen_rect: Some(screen), time: Some(time), events: frame, ..Default::default() };
+                time += 0.1;
+                let _ = ctx.run(input, |ctx| {
+                    let mut open = true;
+                    draw_inventory(ctx, &mut hud, &assets, &mut open, &items, &mut bag_events);
+                    let view = ConvertView { tab: ConvertTab::Physical, item: None, material: None, edit: "", cost: 0, money: 0 };
+                    draw_convert(ctx, &mut hud, &assets, view, &mut events);
+                });
+            }
+            let want = if material { ConvertUi::DropMaterial(ItemDrag { iid: 7, tid: 486, worn: false, bank: false }) } else { ConvertUi::DropItem(ItemDrag { iid: 7, tid: 486, worn: false, bank: false }) };
+            if trash {
+                assert!(events.is_empty());
+                assert_eq!(bag_events, vec![ItemUi::Destroy(7)]);
+            } else {
+                assert_eq!(events, vec![want], "case {grid}");
+                assert!(bag_events.is_empty());
+            }
+        }
     }
 }

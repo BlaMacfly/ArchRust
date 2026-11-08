@@ -10,6 +10,12 @@ use std::sync::Arc;
 use wgpu::util::DeviceExt;
 use winit::window::Window;
 
+#[path = "render_upload_cache.rs"]
+mod upload_cache;
+#[path = "render_frustum.rs"]
+mod frustum;
+pub use frustum::Frustum;
+
 #[repr(C)]
 #[derive(Clone, Copy, Pod, Zeroable, Debug)]
 pub struct Vertex {
@@ -260,7 +266,7 @@ pub struct Renderer {
     depth: wgpu::TextureView,
     pub textures: HashMap<String, Arc<GpuTexture>>,
     pub white: Arc<GpuTexture>,
-    instance_pool: Vec<(wgpu::Buffer, wgpu::BindGroup)>,
+    instance_pool: Vec<(wgpu::Buffer, wgpu::BindGroup, upload_cache::UploadCache)>,
     pub clear_color: wgpu::Color,
     /// Direction du soleil et lumière ambiante (CVars `lightDirection`, `ambientColor` des AddOns).
     pub light_dir: Vec3,
@@ -703,6 +709,15 @@ impl Renderer {
         gpu
     }
 
+    /// Texture par nom, sans allocation quand le nom est déjà en minuscules (pièces de `create_mesh`).
+    fn texture_ref(&self, name: &str) -> Option<&Arc<GpuTexture>> {
+        if name.bytes().any(|b| b.is_ascii_uppercase()) {
+            self.textures.get(&name.to_ascii_lowercase())
+        } else {
+            self.textures.get(name)
+        }
+    }
+
     pub fn texture(&self, name: &str) -> Option<Arc<GpuTexture>> {
         self.textures.get(&name.to_ascii_lowercase()).cloned()
     }
@@ -712,8 +727,14 @@ impl Renderer {
         mesh.glow.lock().unwrap().as_ref().and_then(|g| self.textures.get(&g.texture.to_ascii_lowercase()).cloned()).unwrap_or_else(|| self.white.clone())
     }
 
-    pub fn create_mesh(&self, vertices: &[Vertex], indices: &[u32], parts: Vec<SubMesh>) -> Mesh {
+    pub fn create_mesh(&self, vertices: &[Vertex], indices: &[u32], mut parts: Vec<SubMesh>) -> Mesh {
         let (center, radius) = bounds(vertices);
+        // Noms de textures en minuscules une fois pour toutes : la boucle de dessin les cherche sans allouer.
+        for part in &mut parts {
+            if let Some(t) = &mut part.texture {
+                t.make_ascii_lowercase();
+            }
+        }
         Mesh {
             vertices: self
                 .device
@@ -833,7 +854,7 @@ impl Renderer {
                     resource: buf.as_entire_binding(),
                 }],
             });
-            self.instance_pool.push((buf, bg));
+            self.instance_pool.push((buf, bg, upload_cache::UploadCache::default()));
         }
     }
 
@@ -889,7 +910,11 @@ impl Renderer {
         let time = self.started.elapsed().as_secs_f32();
         for (i, item) in items.iter().enumerate() {
             let data = InstanceUniform::new(item, time);
-            self.queue.write_buffer(&self.instance_pool[i].0, 0, bytemuck::bytes_of(&data));
+            let (buf, _, cache) = &mut self.instance_pool[i];
+            let bytes = bytemuck::bytes_of(&data);
+            if cache.changed(bytes) {
+                self.queue.write_buffer(buf, 0, bytes);
+            }
         }
         let mut encoder = self.device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: Some("offscreen") });
         {
@@ -917,7 +942,7 @@ impl Renderer {
                 pass.set_vertex_buffer(0, item.mesh.vertices.slice(..));
                 pass.set_index_buffer(item.mesh.indices.slice(..), wgpu::IndexFormat::Uint32);
                 for part in &item.mesh.parts {
-                    let tex = part.texture.as_ref().and_then(|t| self.textures.get(&t.to_ascii_lowercase())).unwrap_or(&self.white);
+                    let tex = part.texture.as_deref().and_then(|t| self.texture_ref(t)).unwrap_or(&self.white);
                     pass.set_bind_group(1, &tex.bind_group, &[]);
                     pass.draw_indexed(part.index_start..part.index_start + part.index_count, 0, 0..1);
                 }
@@ -1008,8 +1033,11 @@ impl Renderer {
         let time = self.started.elapsed().as_secs_f32();
         for (i, item) in items.iter().enumerate() {
             let data = InstanceUniform::new(item, time);
-            let (buf, _) = &self.instance_pool[i];
-            self.queue.write_buffer(buf, 0, bytemuck::bytes_of(&data));
+            let (buf, _, cache) = &mut self.instance_pool[i];
+            let bytes = bytemuck::bytes_of(&data);
+            if cache.changed(bytes) {
+                self.queue.write_buffer(buf, 0, bytes);
+            }
         }
         let mut encoder = self
             .device
@@ -1067,6 +1095,7 @@ impl Renderer {
             pass.set_pipeline(&self.pipeline);
             pass.set_bind_group(3, &self.white.bind_group, &[]);
             let mut glowing = false;
+            let (mut last_mesh, mut last_texture): (Option<*const Mesh>, Option<*const GpuTexture>) = (None, None);
             for (i, item) in items.iter().enumerate() {
                 // Personnages et créatures (pièces skinnées ou rigides) : faces arrière cachées ; le décor
                 // reste recto-verso. Les pièces rigides accrochées aux os (chapeau, manteau, ailes)
@@ -1076,7 +1105,7 @@ impl Renderer {
                     culled = want;
                     pass.set_pipeline(if culled { &self.pipeline_culled } else { &self.pipeline });
                 }
-                let (_, bg) = &self.instance_pool[i];
+                let (_, bg, _) = &self.instance_pool[i];
                 pass.set_bind_group(2, bg, &[]);
                 // Lueur d'armure : texture animée en groupe 3 (blanc remis après).
                 let glow = item.mesh.glow.lock().unwrap().is_some();
@@ -1085,15 +1114,18 @@ impl Renderer {
                     pass.set_bind_group(3, &tex.bind_group, &[]);
                     glowing = glow;
                 }
-                pass.set_vertex_buffer(0, item.mesh.vertices.slice(..));
-                pass.set_index_buffer(item.mesh.indices.slice(..), wgpu::IndexFormat::Uint32);
+                // Même maillage ou même texture que la pièce précédente : liaisons gardées.
+                if !last_mesh.is_some_and(|m| std::ptr::eq(m, Arc::as_ptr(&item.mesh))) {
+                    pass.set_vertex_buffer(0, item.mesh.vertices.slice(..));
+                    pass.set_index_buffer(item.mesh.indices.slice(..), wgpu::IndexFormat::Uint32);
+                    last_mesh = Some(Arc::as_ptr(&item.mesh));
+                }
                 for part in &item.mesh.parts {
-                    let tex = part
-                        .texture
-                        .as_ref()
-                        .and_then(|t| self.textures.get(&t.to_ascii_lowercase()))
-                        .unwrap_or(&self.white);
-                    pass.set_bind_group(1, &tex.bind_group, &[]);
+                    let tex = part.texture.as_deref().and_then(|t| self.texture_ref(t)).unwrap_or(&self.white);
+                    if !last_texture.is_some_and(|t| std::ptr::eq(t, Arc::as_ptr(tex))) {
+                        pass.set_bind_group(1, &tex.bind_group, &[]);
+                        last_texture = Some(Arc::as_ptr(tex));
+                    }
                     pass.draw_indexed(
                         part.index_start..part.index_start + part.index_count,
                         0,

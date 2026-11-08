@@ -5,7 +5,7 @@ use archrust_addons::{AddonManager, ItemInfo, ItemTemplateInfo};
 use std::sync::Arc;
 
 fn template(tid: i32, name: &str, item_type: i64, kind: i64, level: i64, icon: &str) -> ItemTemplateInfo {
-    ItemTemplateInfo { tid, name: name.into(), icon: icon.into(), level, item_type, kind, part: 0, stack: if item_type == 1 { 99 } else { 1 } }
+    ItemTemplateInfo { tid, name: name.into(), icon: icon.into(), level, item_type, kind, part: 0, stack: if item_type == 1 { 99 } else { 1 }, ..Default::default() }
 }
 
 #[test]

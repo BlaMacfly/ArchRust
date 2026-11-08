@@ -222,6 +222,9 @@ pub struct BuffInfo {
     pub skill_tid: i32,
     /// Durée restante annoncée, en millisecondes (0 = inconnue ou permanente).
     pub duration_ms: u64,
+    /// TID du modèle du lanceur (3ᵉ champ de SKILL_BUFF) : section de `charactertemplateskill.ini` qui donne
+    /// les effets de l'amélioration (`FUN_14056ad80`).
+    pub caster_tid: i32,
 }
 
 /// Événements remontés au moteur.
@@ -359,6 +362,8 @@ pub enum WorldEvent {
     Convert(crate::convert::ConvertEvent),
     /// Sphère d'alchimie : ouverture, devis, résultat (voir `refinery`).
     Refinery(crate::refinery::RefineryEvent),
+    /// Socles de gacha : fenêtre, objet tiré, refus (voir `gacha`).
+    Gacha(crate::gacha::GachaEvent),
     /// Compétences : liste, niveau, lancement, instructeur (voir `skills`).
     Skill(crate::skills::SkillEvent),
     /// Portails : accord, départ, chargement fini (voir `teleport`).
@@ -476,6 +481,8 @@ pub enum Command {
     Convert(crate::convert::ConvertCommand),
     /// Sphère d'alchimie : ouverture, devis, raffinage (voir `refinery`).
     Refinery(crate::refinery::RefineryCommand),
+    /// Socles de gacha : demande, tirage (voir `gacha`).
+    Gacha(crate::gacha::GachaCommand),
     /// Lancement et apprentissage des compétences (voir `skills`).
     Skill(crate::skills::SkillCommand),
     /// Demande au portail, destination choisie (voir `teleport`).
@@ -681,6 +688,7 @@ fn decode_skill_buff(p: &Incoming) -> Option<WorldEvent> {
     let field = |i: usize| first.as_ref().and_then(|v| v.get(i)).and_then(Option::as_ref);
     let skill_tid = field(0).and_then(Value::as_i64).unwrap_or(0) as i32;
     if op == 5 {
+        log::debug!(target: "archrust_buffs", "reseau_decode op=5 porteur={owner} id={skill_id} tid={skill_tid} entrees={}", buffs.len());
         return Some(WorldEvent::BuffRemoved { owner, skill_tid });
     }
     let duration_ms = match field(1) {
@@ -688,7 +696,9 @@ fn decode_skill_buff(p: &Incoming) -> Option<WorldEvent> {
         Some(v) => v.as_i64().unwrap_or(0).max(0) as u64,
         None => 0,
     };
-    Some(WorldEvent::BuffAdded(BuffInfo { owner, skill_id, skill_tid, duration_ms }))
+    let caster_tid = field(2).and_then(Value::as_i64).unwrap_or(0) as i32;
+    log::debug!(target: "archrust_buffs", "reseau_decode op=4 porteur={owner} id={skill_id} tid={skill_tid} duree_ms={duration_ms} modele_lanceur={caster_tid} entrees={} premiere_entree_decodee={}", buffs.len(), first.is_some());
+    Some(WorldEvent::BuffAdded(BuffInfo { owner, skill_id, skill_tid, duration_ms, caster_tid }))
 }
 
 fn decode_character_factors(bytes: &[u8]) -> Option<ActionFactorPoints> {
@@ -814,6 +824,11 @@ pub fn is_disconnect_by_another_user(p: &Incoming) -> bool {
 
 /// Traduit un paquet reçu en événement.
 pub fn translate(p: &Incoming) -> WorldEvent {
+    // Diagnostic opt-in du point 17 : aucun contenu brut ni donnée d'authentification.
+    if p.packet_type == packet_type::SKILL && (p.op().is_none() || matches!(p.op(), Some(4..=7))) {
+        let entries = match p.get(8) { Some(Value::PacketList(v)) => v.len(), Some(Value::Packet(_)) => 1, _ => 0 };
+        log::debug!(target: "archrust_buffs", "reseau_recu op={:?} paquet_decode={} octets={} entrees_buff={entries}", p.op(), p.packet.is_some(), p.raw.len());
+    }
     // Métamorphose et évolution (AGPMCHARACTER ops 11, 12, 26, 27 ; AGPMITEM ops 8, 19, 20, 27), voir `morph`.
     if let Some(ev) = p.packet.as_ref().and_then(|packet| crate::morph::translate(p.packet_type, &packet.values)) {
         return WorldEvent::Morph(ev);
@@ -841,6 +856,10 @@ pub fn translate(p: &Incoming) -> WorldEvent {
     // Sphère d'alchimie (voir `refinery`).
     if let Some(ev) = p.packet.as_ref().and_then(|packet| crate::refinery::translate(p.packet_type, &packet.values)) {
         return WorldEvent::Refinery(ev);
+    }
+    // Socles de gacha (voir `gacha`).
+    if let Some(ev) = p.packet.as_ref().and_then(|packet| crate::gacha::translate(p.packet_type, &packet.values)) {
+        return WorldEvent::Gacha(ev);
     }
     // Réparation (voir `repair`), montures (voir `ride`).
     if let Some(ev) = p.packet.as_ref().and_then(|packet| crate::repair::translate(p.packet_type, &packet.values)) {
@@ -1014,9 +1033,11 @@ pub fn translate(p: &Incoming) -> WorldEvent {
                 },
             }
         }
-        packet_type::SKILL => decode_skill_buff(p).unwrap_or(WorldEvent::Unhandled {
-            packet_type: p.packet_type,
-            op: p.op(),
+        packet_type::SKILL => decode_skill_buff(p).unwrap_or_else(|| {
+            if p.op().is_none() || matches!(p.op(), Some(4..=7)) {
+                log::debug!(target: "archrust_buffs", "reseau_non_traduit op={:?} paquet_decode={}", p.op(), p.packet.is_some());
+            }
+            WorldEvent::Unhandled { packet_type: p.packet_type, op: p.op() }
         }),
         packet_type::CHARACTER
             if p.op() == Some(character_op::ADD as i64) || p.op() == Some(25) =>
@@ -1778,6 +1799,10 @@ impl WorldClient {
                             let (schema, values) = crate::refinery::command_packet(&c, self.cid);
                             self.conn.send(schema, &values).await
                         }
+                        Some(Command::Gacha(c)) => {
+                            let (schema, values) = crate::gacha::command_packet(&c, self.cid);
+                            self.conn.send(schema, &values).await
+                        }
                         Some(Command::Skill(c)) => {
                             let (schema, values) = crate::skills::command_packet(&c, self.cid);
                             self.conn.send(schema, &values).await
@@ -2428,7 +2453,7 @@ mod tests {
             translate(&Incoming { packet_type: packet_type::SKILL, packet: Some(packet), raw })
         };
         match make(4) {
-            WorldEvent::BuffAdded(b) => assert_eq!(b, BuffInfo { owner: 42, skill_id: 7, skill_tid: 1201, duration_ms: 30_000 }),
+            WorldEvent::BuffAdded(b) => assert_eq!(b, BuffInfo { owner: 42, skill_id: 7, skill_tid: 1201, duration_ms: 30_000, caster_tid: 96 }),
             other => panic!("ajout attendu, reçu {other:?}"),
         }
         match make(5) {

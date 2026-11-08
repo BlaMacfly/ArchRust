@@ -30,8 +30,14 @@
 //!   Archonia.exe : il n'est pas lu.
 //!
 //! Joueur ou option sans 3D : 2D au volume 1,1 ; autres personnages : 3D au volume 1,0 sur leur
-//! position, suivie (`FUN_1405c7420`). Les animations des montures (animateurs de `app_ride.rs`) ne
-//! jouent pas leurs sons d'animation ici.
+//! position, suivie (`FUN_1405c7420`).
+//!
+//! * **Montures** — la monture est un personnage à part : `FUN_1404be4f0` lance sur elle (`+0x58` de
+//!   l'`AgcdCharacter` du cavalier, par `FUN_1404be330`) le type lancé sur le cavalier, ce qui repasse par
+//!   le rappel 1 (`FUN_1404bd870`, adresse d'appel `0x1404bda80`) et donc par `FUN_1405695d0` avec les sons
+//!   du gabarit de la monture. Son identifiant n'étant pas celui du joueur, le son est **3D au volume 1,0
+//!   même sous le joueur**, suivi à la position du cavalier. Moment de départ seulement : `FUN_14056d890`
+//!   (coup qui touche) n'est appelé que pour l'attaquant.
 
 use super::App;
 use crate::animation::{AnimType, Clip};
@@ -419,6 +425,21 @@ impl App {
                 if let Some(sounds) = data.anim.get(&tid) {
                     play.extend(sounds_for(sounds, kind, e, v, COND_START).into_iter().map(|f| (cid, f)));
                 }
+            }
+        }
+        // Montures : sons de départ de leur gabarit, 3D même sous le joueur (ensemble 0, voir l'en-tête).
+        for (rider, tid, list) in self.ride_take_started() {
+            let clips = self.sounds.clips(&assets, tid);
+            let Some(sounds) = data.anim.get(&tid) else { continue };
+            let files: Vec<String> = list
+                .iter()
+                .filter(|(kind, _)| *kind < 16)
+                .filter_map(|(kind, clip)| clip_slot(&clips, *kind, 0, &clip.name).map(|(e, v)| sounds_for(sounds, *kind, e, v, COND_START)))
+                .flatten()
+                .collect();
+            let Some((pos, _)) = self.sounds_char(rider) else { continue };
+            for file in files {
+                self.audio.play_effect_at(&format!("sound/effect/{file}"), pos, Some(rider), 1.0, false);
             }
         }
         // Coups qui touchent : sons de condition 1 de l'attaque de l'attaquant.

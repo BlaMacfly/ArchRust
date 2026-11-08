@@ -27,6 +27,10 @@ pub const GOLD_TID: i32 = 268;
 /// Résultats d'une action 0x41 (champ 2).
 pub mod outcome {
     pub const MISS: i8 = 1;
+    /// Plus de flèches, de carreaux, de PM : attaque arrêtée (`CharacterAtkResultNotEnough*`).
+    pub const NOT_ENOUGH_ARROW: i8 = 2;
+    pub const NOT_ENOUGH_BOLT: i8 = 3;
+    pub const NOT_ENOUGH_MP: i8 = 4;
     pub const SUCCESS: i8 = 5;
     pub const CRITICAL: i8 = 6;
     pub const EVADE: i8 = 7;

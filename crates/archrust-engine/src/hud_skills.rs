@@ -50,6 +50,8 @@ pub enum SkillUi {
     SelectTrainer(i32),
     Learn(i32),
     Upgrade(i32),
+    /// Bouton d'achat de l'instructeur : TID, compétence pas encore apprise.
+    TrainerBuy(i32, bool),
     SlotSet { slot: usize, shortcut: Shortcut },
     SlotSwap(usize, usize),
     SlotClear(usize),
@@ -193,7 +195,9 @@ fn list_cells(ui: &egui::Ui, layout: &Layout, origin: Pos2, list: &UiControl, it
 pub(super) fn frame_window<R>(ctx: &egui::Context, hud: &mut HudState, assets: &Assets, w: &UiWindow, id: &str, add: impl FnOnce(&mut egui::Ui, &mut HudState, &Layout, Pos2, &egui::Painter) -> R) {
     let layout = Layout::new(ctx.screen_rect());
     let size = Vec2::new(w.size[0], w.size[1]) * layout.scale;
-    egui::Area::new(egui::Id::new(id)).default_pos(layout.window_origin(w)).movable(true).constrain(true).order(egui::Order::Middle).show(ctx, |ui| {
+    // Sans fondu : chaque onglet à arbre est une autre fenêtre (`Action=1:2:0:1:UI_SkillBuy`, `1:1:0:1:UI_SkillHighLevelUp`
+    // comme dans Archonia) ; le fondu d'apparition d'egui donnait l'impression d'un rechargement.
+    egui::Area::new(egui::Id::new(id)).default_pos(layout.window_origin(w)).movable(true).constrain(true).fade_in(false).order(egui::Order::Middle).show(ctx, |ui| {
         let (rect, _) = ui.allocate_exact_size(size, egui::Sense::hover());
         let painter = ui.painter().clone();
         match w.textures.first() {
@@ -338,7 +342,8 @@ pub fn draw_trainer(ctx: &egui::Context, hud: &mut HudState, assets: &Assets, vi
                     let resp = super::npc_ui::button(ctx, ui, hud, assets, painter, r, c, &label, font, enabled, "skill-trainer-do");
                     if resp.clicked() {
                         if let Some(e) = selected {
-                            out.push(if e.level == 0 { SkillUi::Learn(e.tid) } else { SkillUi::Upgrade(e.tid) });
+                            // `Skill_Buy` (FUN_1405d7c00) : confirmation, d'achat ou d'amélioration selon la compétence.
+                            out.push(SkillUi::TrainerBuy(e.tid, e.level == 0));
                         }
                     }
                 }

@@ -28,7 +28,7 @@ pub mod saved;
 pub mod ui;
 
 pub use manager::{
-    AddonError, AddonManager, CameraInfo, EditEvent, HostCommand, HostState, ItemInfo,
+    AddonError, AddonManager, CameraInfo, EditEvent, HostCommand, HostState, ItemInfo, MonsterTemplateInfo,
     ItemTemplateInfo, LoadedAddon, PartyMember, PointerInput, UnitInfo,
 };
 pub use comm::ExtInfo;

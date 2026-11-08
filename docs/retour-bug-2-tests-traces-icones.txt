@@ -1,0 +1,14 @@
+    Finished `test` profile [optimized + debuginfo] target(s) in 23.69s
+     Running unittests src\lib.rs (target\x86_64-pc-windows-msvc\debug\deps\archrust_engine-c88deb16a62865c5.exe)
+
+running 2 tests
+q0000004 : 32x32, pixels du pack skill identiques, sans substitut
+q0000008 : 32x32, pixels du pack skill identiques, sans substitut
+q00000e5 : 32x32, pixels du pack skill identiques, sans substitut
+q0000148 : 32x32, pixels du pack skill identiques, sans substitut
+q00001c4 : 32x32, pixels du pack skill identiques, sans substitut
+test assets::tests::icones_buffs_reelles_sans_substitut ... ok
+test hud::tests::icones_buffs_reelles_dessinees_sans_fenetre ... ok
+
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 328 filtered out; finished in 0.47s
+

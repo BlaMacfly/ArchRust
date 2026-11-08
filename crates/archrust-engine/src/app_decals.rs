@@ -12,9 +12,8 @@
 //! - **Repère de destination** (AgcmTargeting, `targeting.ini` `[Textures1]` 0 `target.png`,
 //!   FUN_1404e2780) : planche de 70 × 70 (`DAT_140e4a100`) posée au point cliqué quand le joueur part à
 //!   pied (mode 1), retirée à l'arrivée. Les `[Textures2]` (`ET_Selection_128/256/512`, `ET_Alkadia_*`
-//!   pour l'ArchLord) servent au ciblage de zone des compétences (FUN_1404e5280 : 128 sous 400, 256
-//!   sous 700, 512 au-delà, centrées sur le joueur) : Archonia ne dessine pas de cercle sous la cible
-//!   choisie.
+//!   pour l'ArchLord) servent au ciblage au sol des compétences (voir `app_groundcast.rs`, dessiné ici) :
+//!   Archonia ne dessine pas de cercle sous la cible choisie.
 
 use super::App;
 use crate::render::{EffectDraw, Vertex};
@@ -93,7 +92,7 @@ impl App {
         {
             let Some(gpu) = self.gpu.as_mut() else { return };
             // Lots de l'image précédente retirés (les effets ne réécrivent pas toujours la liste).
-            gpu.renderer.effects.retain(|d| !matches!(d.texture.as_deref(), Some(SHADOW_TEXTURE | TARGET_TEXTURE)));
+            gpu.renderer.effects.retain(|d| !d.texture.as_deref().is_some_and(|t| matches!(t, SHADOW_TEXTURE | TARGET_TEXTURE) || super::groundcast_glue::is_selection_texture(t)));
             if !in_world {
                 return;
             }
@@ -113,7 +112,7 @@ impl App {
             }
         }
         let mut draws = Vec::new();
-        if self.decals.shadow_ready == Some(true) && self.options.video.shadow > 0 {
+        if self.decals.shadow_ready == Some(true) && self.options.video.shadow_char() > 0 {
             let limit = self.options.video.char_distance();
             let eye = self.camera.eye();
             let chars: Vec<(i32, Vec3, f32)> = self.player.iter().chain(self.entities.iter()).filter(|e| e.cid >= 0).map(|e| (e.tid, e.position, e.turn_y)).collect();
@@ -143,9 +142,22 @@ impl App {
                 }
             }
         }
+        // Repère du ciblage au sol, étiré sur toute sa largeur (`FUN_1404e5280`).
+        let marker = self.ground_cast.marker;
+        if let Some(m) = marker {
+            let half = m.size / 2.0;
+            let (terrain, objects, assets) = (&self.terrain, &self.objects, &self.assets);
+            let vertices = ground_quad((m.at.x - half, m.at.z - half), (m.at.x + half, m.at.z + half), [1.0; 4], |x, z| Self::ground_height(terrain, objects, assets, x, z));
+            if !vertices.is_empty() {
+                draws.push(EffectDraw { texture: Some(m.texture.into()), blend: EffectBlend::Alpha, vertices });
+            }
+        }
         let Some(gpu) = self.gpu.as_mut() else { return };
         if draws.iter().any(|d| d.texture.as_deref() == Some(TARGET_TEXTURE)) {
             crate::scene::ensure_texture(&mut gpu.renderer, &self.assets, TARGET_TEXTURE);
+        }
+        if let Some(m) = marker {
+            crate::scene::ensure_texture(&mut gpu.renderer, &self.assets, m.texture);
         }
         // Sous les effets : au début de la liste, avec les mélanges alpha.
         if !draws.is_empty() {

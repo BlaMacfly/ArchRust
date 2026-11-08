@@ -33,11 +33,10 @@ use archrust_netclient::{Command, WorldEvent};
 use glam::Mat4;
 use std::collections::HashMap;
 
-/// Cases de l'inventaire acceptées par le serveur : 4 sacs de 4 × 4 (la grille d'Archonia en dessine
-/// 5 × 5 ; une case hors de ces limites est refusée et l'objet revient à sa place).
-const BAGS: i16 = 4;
-const ROWS: i16 = 4;
-const COLS: i16 = 4;
+/// Inventaire : cinq sacs de cinq lignes et cinq colonnes, comme `UI_Inventory`.
+const BAGS: i16 = 5;
+const ROWS: i16 = 5;
+const COLS: i16 = 5;
 
 /// `Type` d'`ItemTemplateAll.ini` : objet qui se porte.
 const TYPE_EQUIP: i32 = 0;
@@ -142,6 +141,12 @@ fn request(glue: &mut ItemsGlue, assets: &Assets, items: &HashMap<i32, ItemRecor
                 Some(TYPE_EQUIP) | None => Some(Ok(ItemCommand::Equip(drag.iid))),
                 Some(_) => Some(Err(format!("« {} » ne se porte pas.", item_label(assets, item)))),
             }
+        }
+        ItemUi::Destroy(iid) => {
+            if items.get(&iid).is_some_and(|i| i.status == Some(status::INVENTORY)) {
+                glue.destroy = Some(iid);
+            }
+            None
         }
         ItemUi::Split(iid) => {
             let count = items.get(&iid)?.count.unwrap_or(1);
@@ -414,6 +419,25 @@ mod tests {
 
     fn bag(id: i32, grid: Grid) -> ItemRecord {
         ItemRecord { operation: 0, id, template_id: Some(1), owner_cid: Some(7), count: Some(1), status: Some(2), grid: Some(grid) }
+    }
+
+    #[test]
+    fn dernier_emplacement_et_corbeille() {
+        let mut items: HashMap<i32, ItemRecord> = (0..125).map(|n| {
+            let i = bag(n + 1, [n as i16 / 25, n as i16 / 5 % 5, n as i16 % 5]);
+            (i.id, i)
+        }).collect();
+        assert_eq!(free_cell(items.values()), None);
+        items.remove(&125);
+        assert_eq!(free_cell(items.values()), Some([4, 4, 4]));
+        let mut glue = ItemsGlue::default();
+        let assets = Assets::new(None, &[]);
+        assert!(request(&mut glue, &assets, &items, ItemUi::Destroy(1)).is_none());
+        assert_eq!(glue.destroy, Some(1), "confirmation avant envoi");
+        glue.destroy = None;
+        items.get_mut(&1).unwrap().status = Some(status::EQUIP);
+        assert!(request(&mut glue, &assets, &items, ItemUi::Destroy(1)).is_none());
+        assert_eq!(glue.destroy, None, "un objet porté ne va pas à la corbeille");
     }
 
     #[test]

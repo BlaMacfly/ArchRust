@@ -19,7 +19,10 @@
 //!   FUN_14065c3d0 → AGPMQUEST op 14, drapeau 1) ; « Ajouter au journal » (`CONTROL_QUEST_SHARE`) l'inscrit ou
 //!   l'en retire (drapeau 0) ; 10 quêtes au plus (`JournalMaxCount` dans la discussion). Le serveur rend le drapeau
 //!   au 5ᵉ entier du QUEST_INFO de l'op 4. Refus faute de place : op 8 (sysstr 447) et op 9 (« [quête] » puis
-//!   sysstr 440, en rouge), dans l'onglet système.
+//!   sysstr 440, en rouge), dans l'onglet système. Affichage à l'écran : voir `draw_quest_tracker` et `tracker_lines`. Non
+//!   repris : le 7ᵉ argument de `FUN_140658620` (gabarit `+0x118` nul : arrêt au premier objectif affiché, colonne non
+//!   relevée, ArchRust montre tous les restants), le texte ajouté par quête (carte de `FUN_14059d1d0`, source non relevée) et la
+//!   liste clignotante de 10 s (`+0x16c8`, `FUN_14061bdb0`, déduite pour les quêtes refusées, journal plein).
 //! * Achats (boutique des Shrines, EP8) : comme Archonia (`NPCT_BuyItemDirect`, FUN_1407b9b90), tout achat passe
 //!   par `UI_SHRINEITEM_BUY_CONFIRM` (voir `hud_social.rs`) : quantité n = celle de l'objet de boutique (1 si
 //!   nulle) ou celle choisie (Maj + clic droit), prix de l'itemdatatable.txt du client en facteur PRICE — sous-type
@@ -71,6 +74,12 @@ struct QuestText {
     /// `Complete_Level`, `Complete_Money`.
     complete_level: i32,
     complete_money: i64,
+    /// `Category` (1 : couleur `Mission` du suivi, lien avec `+0x10c` déduit).
+    category: i32,
+    /// Objets (TID, nombre) des sortes 11 (`Complete_Item*`, `+0x1be0`, `+0x1be8`) et 3 (`DropItemA_*`, `+0x1c10`, `+0x1c18`) ;
+    /// liens déduits de l'ordre des colonnes.
+    complete_item: (i32, i32),
+    drop_item: (i32, i32),
     money: i64,
     exp: i64,
     /// Objets donnés (`Gift_ItemA` à `D`) et objets au choix (`SelectItem1` à `8`, le joueur en prend un).
@@ -146,6 +155,8 @@ pub struct NpcGlue {
     /// (AgcUIQuestText +0x38, -1 sans choix ; clic LAB_14088c840).
     reward_choice: Option<usize>,
     journal: BTreeMap<i32, QuestProgress>,
+    /// Cases réduites du suivi, par rang comme dans Archonia (`+0x1964`).
+    tracker_collapsed: [bool; 10],
     done: HashSet<u32>,
     /// Fenêtres de saisie : achat (IID, quantité), vente (IID), argent (dépôt, montant).
     buy: Option<(i32, i32)>,
@@ -238,6 +249,8 @@ pub struct NpcViews {
     shop_name: String,
     bank_items: Vec<(ItemRecord, String)>,
     quests: Option<(bool, String, Vec<QuestEntry>, String)>,
+    /// Cases du suivi à l'écran.
+    tracked: Vec<crate::hud::TrackedQuest>,
 }
 
 /// Texte d'un fichier du client, version française d'abord (`ini_fr/`), déchiffré. Les données du
@@ -272,11 +285,22 @@ fn bank_slot_prices(text: &str) -> Vec<i64> {
     prices
 }
 
-/// Texte d'une ligne `id=texte` de `sysstr.txt`.
-pub(super) fn sysstr(assets: &Assets, id: u32) -> Option<String> {
-    let text = client_text(assets, "sysstr.txt");
-    let key = format!("{id}=");
-    text.lines().find_map(|l| l.strip_prefix(&key)).map(|t| t.trim().to_string())
+/// Lignes `id=texte` de `sysstr.txt` (la première d'un numéro compte).
+fn parse_sysstr(text: &str) -> HashMap<u32, String> {
+    let mut map = HashMap::new();
+    for (id, value) in text.lines().filter_map(|l| l.split_once('=')) {
+        if let Ok(id) = id.parse::<u32>() {
+            map.entry(id).or_insert_with(|| value.trim().to_string());
+        }
+    }
+    map
+}
+
+/// Texte d'une ligne `id=texte` de `sysstr.txt`. Appelée à chaque image par les infobulles (barre de raccourcis,
+/// instructeurs) : le fichier n'est lu qu'une fois ([`Assets::sysstr_map`]), sinon chaque appel relit et déchiffre le
+/// fichier, 2 ms avec `server-data/` (voir `docs/FORMATS.md`, point 10 du retour de bug 2).
+pub(crate) fn sysstr(assets: &Assets, id: u32) -> Option<String> {
+    assets.sysstr_map(|| parse_sysstr(&client_text(assets, "sysstr.txt"))).get(&id).cloned()
 }
 
 /// Lignes d'un fichier tabulé ; un champ entre guillemets peut contenir des retours à la ligne.
@@ -372,6 +396,9 @@ fn load_data(assets: &Assets) -> NpcData {
                 start: get("Dialogue_Start").unwrap_or_default(),
                 complete_level: num("Complete_Level").unwrap_or(0) as i32,
                 complete_money: num("Complete_Money").unwrap_or(0),
+                category: num("Category").unwrap_or(0) as i32,
+                complete_item: (num("Complete_ItemTid").unwrap_or(0) as i32, num("Complete_ItemCount").unwrap_or(0) as i32),
+                drop_item: (num("DropItemA_TID").unwrap_or(0) as i32, num("DropItemA_Count").unwrap_or(0) as i32),
                 money: num("Gift_Money").unwrap_or(0),
                 exp: num("Gift_Exp").unwrap_or(0),
                 ..Default::default()
@@ -513,6 +540,23 @@ impl NpcGlue {
         self.functions.get(&npc)?.iter().find(|x| x.function == f)?.data
     }
 
+    /// Cases du suivi à l'écran : quêtes inscrites, par TID.
+    fn tracked_rows(&mut self, assets: &Assets, items: &HashMap<i32, ItemRecord>, level: i32, money: i64) -> Vec<crate::hud::TrackedQuest> {
+        let tracked: Vec<QuestProgress> = self.journal.values().filter(|p| p.tracked).take(TRACK_MAX).cloned().collect();
+        if tracked.is_empty() {
+            return Vec::new();
+        }
+        let have = |tid: i32| items.values().filter(|i| i.status == Some(STATUS_INVENTORY) && i.template_id == Some(tid)).map(|i| i.count.unwrap_or(1)).sum::<i32>();
+        let data = self.data(assets);
+        tracked
+            .iter()
+            .filter_map(|p| {
+                let q = data.quests.get(&p.tid)?;
+                Some(crate::hud::TrackedQuest { tid: p.tid, title: q.name.clone(), mission: q.category == 1, lines: tracker_lines(q, p, level, money, have) })
+            })
+            .collect()
+    }
+
     /// Quêtes inscrites au journal de suivi.
     fn tracked_count(&self) -> usize {
         self.journal.values().filter(|p| p.tracked).count()
@@ -535,6 +579,35 @@ impl NpcGlue {
         send(net, NpcCommand::QuestTrack { tid, track });
         None
     }
+}
+
+/// Ligne d'objectif du suivi, retouchée comme `FUN_14059d1d0` : sans « 1. » de tête, « and collect » → « + », sans point
+/// devant une parenthèse ni en fin de ligne.
+fn tracker_clean(line: &str) -> String {
+    let b = line.as_bytes();
+    let line = if b.len() >= 3 && (b'1'..=b'9').contains(&b[0]) && &b[1..3] == b". " { &line[3..] } else { line };
+    let line = line.replace("and collect ", "+ ").replace(".(", "(");
+    line.strip_suffix('.').map(str::to_string).unwrap_or(line)
+}
+
+/// Objectifs restants (`FUN_140658620`, cinquième argument à 1 : ce qui est rempli est caché) selon `CountFactorN` : 0 texte ;
+/// 1 niveau ; 2 argent ; 3 et 11 objets `(n/m)` ; 4 et 5 monstres `(n/m)` ; 6 à 10 (`FUN_140658570`) gardés en texte seul.
+fn tracker_lines(q: &QuestText, p: &QuestProgress, level: i32, money: i64, have: impl Fn(i32) -> i32) -> Vec<String> {
+    let mut out = Vec::new();
+    for (line, kind) in &q.summary {
+        let counted = |n: i32, need: i32| (n < need).then(|| format!("{}({n}/{need})", tracker_clean(line)));
+        let text = match kind {
+            1 => (level < q.complete_level).then(|| tracker_clean(line)),
+            2 => (money < q.complete_money).then(|| tracker_clean(line)),
+            3 => counted(have(q.drop_item.0), q.drop_item.1),
+            11 => counted(have(q.complete_item.0), q.complete_item.1),
+            4 => counted(p.monster_a, q.monsters.first().map_or(0, |m| m.1)),
+            5 => counted(p.monster_b, q.monsters.get(1).map_or(0, |m| m.1)),
+            _ => Some(tracker_clean(line)),
+        };
+        out.extend(text);
+    }
+    out
 }
 
 /// Première case libre d'une banque (pages ouvertes) en commençant par la page affichée.
@@ -717,6 +790,9 @@ pub fn panel(
     let mut out: Vec<NpcUi> = Vec::new();
     if let Some(view) = &views.dialog {
         crate::hud::draw_npc_dialog(ctx, hud, assets, view, &mut out);
+    }
+    if let Some(tid) = crate::hud::draw_quest_tracker(ctx, hud, assets, &views.tracked, &mut glue.tracker_collapsed) {
+        out.push(NpcUi::QuestTrack(tid));
     }
     if let Some(shop) = glue.shop.as_mut() {
         // Prix d'achat affiché avec la taxe de la région du joueur (« Buy_Price », `FUN_1405479c0`, voir `app_tax.rs`).
@@ -1232,6 +1308,8 @@ impl App {
                 .map(|i| (i.clone(), i.template_id.and_then(|t| item_name_for_tid(&assets, t)).unwrap_or_default()))
                 .collect();
         }
+        let (level, money) = (self.hud.stats.level.unwrap_or(0), self.hud.stats.money.unwrap_or(0));
+        v.tracked = self.npc.tracked_rows(&assets, &self.items, level, money);
         let journal = self.npc.show_journal && self.npc.quest_npc.is_none();
         if let Some(npc) = self.npc.quest_npc.filter(|_| !journal) {
             let group = self.npc.function_data(npc, function::QUEST);
@@ -1378,6 +1456,25 @@ impl App {
 mod tests {
     use super::*;
 
+    #[test]
+    fn lignes_du_suivi() {
+        assert_eq!(tracker_clean("1. Kill 5 wolves."), "Kill 5 wolves");
+        assert_eq!(tracker_clean("Find him and collect the key.(x)"), "Find him + the key(x)");
+        let q = QuestText {
+            summary: vec![("Parler.".into(), 0), ("Niveau 10".into(), 1), ("2. Loups".into(), 4), ("Ours".into(), 5), ("Peaux".into(), 3), ("Clé".into(), 11)],
+            monsters: vec![("Loup".into(), 5), ("Ours".into(), 2)],
+            complete_level: 10,
+            drop_item: (70, 3),
+            complete_item: (71, 1),
+            ..Default::default()
+        };
+        let p = QuestProgress { tid: 1, monster_a: 2, monster_b: 2, done: false, tracked: true };
+        let have = |t: i32| if t == 70 { 1 } else { 1 };
+        // Niveau atteint, ours et clé remplis : cachés.
+        assert_eq!(tracker_lines(&q, &p, 10, 0, have), vec!["Parler", "Loups(2/5)", "Peaux(1/3)"]);
+        assert_eq!(tracker_lines(&q, &p, 9, 0, have)[1], "Niveau 10");
+    }
+
     /// `client_text` : une table des données du serveur posée seulement dans `ini/` l'emporte sur la copie
     /// d'Archonia du dossier de langue ; sans elle, le dossier de langue reste prioritaire.
     #[test]
@@ -1454,6 +1551,38 @@ mod tests {
         assert_eq!(tip[0], "Lettre");
         assert_eq!(tip[1], "Prix d'achat : 75 Pieces d'arene");
         assert!(tip[2].ends_with("2000 Points de charisme") && tip[2].starts_with(' '));
+    }
+
+    #[test]
+    fn lignes_de_sysstr() {
+        let m = parse_sysstr("# titre
+67=Niveau requis 
+67=doublon
+8=Seconde=s
+x=rien
+");
+        assert_eq!(m.get(&67).map(String::as_str), Some("Niveau requis"), "la première ligne compte");
+        assert_eq!(m.get(&8).map(String::as_str), Some("Seconde=s"));
+        assert_eq!(m.len(), 2);
+    }
+
+    /// Avec les données du client et `server-data/` (`ARCHRUST_GAME_DIR`) : `sysstr` ne relit plus le fichier à
+    /// chaque appel (mesure du retour de bug 2 : 2 ms par appel avant le cache, plusieurs centaines d'appels par
+    /// image chez un instructeur).
+    #[test]
+    fn sysstr_garde_en_memoire() {
+        let Some(dir) = std::env::var_os("ARCHRUST_GAME_DIR") else { return };
+        let dir = std::path::PathBuf::from(dir);
+        let server = dir.join("server-data");
+        let assets = Assets::new(Some(dir), &[]).with_server_data(server.is_dir().then_some(server.as_path()));
+        assert!(sysstr(&assets, 67).is_some_and(|t| !t.is_empty()));
+        let start = std::time::Instant::now();
+        for _ in 0..1000 {
+            let _ = sysstr(&assets, 67);
+        }
+        let each = start.elapsed() / 1000;
+        eprintln!("sysstr : {each:?} par appel");
+        assert!(each < std::time::Duration::from_micros(100), "{each:?}");
     }
 
     #[test]

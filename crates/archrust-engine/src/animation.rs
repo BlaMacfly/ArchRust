@@ -29,6 +29,10 @@ use glam::{Mat3, Quat, Vec3};
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex, OnceLock};
 
+#[path = "animation_prepared.rs"]
+mod prepared_skin;
+pub use prepared_skin::SkinPoseBatch;
+
 /// Type d'animation d'Archonia (premier nombre de `ANIMATION_NAME`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum AnimType {
@@ -42,6 +46,28 @@ pub enum AnimType {
 
 /// Type interne d'un clip d'action sociale (hors des types d'Archonia : une monture ne le suit pas).
 pub const SOCIAL_KIND: u32 = 100;
+/// Type -11 d'Archonia : la monture ne suit pas les types négatifs.
+pub const SKILL_KIND: u32 = (-11i32) as u32;
+
+/// Clip du rang de compétence : ensemble demandé, sinon ensemble 0 exclusivement.
+pub fn skill_file(assets: &Assets, tid: i32, rank: u32, equip: u32) -> Option<String> {
+    if rank >= 200 { return None; }
+    let table = assets.table("ini", "charactertemplateskill.ini").ok()?;
+    let header = table.section("")?;
+    let sec = table.section(&tid.to_string())?;
+    let mut base = None;
+    for (key, value) in &sec.entries {
+        if !header.get(key).is_some_and(|c| c.starts_with("SKILL_ANIMATION_NAME")) { continue; }
+        let mut fields = value.splitn(3, ':');
+        if fields.next().and_then(|s| s.trim().parse::<u32>().ok()) != Some(rank) { continue; }
+        let Some(ensemble) = fields.next().and_then(|s| s.trim().parse::<u32>().ok()) else { continue };
+        let Some(name) = fields.next().map(str::trim).filter(|s| !s.is_empty() && *s != "0") else { continue };
+        let file = format!("{}.ean", name.to_ascii_lowercase());
+        if ensemble == equip { return Some(file); }
+        if ensemble == 0 { base = Some(file); }
+    }
+    base
+}
 
 /// Géométrie skinnée d'un clump du client, liée à son maillage GPU.
 pub struct SkinBinding {
@@ -308,6 +334,8 @@ pub struct Animator {
     /// Clip ponctuel en cours (attaque, coup reçu) : joué une fois, puis retour à l'attente ou à la
     /// course.
     action: bool,
+    /// Multiplicateur du clip de lancement (facteur attaque 3), hors cast_ms.
+    skill_speed: f32,
     /// Mort : le clip de mort est joué une fois puis sa dernière pose est gardée.
     dead: bool,
     /// Mondes des cadres du squelette (sans cadre 0) dans la dernière pose écrite : mains des objets
@@ -353,6 +381,7 @@ impl Animator {
             since_update: f32::MAX,
             seed: seed.max(1),
             action: false,
+            skill_speed: 1.0,
             dead: false,
             world: None,
             signature,
@@ -466,6 +495,9 @@ impl Animator {
     /// Type d'animation en cours ou demandé : mort (5), clip ponctuel (3, 4), sinon le dernier type
     /// demandé (0 attente, 1 marche, 2 course), qu'il ait un clip ou non.
     pub fn current_type(&self) -> u32 {
+        if self.action && self.kind == SKILL_KIND {
+            return AnimType::Wait as u32;
+        }
         if self.dead {
             AnimType::Death as u32
         } else if self.action {
@@ -479,7 +511,7 @@ impl Animator {
         let Some(clip) = self.clip.clone() else {
             return;
         };
-        self.time += dt;
+        self.time += dt * if self.action && self.kind == SKILL_KIND { self.skill_speed } else { 1.0 };
         if self.dead || self.action {
             // Pose finale gardée (mort) ou clip joué une seule fois (attaque, coup reçu).
             self.time = self.time.min(clip.duration - 1e-3).max(0.0);
@@ -502,16 +534,21 @@ impl Animator {
             self.note_started();
         }
         self.since_update += dt;
-        if self.since_update < 1.0 / max_hz {
+        // `max_hz` nul : pose non réécrite (personnage hors du champ), infini : à chaque image.
+        let period = 1.0 / max_hz;
+        if self.since_update < period {
             return;
         }
-        self.since_update = 0.0;
+        // Le reste passe à la période suivante : remis à zéro, il faisait tomber les 30 Hz à 20 Hz à
+        // 60 images par seconde (deux images de 16,7 ms restent sous 33,3 ms, la pose attendait la troisième).
+        self.since_update = if period > 0.0 { (self.since_update - period).min(period) } else { 0.0 };
         let Some(clip) = self.clip.clone() else {
             return;
         };
         let pose = clip.sample(self.time);
+        let mut skins = SkinPoseBatch::new(&pose);
         for (mesh, binding) in &self.parts {
-            if let Some(vertices) = deform(binding, &pose) {
+            if let Some(vertices) = skins.deform(binding) {
                 renderer.write_vertices(mesh, &vertices);
             }
         }
@@ -525,7 +562,7 @@ impl Animator {
         if self.dead || !self.set.by_type.contains_key(&kind) {
             return false;
         }
-        if kind == AnimType::Hit as u32 && self.action && self.kind == AnimType::Attack as u32 {
+        if kind == AnimType::Hit as u32 && self.action && matches!(self.kind, k if k == AnimType::Attack as u32 || k == SKILL_KIND) {
             return false;
         }
         let roll = self.roll();
@@ -567,7 +604,23 @@ impl Animator {
         true
     }
 
-    /// Mort (clip de type 5 joué une fois, dernière pose gardée) ou retour à la vie. `at_end` pose
+    /// Lancement -11 : redémarre le clip et protège du touché.
+    pub fn play_skill(&mut self, assets: &Assets, file: &str, modifier: f32) -> Option<f32> {
+        if self.dead { return None; }
+        let clip = load_clip(assets, file)?;
+        let duration = clip.duration;
+        self.skill_speed = 1.0 + modifier.max(0.0) * 0.01;
+        self.requested = AnimType::Wait as u32;
+        self.kind = SKILL_KIND;
+        self.clip = Some(clip);
+        self.time = 0.0;
+        self.since_update = f32::MAX;
+        self.action = true;
+        self.note_started();
+        Some(duration)
+    }
+
+    /// Mort (clip 5 joué une fois), ou retour à la vie. `at_end` pose
     /// directement la fin du clip (cadavre déjà à terre quand il entre dans la vue).
     pub fn set_dead(&mut self, assets: &Assets, dead: bool, at_end: bool) {
         if dead == self.dead {
@@ -715,6 +768,74 @@ mod tests {
         assert_eq!(first(&AnimationSet::resolve(&own, &base, true), 1).as_deref(), Some("e2"));
         base.by_type.remove(&1);
         assert_eq!(first(&AnimationSet::resolve(&own, &base, false), 1), None, "non joueur : rien");
+    }
+
+    #[test]
+    fn clips_sorts_reels() {
+        let Some(dir) = std::env::var_os("ARCHRUST_GAME_DIR") else { return };
+        let assets = Assets::new(Some(dir.into()), &[]);
+        assert_eq!(skill_file(&assets, 96, 0, 1).as_deref(), Some("d0006001.ean"));
+        assert_eq!(skill_file(&assets, 96, 0, 3).as_deref(), Some("d0006003.ean"));
+        assert_eq!(skill_file(&assets, 96, 0, 0), None);
+        assert_eq!(skill_file(&assets, 96, 0, 7), None);
+        assert_eq!(skill_file(&assets, 96, 38, 7).as_deref(), Some("d0060260.ean"));
+        for (rank, equip) in [(0, 1), (0, 3), (38, 7), (50, 0)] {
+            let file = skill_file(&assets, 96, rank, equip).unwrap();
+            let clip = load_clip(&assets, &file).unwrap_or_else(|| panic!("clip reel absent : {file}"));
+            assert!(clip.duration > 0.0 && !clip.tracks.is_empty(), "{file}");
+            assert!(!clip.sample(clip.duration * 0.5).is_empty());
+            eprintln!("rang {rank}, ensemble {equip} : {file}, {} s, {} pistes", clip.duration, clip.tracks.len());
+        }
+        let characters = assets.read_text("ini", "CharacterDataTable.txt").unwrap();
+        let mut lines = characters.lines();
+        let columns: Vec<_> = lines.next().unwrap().split('\t').map(str::trim).collect();
+        let col = |name: &str| columns.iter().position(|c| c.eq_ignore_ascii_case(name)).unwrap();
+        let rows: Vec<Vec<&str>> = lines.map(|l| l.split('\t').map(str::trim).collect()).collect();
+        let table = assets.table("ini", "charactertemplateskill.ini").unwrap();
+        let header = table.section("").unwrap();
+        for (name, class) in [("Mage", 4), ("Hunter", 2)] {
+            let row = rows.iter().find(|r| r.get(col("Name")) == Some(&name)).unwrap();
+            let tid = row[col("TID")].parse::<i32>().unwrap();
+            assert_eq!(row[col("Class")].parse::<i32>().unwrap(), class);
+            let sec = table.section(&tid.to_string()).unwrap();
+            let value = sec.entries.iter().find(|(k, _)| header.get(k).is_some_and(|c| c.starts_with("SKILL_ANIMATION_NAME"))).unwrap().1.as_str();
+            let fields: Vec<_> = value.split(':').collect();
+            let rank = fields[0].parse::<u32>().unwrap();
+            let equip = fields[1].parse::<u32>().unwrap();
+            let file = skill_file(&assets, tid, rank, equip).unwrap();
+            assert_eq!(file, format!("{}.ean", fields[2].to_ascii_lowercase()));
+            let clip = load_clip(&assets, &file).unwrap();
+            assert!(clip.duration > 0.0 && !clip.sample(clip.duration * 0.5).is_empty());
+            eprintln!("{name}, TID {tid}, classe {class}, rang {rank}, ensemble {equip} : {file}, {} s, {} pistes", clip.duration, clip.tracks.len());
+        }
+
+    }
+
+    /// Etat du lecteur sans GPU, avec le vrai clip du chevalier.
+    #[test]
+    fn lancement_sort_reel_redemarre_et_resiste_au_touche() {
+        let Some(dir) = std::env::var_os("ARCHRUST_GAME_DIR") else { return };
+        let assets = Assets::new(Some(dir.into()), &[]);
+        let mut a = Animator {
+            parts: Vec::new(), set: AnimationSet::for_tid(&assets, 96, 1, true),
+            kind: AnimType::Run as u32, requested: AnimType::Run as u32,
+            followed: u32::MAX, clip: None, time: 0.0, since_update: 0.0,
+            seed: 1, action: false, skill_speed: 1.0, dead: false,
+            world: None, signature: 0, equip: 1, started: Vec::new(),
+        };
+        let file = skill_file(&assets, 96, 0, 1).unwrap();
+        assert!(a.play_skill(&assets, &file, 25.0).unwrap() > 0.0);
+        assert_eq!(a.kind, SKILL_KIND);
+        assert_eq!(a.current_type(), AnimType::Wait as u32);
+        assert_eq!(a.skill_speed, 1.25);
+        assert!(!a.play_once(&assets, AnimType::Hit));
+        a.time = 0.4;
+        assert!(a.play_skill(&assets, &file, 0.0).is_some());
+        assert_eq!(a.time, 0.0);
+        assert_eq!(a.skill_speed, 1.0);
+        assert_eq!(a.take_started().len(), 2);
+        a.dead = true;
+        assert!(a.play_skill(&assets, &file, 0.0).is_none());
     }
 
     #[test]

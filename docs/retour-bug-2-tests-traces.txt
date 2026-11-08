@@ -1,0 +1,674 @@
+   Compiling archrust-netclient v0.1.0 (C:\Users\Marty\Desktop\HomeRPG ArchLord\ArchRust\crates\archrust-netclient)
+   Compiling archrust-engine v0.1.0 (C:\Users\Marty\Desktop\HomeRPG ArchLord\ArchRust\crates\archrust-engine)
+   Compiling archrust v0.1.0 (C:\Users\Marty\Desktop\HomeRPG ArchLord\ArchRust\apps\archrust)
+    Finished `test` profile [optimized + debuginfo] target(s) in 18m 33s
+     Running unittests src\main.rs (target\x86_64-pc-windows-msvc\debug\deps\archrust-a8d6facd6915de19.exe)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running unittests src\lib.rs (target\x86_64-pc-windows-msvc\debug\deps\archrust_addons-18b1e0f78b6eaa76.exe)
+
+running 16 tests
+test comm::tests::prefixes_et_resultats ... ok
+test comm::tests::seau_a_jetons ... ok
+test ui::tests::layout_anchor ... ok
+test manager::tests::world_sync_fires_unit_events ... ok
+test manager::tests::party_api_and_roster_event ... ok
+test manager::tests::mouse_click_drag_and_slider ... ok
+test ui::tests::two_anchors_scale_and_order ... ok
+test manifest::tests::parse_toc ... ok
+test saved::tests::accents_stables ... ok
+test libs::tests::serializer_broker_media_and_embedded_libs ... ok
+test libs::tests::ace3_addon_lifecycle ... ok
+test ui::tests::colors_and_codes ... ok
+test saved::tests::roundtrip ... ok
+test lua_env::tests::require_stays_inside_addons ... ok
+test lua_env::tests::stdlib_and_wow_aliases ... ok
+test manager::tests::load_events_slash_timers_saved ... ok
+
+test result: ok. 16 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.19s
+
+     Running tests\addon_messages.rs (target\x86_64-pc-windows-msvc\debug\deps\addon_messages-65f2359f1c062784.exe)
+
+running 2 tests
+test send_receive_throttle_and_acecomm ... ok
+test acecomm_multipart_alone ... ok
+
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.07s
+
+     Running tests\item_catalog.rs (target\x86_64-pc-windows-msvc\debug\deps\item_catalog-da290c6b7b8295c2.exe)
+
+running 1 test
+test catalogue_des_objets ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.02s
+
+     Running tests\sample_addons.rs (target\x86_64-pc-windows-msvc\debug\deps\sample_addons-e77cc024e6537d8b.exe)
+
+running 1 test
+test archace_and_helloarch_run ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.12s
+
+     Running unittests src\lib.rs (target\x86_64-pc-windows-msvc\debug\deps\archrust_crypto-bde09d42b9dfa8c7.exe)
+
+running 8 tests
+test rc4::tests::rc4_rfc6229_vector ... ok
+test blowfish::tests::standard_vector_through_le_layout ... ok
+test rc4::tests::capi_key_is_md5 ... ok
+test pack::tests::key_iv_decode ... ok
+test pack::tests::overlay_key_decode_and_roundtrip ... ok
+test pack::tests::roundtrip ... ok
+test blowfish::tests::roundtrip ... ok
+test rc4::tests::symmetric ... ok
+
+test result: ok. 8 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.02s
+
+     Running unittests src\lib.rs (target\x86_64-pc-windows-msvc\debug\deps\archrust_data-917a4091239efa7e.exe)
+
+running 30 tests
+test ini::tests::codepage_roundtrips ... ok
+test ini::tests::parse_sections_and_duplicates ... ok
+test aplib::tests::size_check ... ok
+test effset::tests::sound_sets_are_decoded_exactly_and_mixed_blocks_are_scanned ... ok
+test rw::tests::cadre_zero_remplace_par_l_entite ... ok
+test effset::tests::spline_chunk_and_bspline_position ... ok
+test lod::tests::distance_table_and_levels ... ok
+test lod::tests::game_table ... ok
+test effset::tests::deps_light_and_moving_frame_decode ... ok
+test effset::tests::full_block_decodes_textures_bases_and_anims ... ok
+test ini::tests::server_list_forms ... ok
+test ini::tests::positional_tables_merge_by_column_name ... ok
+test rw::tests::chunk_reader_rejects_truncated ... ok
+test soundpak::tests::entry_out_of_range_or_not_riff_is_an_error ... ok
+test soundpak::tests::parses_index_and_reads_entries_from_pack ... ok
+test aplib::tests::short_codes ... ok
+test grass::tests::templates_and_tufts ... ok
+test soundpak::tests::wav_info_duration_and_display ... ok
+test grass::tests::tolerant_sector_reader ... ok
+test tiff::tests::keeps_unspecified_extra_sample_as_alpha ... ok
+test magpack::tests::build_and_parse ... ok
+test pack::tests::roundtrip_plain ... ok
+test soundpak::tests::riff_scan_splits_a_pack_without_index ... ok
+test soundpak::tests::rejects_truncated_index_and_bad_header ... ok
+test rw::tests::dxt1_solid_block ... ok
+test rw::tests::version_decode ... ok
+test water::tests::parses_rects_and_waves ... ok
+test water::tests::parses_status_tables ... ok
+test aplib::tests::roundtrip_literals_and_matches ... ok
+test effset::tests::all_client_sets_decode ... ok
+
+test result: ok. 30 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.19s
+
+     Running unittests src\lib.rs (target\x86_64-pc-windows-msvc\debug\deps\archrust_engine-c88deb16a62865c5.exe)
+
+running 330 tests
+test animation::prepared_skin::tests::wearer_et_absences_gardent_le_chemin_reference ... ok
+test animation::prepared_skin::tests::partage_par_identite_et_pose_ephemere ... ok
+test animation::tests::variants_are_weighted_by_rate ... ok
+test app::auction_glue::tests::chargement_par_curseur ... ok
+test app::addon_glue::tests::fiche_d_objet_et_monstres ... ok
+test animation::tests::repli_des_clips_comme_archonia ... ok
+test app::auction_glue::tests::controles_de_mise_en_vente ... ok
+test app::archlord_glue::tests::nom_de_l_archlord ... ok
+test account::tests::round_trip_is_encrypted ... ok
+test app::animator_retention::tests::departs_et_retours_preservent_les_valeurs_et_najoutent_rien ... ok
+test app::auction_glue::tests::textes ... ok
+test app::boss_glue::tests::heure_degats_classes ... ok
+test app::animator_retention::tests::branches_et_seuil_identiques_a_la_recherche_lineaire ... ok
+test animation::tests::animations_selon_l_arme ... ok
+test app::balloon_glue::tests::lines_cut_at_120_bytes_three_at_most ... ok
+test app::boss_glue::tests::statuts ... ok
+test app::boss_glue::tests::boss_d_archonia ... ok
+test app::buddy_glue::follow_tests::distance_du_suivi ... ok
+test app::balloon_glue::tests::balloon_fades_in_its_last_second ... ok
+test animation::tests::lancement_sort_reel_redemarre_et_resiste_au_touche ... ok
+test app::capture_glue::tests::resolutions_distinct_twelve_largest ... ok
+test app::buddy_glue::tests::fichier_des_ignores ... ok
+test app::chat_glue::tests::commandes_de_chatcmd ... ok
+test app::capture_glue::tests::archonia_screenshot_name ... ok
+test app::chat_glue::tests::lignes_d_archonia ... ok
+test app::buddy_glue::tests::messages_remplis ... ok
+test app::boss_glue::tests::donnees_du_client ... ok
+test app::chat_glue::tests::tampon_du_salon ... ok
+test app::chattabs_glue::tests::fichier_de_reglages ... ok
+test app::capture_glue::tests::gamma_ramp_and_minimap_zoom ... ok
+test app::chat_glue::tests::formats_printf ... ok
+test app::buddy_glue::tests::fusion_a_la_fin_de_liste ... ok
+test app::chattabs_glue::tests::regles_du_bouton_ok ... ok
+test app::consumables_glue::tests::effets_d_un_objet ... ok
+test app::combat_glue::level_tests::messages_de_niveau_sans_les_retouches ... ok
+test app::combat_glue::tests::modele_au_sol_sans_repli_base ... ok
+test app::combat_glue::tests::types_de_personnage_d_archonia ... ok
+test app::consumables_glue::tests::colonnes_d_itemdatatable ... ok
+test app::consumables_glue::tests::messages_de_vitesse ... ok
+test app::combat_glue::level_tests::evenement_et_table_du_client ... ok
+test app::consumables_glue::tests::orbe_choisi_et_bouton ... ok
+test app::consumables_glue::tests::refus_avant_l_envoi ... ok
+test app::consumables_glue::tests::return_orb_et_fortune_manual ... ok
+test app::consumables_glue::tests::release_of_agreement ... ok
+test animation::tests::clips_sorts_reels ... ok
+test app::cursor_glue::tests::point_chaud_et_reduction ... ok
+test app::customize_glue::tests::camera_de_l_apercu ... ok
+test app::convert_glue::tests::phrases_d_archonia ... ok
+test app::convert_glue::tests::somme_des_options_portees ... ok
+test app::camera_glue::tests::donnees_du_client ... ok
+test app::convert_glue::desc_tests::descriptions_d_objets ... ok
+test app::customize_glue::tests::listes_du_coiffeur ... ok
+test app::customize_glue::tests::niveau_et_prix_d_archonia ... ok
+test app::convert_glue::tests::potion_choisie_a_l_ouverture ... ok
+test app::effects_glue::particles::tests::system_emitter_step_by_step ... ok
+test app::customize_glue::tests::table_du_client ... ok
+test app::effects_glue::particles::tests::level_up_particles_from_client_data ... ok
+test app::decals_glue::tests::shadow_texture_darkens_by_luminance ... ok
+test app::decals_glue::tests::quad_follows_the_ground_and_spans_uv ... ok
+test app::effects_glue::tests::dependent_base_follows_parent_frame ... ok
+test app::effects_glue::particles::tests::trail_step_by_step ... ok
+test app::effects_glue::particles::tests::directions_shapes_and_black_hole ... ok
+test app::consumables_glue::tests::donnees_d_archonia ... ok
+test app::effects_glue::tests::effets_exclusifs ... ok
+test app::effects_glue::tests::light_radius_color_and_nearest ... ok
+test app::convert_glue::tests::somme_des_options_du_client ... ok
+test app::effects_glue::tests::client_tables_give_skill_and_common_effects ... ok
+test app::effects_glue::tests::renouvellement_et_retrait_des_buffs_par_porteur ... ok
+test app::effects_glue::tests::dependent_trails_ride_parent_frames ... ok
+test app::effects_glue::tests::effect_objects_play_their_rtanim ... ok
+test app::effects_glue::tests::effect_data_fields_and_anim_time ... ok
+test app::guild_glue::tests::textes_d_archonia ... ok
+test app::help_glue::tests::fichiers_d_aide_et_d_astuces ... ok
+test app::groundcast_glue::tests::texture_selon_la_largeur_et_l_archlord ... ok
+test app::hotkey_glue::tests::fichier_ui_hotkey_aller_retour ... ok
+test app::hotkey_glue::tests::table_de_l_eventmap ... ok
+test app::effects_glue::tests::two_node_tail_models_lack_nodes_701_702 ... ok
+test app::help_glue::tests::minuterie_des_astuces ... ok
+test app::guild_glue::tests::choix_des_combattants ... ok
+test app::help_glue::tests::fichiers_du_jeu ... ok
+test app::hotkey_glue::tests::touches_et_libelles ... ok
+test app::groundcast_glue::tests::textures_du_client ... ok
+test app::mail_glue::tests::date_affichee ... ok
+test app::items_glue::tests::case_libre_et_demandes ... ok
+test app::items_glue::tests::dernier_emplacement_et_corbeille ... ok
+test app::itemset_glue::tests::nom_de_fichier_et_raccourcis ... ok
+test app::mail_glue::tests::controles_d_envoi ... ok
+test app::itemset_glue::tests::declencheur_a_b ... ok
+test app::itemset_glue::tests::fichier_version_3 ... ok
+test app::hotkey_glue::tests::table_du_jeu ... ok
+test app::mail_glue::tests::liste_de_trente_au_plus ... ok
+test app::morph_glue::tests::evolution_comme_archonia ... ok
+test app::mastery_glue::tests::onglets ... ok
+test app::morph_glue::tests::controle_de_l_equipement_sous_la_forme ... ok
+test app::mastery_glue::tests::arbres_et_categories ... ok
+test app::mastery_glue::tests::arbres_du_client ... ok
+test app::morph_glue::tests::compte_a_rebours ... ok
+test app::morph_glue::tests::deplacements_du_serveur_ignores ... ok
+test app::morph_glue::tests::formes_animales_et_echange_prive ... ok
+test app::morph_glue::tests::objets_refuses ... ok
+test app::effects_glue::tests::buffs_du_client_ensemble_zero_et_noeuds ... ok
+test app::nature_glue::tests::brouillard_borne_par_la_distance_de_trace ... ok
+test app::npc_glue::tests::lecture_des_tables ... ok
+test app::morph_glue::tests::metamorphose_comme_archonia ... ok
+test app::necklace_glue::tests::objets_on_off_distincts_des_runes ... ok
+test app::npc_glue::tests::balise_des_objets_de_quete ... ok
+test app::npc_glue::tests::boutique_des_shrines ... ok
+test app::npc_glue::tests::case_libre_de_la_banque ... ok
+test app::necklace_glue::tests::groupes_et_variantes_de_collier ... ok
+test app::npc_glue::tests::prix_des_pages_de_banque ... ok
+test app::npc_glue::tests::sysstr_garde_en_memoire ... ok
+test app::npc_glue::tests::donnees_du_serveur_avant_le_dossier_de_langue ... ok
+test app::npc_glue::tests::lignes_de_sysstr ... ok
+test app::npc_glue::tests::lignes_du_suivi ... ok
+test app::petbag_glue::tests::fichier_auto_pick_up ... ok
+test app::petbag_glue::tests::tables_et_regle_du_sac ... ok
+test app::petbag_glue::tests::textes_d_une_ligne ... ok
+test app::players_glue::tests::worn_items_follow_equip_change_and_removal ... ok
+test app::product_glue::tests::controle_de_fabrication ... ok
+test app::morph_glue::tests::donnees_du_client ... ok
+test app::repair_glue::tests::depot_dans_la_grille ... ok
+test app::portal_glue::tests::destinations_et_races ... ok
+test app::pvp_glue::tests::guildes_ennemies_et_hostiles ... ok
+test app::pvp_glue::tests::paliers ... ok
+test app::product_glue::tests::messages_de_resultat ... ok
+test app::product_glue::tests::tables_de_production ... ok
+test app::ride_glue::tests::potions_refusees_a_cheval ... ok
+test app::repair_glue::tests::silhouette_d_usure ... ok
+test app::shrine_glue::tests::icones_et_ordre_de_la_liste ... ok
+test app::addon_glue::tests::catalogue_des_objets_du_client ... ok
+test app::shrine_glue::tests::messages_des_shrines ... ok
+test app::return_login_glue::tests::controles_avant_l_envoi ... ok
+test app::pvp_glue::tests::textes_a_trous ... ok
+test app::refinery_glue::tests::recette_realisable ... ok
+test app::ride_glue::tests::cavalier_sur_la_selle_du_cheval ... ok
+test app::necklace_glue::tests::necklace_tables_du_client ... ok
+test app::siege_glue::tests::dates_filetime ... ok
+test app::petbag_glue::tests::familiers_du_jeu ... ok
+test app::shrine_glue::tests::donnees_du_client ... ok
+test app::siege_glue::tests::donnees_du_client ... ok
+test app::siege_glue::tests::donnees_du_siege ... ok
+test app::skills_glue::tests::niveaux_des_maitrises ... ok
+test app::skills_glue::tests::classes_et_barre ... ok
+test app::skills_glue::tests::competences_au_sol_selon_range ... ok
+test app::skills_glue::tests::infobulles_des_competences ... ok
+test app::skills_glue::tests::refus_de_lancement ... ok
+test app::ride_glue::tests::monture_gltf_du_client ... ok
+test app::skills_glue::tests::return_orb_dans_un_arbre ... ok
+test app::ride_glue::tests::white_horse_avec_le_client ... ok
+test app::sounds_glue::tests::anim_sounds_attach_to_the_animation_and_conditions_to_the_last_sound ... ok
+test app::sounds_glue::tests::skill_sounds_follow_the_effect_data_and_its_delay ... ok
+test app::sounds_glue::tests::move_sounds_select_by_mount_ground_and_foot ... ok
+test app::social_glue::tests::donnees_du_client ... ok
+test app::sounds_glue::tests::started_clip_maps_to_its_animation_data ... ok
+test app::auction_glue::tests::categories_du_client ... ok
+test app::social_glue::tests::actions_et_animations ... ok
+test app::skills_glue::tests::competences_au_sol_du_client ... ok
+test app::stones_glue::tests::effets_du_plus_haut_palier ... ok
+test app::stones_glue::tests::lueur_d_armure_du_plus_haut_palier ... ok
+test app::skills_glue::tests::infobulles_gardees_en_memoire ... ok
+test app::sounds_glue::tests::steps_fall_at_a_quarter_second_and_half_the_clip_later ... ok
+test app::stones_glue::tests::effet_sur_la_cible_selon_les_pierres ... ok
+test app::summons_glue::tests::codes_des_messages ... ok
+test app::stones_glue::tests::points_d_une_arme_sertie ... ok
+test app::titles_glue::tests::controles_avant_l_objectif ... ok
+test app::titles_glue::tests::categories_et_schola ... ok
+test app::tax_glue::tests::saisie_et_textes ... ok
+test app::product_glue::tests::donnees_du_client ... ok
+test app::sounds_glue::tests::client_tables_are_read ... ok
+test app::titles_glue::tests::distance_et_charisme ... ok
+test app::titles_glue::tests::cycle_d_un_titre ... ok
+test app::titles_glue::tests::table_des_titres_filtree ... ok
+test app::titles_glue::tests::boutons_selon_l_etat ... ok
+test app::trade_glue::tests::entree_du_menu ... ok
+test app::tax_glue::tests::donnees_du_client ... ok
+test app::stones_glue::tests::tables_du_client ... ok
+test app::trade_glue::tests::debut_et_fin ... ok
+test app::trade_glue::tests::demandeur_de_l_op_3 ... ok
+test assets::tests::icones_buffs_reelles_sans_substitut ... ignored, nécessite ARCHRUST_GAME_DIR et les packs du client
+test app::trade_glue::tests::objets_de_la_grille ... ok
+test app::trade_glue::tests::parchemin_de_la_grille_ex ... ok
+test assets::tests::no_client_mode_gives_placeholders ... ok
+test app::worldmap_glue::tests::carte_du_joueur ... ok
+test app::trade_glue::tests::grille_ex_et_objets_lies ... ok
+test assets::tests::client_paths_and_quality ... ok
+test assets::langue_tests::dossier_de_textes_par_langue ... ok
+test app::wanted_glue::tests::colonne_classe ... ok
+test app::wanted_glue::tests::messages_d_archonia ... ok
+test assets::tests::placeholder_colours_depend_on_name ... ok
+test assets::tests::tile_numbering ... ok
+test audio::tests::library_reads_scanned_pack_from_a_patch ... ok
+test audio::tests::normalizes_paths ... ok
+test audio::tests::settings_gain_is_quadratic_and_muted_is_silent ... ok
+test audio::tests::library_without_client_reports_missing_sounds_as_errors ... ok
+test boards::tests::couleurs_des_coups ... ok
+test audio::tests::spatial_attenuation_is_linear_from_0_to_6000 ... ok
+test audio::tests::spatial_pan_follows_the_camera_right_axis ... ok
+test boards::tests::chiffres_dessines_vers_la_gauche ... ok
+test boards::tests::couleurs_du_nom_et_de_la_guilde ... ok
+test boards::tests::lignes_centrees ... ok
+test boards::tests::critique_zoom_et_blanc ... ok
+test assets::tests::patched_ui_image_tiff_wins_over_pack ... ok
+test boards::tests::mentions_des_resultats ... ok
+test app::titles_glue::tests::donnees_du_client ... ok
+test camera::tests::camsetting_modes_and_specific ... ok
+test camera::tests::look_height_moves_to_the_face_up_close ... ok
+test camera::tests::modes_glide_to_their_defaults ... ok
+test camera::tests::objects_shorten_the_boom_too ... ok
+test camera::tests::render_depth_is_reversed ... ok
+test assets::tests::server_data_layer_comes_first ... ok
+test camera::tests::terrain_shortens_the_boom_then_releases_it ... ok
+test decor::tests::groupes_de_la_roue_a_eau ... ok
+test gltf_model::tests::channel_sampling ... ok
+test decor::tests::horaire_des_lumieres ... ok
+test decor::tests::lumiere_d_un_repere ... ok
+test gltf_model::tests::missing_image_becomes_placeholder ... ok
+test gltf_model::tests::sample_cube_parses ... ok
+test audio::tests::spatial_source_downmixes_to_stereo_with_shared_gains ... ok
+test boards::tests::chiffres_de_poids_faible_d_abord ... ok
+test boards::tests::parade_rebondit_puis_tremble ... ok
+test catalog::tests::csv_lists_ids ... ok
+test catalog::tests::no_client_gives_empty_catalogue ... ok
+test gltf_model::tests::hanim_ids_of_node_names ... ok
+test camera::tests::bounds_wheel_and_mouse_follow_archonia ... ok
+test gltf_model::tests::gltf_json_with_data_uri_and_neighbour ... ok
+test assets::tests::unreadable_pack_texture_falls_back_to_next_pack ... ok
+test hud::mastery_ui::tests::cases_et_niveaux ... ok
+test gltf_model::tests::strips_fans_and_uris ... ok
+test grass::tests::blade_matrix_and_options ... ok
+test hud::minimap_cursor_tests::curseur_autour_du_centre ... ok
+test hud::convert_ui::tests::codes_de_couleur ... ok
+test hud::party_ui::tests::faces_follow_race_and_class_letters ... ok
+test hud::status_ui::tests::caracteristiques_secondaires ... ok
+test hud::npc_ui::color_tests::couleurs_des_quetes ... ok
+test hud::status_ui::tests::formules_d_agpmcombat ... ok
+test hud::status_ui::tests::libelles_coupes_en_deux_lignes ... ok
+test hud::status_ui::tests::noms_de_race_et_de_classe ... ok
+test hud::status_ui::tests::onglets_et_valeurs ... ok
+test gltf_model::tests::client_gltf_mount_skin_and_clips ... ok
+test hud::tests::icone_karkaen_reelle ... ignored, nécessite ARCHRUST_GAME_DIR et les packs du client
+test hud::tests::icones_buffs_colonne_petite_uniquement ... ok
+test hud::tests::icones_buffs_reelles_dessinees_sans_fenetre ... ignored, nécessite ARCHRUST_GAME_DIR et les packs du client
+test hud::tests::minimap_quadrants_follow_archonia ... ok
+test hud::tests::money_has_thousand_separators ... ok
+test hud::tests::stats_merge_keeps_known_fields ... ok
+test hud::tests::window_controls_are_placed_relative_to_parents ... ok
+test hud::trade_ui::tests::statuts_de_l_autre ... ok
+test hud::options_ui::detail_tests::le_detail_remplace_la_liste_jusqu_au_prochain_choix ... ok
+test hud::tests::buffs_expiration_sans_creation_locale ... ok
+test hud::npc_ui::tests::decoupe_aux_balises_d_objets ... ok
+test hud::worldmap_ui::tests::carte_aller_retour ... ok
+test objects::tests::placement_matrix_scales_turns_then_translates ... ok
+test options::tests::refus_et_distances ... ok
+test hud::tests::buffs_replace_and_remove ... ok
+test hud::npc_ui::color_tests::suivi_avec_les_donnees_du_client ... ok
+test login_settings::tests::parses_login_settings ... ok
+test realmlist::tests::lit_archonia_test_ini ... ok
+test render::upload_cache::tests::apercu_reordonnancement_et_retour_scene ... ok
+test render::upload_cache::tests::premiere_ecriture_et_tous_les_champs ... ok
+test options::tests::round_trip_and_defaults ... ok
+test scene::tests::apparence_des_objets_a_l_evolution ... ok
+test scene::tests::vitesses_comme_archonia ... ok
+test app::combat_glue::tests::modele_au_sol_donnees_game ... ok
+test server_data::tests::dossiers_de_tables_seulement ... ok
+test objects::tests::modeles_qui_projettent_une_ombre ... ok
+test scene::tests::turn_follows_archonia_convention ... ok
+test render::tests::point_lights_pack ... ok
+test shadow::tests::prise_au_changement_de_secteur_puis_toutes_les_deux_minutes ... ok
+test shadow_render::tests::shader_de_passe_valide ... ok
+test shadow::tests::coordonnees_de_texture_et_decoupage ... ok
+test shadow::tests::lumiere_fixe_de_l_archonia ... ok
+test sky::tests::ciels_locaux_des_objets ... ok
+test realmlist::tests::parses_wow_style_lines ... ok
+test sky::tests::composition_par_composante_et_abri ... ok
+test sky::tests::musique_des_six_tranches_sans_doublon ... ok
+test sky::tests::musique_tiree_puis_suivante_dix_secondes_apres_la_fin ... ok
+test sky::tests::nuages_au_temps_de_jeu ... ok
+test sky::tests::textures_du_ciel_et_reflets ... ok
+test sky::tests::transition_lineaire_de_25_secondes_de_jeu ... ok
+test grass::tests::game_grass ... ok
+test sky::tests::etoiles_la_nuit_si_bit_2 ... ok
+test sky::tests::gabarit_lu_avec_ses_drapeaux ... ok
+test sky_render::tests::couleurs_lineaires_et_astre ... ok
+test server_data::tests::empreinte_et_lecture ... ok
+test sky_render::tests::direction_et_projection ... ok
+test targeting::tests::offscreen_only_falls_back_to_distance ... ok
+test targeting::tests::tab_cycles_skips_recent_and_wraps ... ok
+test targeting::tests::score_weighs_center_distance_and_attackers ... ok
+test sky_render::tests::shaders_valides ... ok
+test objects::tests::tullan_stairs_carry_the_walker ... ok
+test weather::tests::natureeffect_lu ... ok
+test weather::tests::meteo_demarrage_et_fondu_de_cinq_secondes ... ok
+test world::tests::heightfield_bilinear_and_raycast ... ok
+test world::tests::mapping ... ok
+test world::tests::moves_stop_before_blocked_cells_and_lines ... ok
+test hud::mastery_ui::tests::fenetres_du_client ... ok
+test weather::tests::particules_autour_de_la_camera ... ok
+test sky::tests::gabarits_du_client ... ok
+test world::tests::tullan_blocked_cells_stop_the_walk ... ok
+test worn::tests::casque_preserve_lors_du_remplacement_du_corps ... ok
+test water::tests::game_water ... ok
+test server_data::tests::emplacement ... ok
+test water::tests::stems ... ok
+test worn::tests::durabilite_nulle ... ok
+test water::tests::wave_cycle ... ok
+test worn::tests::ensembles_a_cheval ... ok
+test world::tests::triangle_heights_follow_the_drawn_ground ... ok
+test worn::tests::ensembles_comme_archonia ... ok
+test worn::tests::lecture_d_un_objet ... ok
+test zones::tests::game_clock_keeps_the_server_unix_time ... ok
+test zones::tests::game_clock_applies_the_time_speed ... ok
+test zones::tests::amf_cells_carry_the_region_in_the_high_half ... ok
+test worn::tests::visibilite_a_pied_et_a_cheval ... ok
+test zones::tests::game_clock_uses_the_server_time_when_known ... ok
+test zones::tests::sky_music_lists_every_slot ... ok
+test zones::tests::sky_slots_follow_archonia_periods ... ok
+test worn::tests::matrice_transform_data ... ok
+test worn::tests::noeuds_des_mains ... ok
+test zones::tests::sky_effect_sets_follow_the_slot ... ok
+test world::tests::rough_sector_geometry ... ok
+test zones::tests::no_client_means_no_region ... ok
+test hud::chat_ui::tests::fenetres_d_archonia ... ok
+test app::addon_glue::tests::catalogue_avec_les_donnees_du_serveur ... ok
+test decor::tests::decor_anime_du_client ... ok
+test hud::chat_ui::tests::options_d_onglet ... ok
+test app::convert_glue::tests::conditions_d_equipement ... ok
+test sky_render::tests::rendu_hors_ecran ... ok
+test hud::convert_ui::tests::objet_du_sac_glisse_chez_le_forgeron ... ok
+test worn::tests::objets_reels_du_client ... ok
+test app::worldmap_glue::tests::images_du_client ... ok
+
+test result: ok. 327 passed; 0 failed; 3 ignored; 0 measured; 0 filtered out; finished in 13.31s
+
+     Running unittests src\lib.rs (target\x86_64-pc-windows-msvc\debug\deps\archrust_netclient-ec6d3c98fc2c13db.exe)
+
+running 136 tests
+test auction::tests::recherche_et_rowset ... ok
+test auction::tests::ventes_du_joueur ... ok
+test buddy::tests::liste_des_ignores ... ok
+test chat::tests::chuchotements_bloques_et_absents ... ok
+test buddy::tests::demandes_du_client ... ok
+test admin::tests::niveau_mj_lu_du_paquet_op_0 ... ok
+test battleground::tests::annonce_aller_retour ... ok
+test boss::tests::butin_classement_degats ... ok
+test chat::tests::classes_d_affichage ... ok
+test archlord::tests::demande_d_evenement ... ok
+test boss::tests::demandes_du_client ... ok
+test auction::tests::demandes ... ok
+test buddy::tests::evenements_du_serveur ... ok
+test archlord::tests::paquets_du_serveur ... ok
+test boss::tests::liste_des_boss ... ok
+test auction::tests::accord_et_frais ... ok
+test combat::tests::coup_degats_et_pv_restants ... ok
+test combat::tests::objet_au_sol ... ok
+test chat::tests::prefixes_d_archonia ... ok
+test chat::tests::cri_de_zone ... ok
+test chat::tests::liste_des_membres ... ok
+test chat::tests::salons_aller_retour ... ok
+test chat::tests::suffixe_couleur ... ok
+test consumables::tests::signature_du_personnage ... ok
+test convert::tests::etat_et_reponses ... ok
+test ext::tests::hello_conforme ... ok
+test combat::tests::paquets_de_demande ... ok
+test consumables::tests::chaine_skill_init ... ok
+test consumables::tests::objets_orbe_et_echec ... ok
+test customize::tests::apparence_du_paquet_personnage ... ok
+test ext::tests::ack_recv_result ... ok
+test convert::tests::options_d_un_objet ... ok
+test ext::tests::langue ... ok
+test consumables::tests::oubli_chez_le_maitre ... ok
+test customize::tests::achat_et_accord ... ok
+test guild::tests::combattants_et_manches ... ok
+test guild::tests::entree_en_jeu_et_membres ... ok
+test guild::tests::invitation_et_message_systeme ... ok
+test guild::tests::paquets_envoyes ... ok
+test consumables::tests::recharge_par_modele ... ok
+test ext::tests::empreinte_des_tables ... ok
+test itemset::tests::demandes ... ok
+test itemset::tests::reponses ... ok
+test login::tests::world_list ... ok
+test mail::tests::controles_locaux ... ok
+test morph::tests::operations_du_personnage ... ok
+test guild::tests::second_passation_et_liste ... ok
+test itemset::tests::identifiant_des_objets ... ok
+test mail::tests::courriers_recus ... ok
+test consumables::tests::return_orb_et_release_of_agreement ... ok
+test morph::tests::annulation_envoyee ... ok
+test morph::tests::deplacement_et_drapeau_desarme ... ok
+test morph::tests::recharge_et_refus_des_objets ... ok
+test nature::tests::meteo_et_effet ... ok
+test ext::tests::envoi_et_validation ... ok
+test items::tests::demandes_d_objets ... ok
+test mail::tests::demandes_sur_un_courrier ... ok
+test npc::tests::journal_de_suivi_et_refus_faute_de_place ... ok
+test npc::tests::demandes_et_reponses ... ok
+test mail::tests::ecrire_une_lettre ... ok
+test party::tests::depart_exclusion_et_chef ... ok
+test party::tests::formation_dans_l_ordre_du_serveur ... ok
+test npc::tests::fonctions_d_un_pnj ... ok
+test party::tests::paquets_envoyes ... ok
+test nature::tests::timer_vitesse_et_temps ... ok
+test product::tests::pnj_de_production ... ok
+test product::tests::recettes_et_resultat ... ok
+test party::tests::zone_d_effet_et_bonus ... ok
+test pet_bag::tests::mini_cash_aller_retour ... ok
+test refinery::tests::demandes_et_reponses ... ok
+test repair::tests::pourcentage_et_cout_comme_archonia ... ok
+test repair::tests::reponses_du_serveur ... ok
+test pet_bag::tests::paquets_cash_et_sac ... ok
+test product::tests::fabriquer_et_recolter ... ok
+test remission::tests::demande_de_remission ... ok
+test party::tests::rappel_de_groupe ... ok
+test pvp::tests::guildes_ennemies ... ok
+test reconnect::tests::demande ... ok
+test shrine::tests::delai_d_entree ... ok
+test party::tests::reglages_et_echecs ... ok
+test return_login::tests::reconnexion_au_serveur_de_connexion ... ok
+test return_login::tests::demande_de_retour_a_la_selection ... ok
+test shrine::tests::demandes_du_client ... ok
+test shrine::tests::messages_et_compteurs ... ok
+test shrine::tests::shrine_aller_retour ... ok
+test return_login::tests::adresses ... ok
+test repair::tests::demandes_de_reparation ... ok
+test return_login::tests::reponses_du_serveur ... ok
+test ride::tests::octet_d_etat ... ok
+test siege::tests::commandes_du_client ... ok
+test skills::tests::effets_bonus_et_recharges ... ok
+test ride::tests::annonces_du_serveur ... ok
+test siege::tests::tableau_des_guerres ... ok
+test skills::tests::donnees_attachees_du_personnage ... ok
+test repair::tests::durabilite_dans_agpmitem ... ok
+test skills::tests::liste_et_lancement ... ok
+test summons::tests::schema_et_commande ... ok
+test tax::tests::commandes_du_client ... ok
+test tax::tests::formule_de_la_taxe ... ok
+test siege::tests::paquets_du_serveur ... ok
+test tax::tests::paquets_du_serveur ... ok
+test titles::tests::rejets ... ok
+test trade::tests::demandes ... ok
+test titles::tests::toutes_les_operations_aller_retour ... ok
+test skills::tests::points_heroiques ... ok
+test trade::tests::objets_proposes_et_repris ... ok
+test social::tests::envoi_et_reception ... ok
+test wanted::tests::mise_a_prix ... ok
+test wanted::tests::prime_de_base ... ok
+test ui_status::tests::op_1_recue_retire_la_meme_base_de_la_rangee ... ok
+test ui_status::tests::statut_d_interface_aller_retour ... ok
+test world::tests::character_update_decodes_movement_and_factor_point_hp ... ok
+test world::tests::character_view_decodes_equipped_item_packets ... ok
+test titles::tests::champs_aux_offsets_de_la_spec ... ok
+test trade::tests::reponses_du_serveur ... ok
+test trade::tests::schema_d_archonia ... ok
+test teleport::tests::demande_et_accord ... ok
+test world::tests::character_property_ops_read_the_raw_packet ... ok
+test wanted::tests::tableau_rang_et_notifications ... ok
+test world::tests::full_character_packet_of_another_player_keeps_position_and_head ... ok
+test world::tests::item_add_decodes_inventory_slot_from_agpmitem_packet ... ok
+test world::tests::removing_character_for_view_updates_world_client_cache ... ok
+test world::tests::view_roundtrip ... ok
+test world::tests::skill_buff_add_and_remove ... ok
+test world::tests::item_snapshot_accepts_full_packets_like_archcore ... ok
+test world::tests::octet_d_etat_monte_et_vue_optimisee ... ok
+test titles::tests::demandes_du_client ... ok
+test summons::tests::regles_du_registre ... ok
+test titles::tests::equiper_comme_archonia ... ok
+test world::tests::character_remove_for_view_is_not_a_self_character ... ok
+test world::tests::optimized_character_action_decodes_server_fields ... ok
+test ui_status::tests::barre_gardee_par_le_serveur ... ok
+test world::tests::character_stats_from_full_factors ... ok
+test ui_status::tests::casque_et_drapeaux_d_options ... ok
+test summons::tests::decodage_des_operations ... ok
+test world::tests::optimized_view_decodes_full_item_snapshot ... ok
+
+test result: ok. 136 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.24s
+
+     Running tests\extensions.rs (target\x86_64-pc-windows-msvc\debug\deps\extensions-5631412d9c927121.exe)
+
+running 3 tests
+test langue_annoncee_et_appliquee ... ok
+test serveur_avec_extensions ... ok
+test serveur_sans_extensions ... ok
+
+test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 3.13s
+
+     Running tests\return_login.rs (target\x86_64-pc-windows-msvc\debug\deps\return_login-68d79a9baa23031f.exe)
+
+running 3 tests
+test cle_refusee ... ok
+test monde_refus_puis_cle ... ok
+test connexion_op6_op7_et_liste ... ok
+
+test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.32s
+
+     Running unittests src\lib.rs (target\x86_64-pc-windows-msvc\debug\deps\archrust_patch-89b95da783f414a0.exe)
+
+running 12 tests
+test manifest::tests::versions ... ok
+test assets_dir::tests::file_names_are_asset_ids ... ok
+test assets_dir::tests::signature_follows_changes ... ok
+test manifest::tests::categories_and_sounds ... ok
+test manifest::tests::globs ... ok
+test manifest::tests::parse_manifest ... ok
+test settings::tests::round_trip_defaults_and_reset ... ok
+test stack::tests::sounds_and_problems ... ok
+test stack::tests::priority_and_archive ... ok
+test stack::tests::candidates_in_order ... ok
+test assets_dir::tests::folders_archives_and_loose_files ... ok
+test stack::tests::official_last_settings_and_moves ... ok
+
+test result: ok. 12 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.20s
+
+     Running unittests src\lib.rs (target\x86_64-pc-windows-msvc\debug\deps\archrust_protocol-35301e88423faf2b.exe)
+
+running 8 tests
+test framing::tests::splitter_reassembles_partial_chunks ... ok
+test handshake::tests::full_handshake ... ok
+test packet::tests::empty_block_does_not_set_flag ... ok
+test packet::tests::empty_block_keeps_next_fields_aligned ... ok
+test packet::tests::mini_roundtrip ... ok
+test packet::tests::packet_field_carries_single_length_prefix ... ok
+test framing::tests::frame_roundtrip_both_directions ... ok
+test packet::tests::roundtrip_login ... ok
+
+test result: ok. 8 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.05s
+
+   Doc-tests archrust_addons
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+   Doc-tests archrust_crypto
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+   Doc-tests archrust_data
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+   Doc-tests archrust_engine
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+   Doc-tests archrust_netclient
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+   Doc-tests archrust_patch
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+   Doc-tests archrust_protocol
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+

@@ -27,7 +27,7 @@ impl App {
         let now = Instant::now();
         let dt_ms = self.shadow2.last.map_or(0, |l| now.duration_since(l).as_millis() as u64);
         self.shadow2.last = Some(now);
-        let on = self.phase == super::Phase::InWorld && shadow::enabled(self.options.video.shadow) && self.assets.has_client();
+        let on = self.phase == super::Phase::InWorld && self.options.video.shadow_object() && self.assets.has_client();
         let Some(gpu) = self.gpu.as_mut() else { return };
         if !on {
             if self.shadow2.on {

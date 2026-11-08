@@ -43,6 +43,8 @@ use std::collections::{HashMap, HashSet};
 
 /// Déplacement au-delà duquel la liste se ferme (FUN_1406ea670 : `0x95 < distance`).
 const CLOSE_MOVE: f32 = 149.0;
+/// Marge du test « le sol est devant le portail » : le pied du modèle est posé à peu près au niveau du sol.
+const GROUND_MARGIN: f32 = 50.0;
 /// Destinations au plus (tableau de 20 d'AgcmUIEventTeleport).
 const MAX_TARGETS: usize = 20;
 /// Durée du mode combat après le dernier coup (`+0xb48 + 10000` de FUN_14016ea90).
@@ -149,7 +151,7 @@ pub(super) fn ui_events(assets: &Assets) -> HashMap<String, String> {
 }
 
 /// Message d'un événement d'interface (vide s'il n'en a pas).
-pub(super) fn ui_event_text(assets: &Assets, event: &str) -> String {
+pub(crate) fn ui_event_text(assets: &Assets, event: &str) -> String {
     ui_events(assets).remove(event).unwrap_or_default()
 }
 
@@ -202,6 +204,9 @@ struct OpenList {
 
 #[derive(Default)]
 pub struct PortalGlue {
+    /// Socles de gacha : (objet, effets posés et leur point), et tuiles déjà lues.
+    gachas: Vec<(u32, Vec<(super::effects_glue::Placed, Vec3)>)>,
+    gacha_tiles: HashSet<u32>,
     data: Option<PortalData>,
     tiles: HashSet<u32>,
     portals: Vec<PortalObject>,
@@ -362,6 +367,45 @@ impl App {
         if self.portal.open.as_ref().is_some_and(|o| Vec3::new(me.x - o.at.x, 0.0, me.z - o.at.z).length() > CLOSE_MOVE) {
             self.portal.open = None;
         }
+        self.gacha_frame(me);
+    }
+
+    /// Socles de gacha des tuiles proches (`Function=38`) : leur effet d'apparition, jeu 186 posé sous le nœud 991 de la
+    /// partie flottante, qui porte la lumière. Le nœud est pris dans la pose de repos ; l'effet ne suit pas le flottement.
+    /// Le clic, la fenêtre et le tirage sont dans `app_gacha.rs` (AgpmEventGacha, voir `docs/FORMATS.md`).
+    fn gacha_frame(&mut self, me: Vec3) {
+        let (sx, sy) = sector_of(me.x, me.z);
+        for dy in [-16, 0, 16] {
+            for dx in [-16, 0, 16] {
+                let tile = tile_of(sx + dx, sy + dy);
+                if self.portal.gacha_tiles.insert(tile) {
+                    let found = crate::objects::tile_gachas(&self.assets, tile);
+                    for (id, placement) in found {
+                        let spots = super::effects_glue::object_spawn_effects(&self.assets, placement.tid)
+                            .into_iter()
+                            .map(|p| {
+                                let node = u32::try_from(p.node).ok().filter(|n| *n > 0).and_then(|n| crate::objects::template_node_position(&self.assets, placement.tid, n)).unwrap_or(Vec3::ZERO);
+                                let at = placement.matrix().transform_point3(node + p.offset);
+                                (super::effects_glue::Placed { offset: Vec3::ZERO, node: 0, ..p }, at)
+                            })
+                            .collect();
+                        self.portal.gachas.push((id, spots));
+                    }
+                }
+            }
+        }
+        // Tracés aussi loin que les objets (`MapView`).
+        let range = crate::options::VIEW_BASE * self.options.video.map_factor();
+        for k in 0..self.portal.gachas.len() {
+            let id = self.portal.gachas[k].0;
+            for s in 0..self.portal.gachas[k].1.len() {
+                let (placed, at) = self.portal.gachas[k].1[s];
+                if at.distance(me) <= range {
+                    // Clé négative par objet et par effet.
+                    self.effects_keep_at(-((id & 0x00ff_ffff) as i32 * 8 + s as i32 + 1), placed, at);
+                }
+            }
+        }
     }
 
     /// Ferme la liste des destinations (`UI_Teleport`), par exemple au rappel de groupe accepté.
@@ -377,16 +421,15 @@ impl App {
         let inv = self.camera.view_proj(gpu.renderer.aspect()).inverse();
         let near = inv.project_point3(ndc);
         let dir = (inv.project_point3(Vec3::new(ndc.x, ndc.y, 1.0)) - near).normalize_or_zero();
-        // Portail le plus proche dont la sphère englobante coupe le rayon du curseur.
+        // Portail le plus proche dont le volume de sélection (`PICK_DFF`, sinon le modèle) est sous le curseur, et que le
+        // sol ne cache pas : avec la sphère englobante, un clic au sol près de la statue de Tullan ouvrait le portail.
+        let ground = self.cursor_ground_point().map(|g| (g - near).dot(dir));
         let hit = self
             .portal
             .portals
             .iter()
-            .filter_map(|p| {
-                let (center, radius) = self.objects.placed_bounds(&p.placement)?;
-                let t = (center - near).dot(dir);
-                (t > 0.0 && (near + dir * t).distance(center) <= radius).then_some((p.id, t))
-            })
+            .filter_map(|p| Some((p.id, self.objects.pick_distance(&self.assets, &p.placement, near, dir)?)))
+            .filter(|(_, t)| ground.is_none_or(|g| *t <= g + GROUND_MARGIN))
             .min_by(|a, b| a.1.total_cmp(&b.1))
             .map(|(id, _)| id);
         let Some(object) = hit else { return false };

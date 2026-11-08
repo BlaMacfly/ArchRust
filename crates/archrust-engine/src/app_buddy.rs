@@ -87,6 +87,10 @@ pub struct BuddyGlue {
     pub trade_menu: bool,
     /// « Trade » choisi : CID et nom du joueur ciblé, repris par `app_trade.rs`.
     pub trade_chosen: Option<(i32, String)>,
+    /// « Guild Invitation » du menu : nom, repris par `guild_frame_invite` (`/ginviter`).
+    pub guild_invite_chosen: Option<String>,
+    /// « Follow » du menu.
+    pub follow: Option<Follow>,
     /// Fichier `IgnoreList.txt` (dossier des SavedVariables).
     ignore_path: Option<PathBuf>,
     messages: Option<HashMap<String, String>>,
@@ -349,6 +353,7 @@ pub fn panel(ctx: &egui::Context, glue: &mut BuddyGlue, target: Option<(i32, Str
             if !glue.in_bans(&name) {
                 entries.push(TargetMenuUi::Ignore);
             }
+            entries.extend([TargetMenuUi::GuildInvite, TargetMenuUi::Follow]);
             let mut chosen = Vec::new();
             crate::hud::draw_target_menu(ctx, hud, assets, &mut glue.target_menu, &entries, &mut chosen);
             for c in chosen {
@@ -365,6 +370,8 @@ pub fn panel(ctx: &egui::Context, glue: &mut BuddyGlue, target: Option<(i32, Str
                     }
                     TargetMenuUi::AddFriend => add_by_name(glue, assets, &name, false, net),
                     TargetMenuUi::Ignore => add_by_name(glue, assets, &name, true, net),
+                    TargetMenuUi::GuildInvite => glue.guild_invite_chosen = Some(name.clone()),
+                    TargetMenuUi::Follow => glue.follow = Some(Follow { cid, last: None }),
                 }
             }
         }
@@ -397,7 +404,60 @@ pub fn panel(ctx: &egui::Context, glue: &mut BuddyGlue, target: Option<(i32, Str
     }
 }
 
+/// Suivi d'un personnage (`AgcmCharacter+0x52e0`, FUN_1404f9d70 → `0x1404b8c00` avec une distance de 500).
+#[derive(Debug, Clone, Copy)]
+pub struct Follow {
+    pub cid: i32,
+    last: Option<std::time::Instant>,
+}
+
+/// Distance gardée par « Follow » (`41 b8 f4 01 00 00` à `0x1404f9d8c`).
+const FOLLOW_DISTANCE: f32 = 500.0;
+/// Reprise de la marche au plus toutes les… (cadence d'Archonia non relevée).
+const FOLLOW_REFRESH: std::time::Duration = std::time::Duration::from_millis(500);
+
+/// La marche doit être relancée : le personnage suivi est à plus de 500 unités.
+fn follow_needed(me: glam::Vec3, target: glam::Vec3) -> bool {
+    glam::Vec2::new(me.x - target.x, me.z - target.z).length() > FOLLOW_DISTANCE
+}
+
+#[cfg(test)]
+mod follow_tests {
+    use super::*;
+
+    #[test]
+    fn distance_du_suivi() {
+        assert!(!follow_needed(glam::Vec3::ZERO, glam::Vec3::new(300.0, 900.0, 400.0)));
+        assert!(follow_needed(glam::Vec3::ZERO, glam::Vec3::new(400.0, 0.0, 400.0)));
+    }
+}
+
 impl App {
+    /// « Guild Invitation » et « Follow » du menu du joueur ciblé. Le suivi cesse quand le personnage quitte la vue,
+    /// ou quand le joueur marche ou attaque de lui-même (`+0x52e0` remis à 0 par FUN_1404b1e40, FUN_1404b1b90).
+    pub(super) fn buddy_target_menu_frame(&mut self) {
+        if let Some(name) = self.buddy.guild_invite_chosen.take() {
+            self.guild_slash("/ginviter", &name);
+        }
+        let Some(mut f) = self.buddy.follow else { return };
+        let Some(target) = self.entities.iter().find(|e| e.cid == f.cid).map(|e| e.position) else {
+            self.buddy.follow = None;
+            return;
+        };
+        let Some(me) = self.player.as_ref().map(|p| p.position) else { return };
+        if follow_needed(me, target) && f.last.is_none_or(|l| l.elapsed() >= FOLLOW_REFRESH) {
+            f.last = Some(std::time::Instant::now());
+            self.buddy.follow = Some(f);
+            if let Some(p) = &mut self.player {
+                p.destination = target;
+            }
+            self.walking = true;
+            if let Some(net) = &self.net {
+                net.send(Command::MoveTo { position: me, destination: target });
+            }
+        }
+    }
+
     /// Fichier `IgnoreList.txt` du dossier des SavedVariables.
     fn ignore_path(saved_dir: &Path) -> PathBuf {
         saved_dir.join(IGNORE_FILE)

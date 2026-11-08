@@ -14,8 +14,8 @@
 //!   z0 = (tuile % 100 − 25) × 16 × 6400 (+ 51 200 si quart / 2) ; raster de 237 px centré sur le
 //!   joueur affiché dans le contrôle de 148 px, masqué par `Main_Minimap_Alpha.png` ;
 //! * expérience par niveau : `ini/LevelUpExp.txt` (`level\texp`) ;
-//! * icônes des compétences : `ini/SKILLTEMPLATE.ini`, `SMALL_SKILL_TEXTURE` (Q…) sinon
-//!   `SKILL_TEXTURE` (P…), dans `texture/skill`.
+//! * icônes des améliorations : `ini/SKILLTEMPLATE.ini`, `SMALL_SKILL_TEXTURE` (Q…),
+//!   dans `texture/skill`, sans repli sur l'icône de la barre de sorts.
 //!
 //! **Choix d'ArchRust** : la rangée des améliorations est posée sous la minicarte (aucune fenêtre du
 //! fichier d'interface ne la décrit) ; la barre de raccourcis reste vide tant que le serveur n'envoie
@@ -73,6 +73,10 @@ pub use convert_ui::{colored_text, draw_convert, draw_convert_confirm, item_tool
 mod refinery_ui;
 pub use refinery_ui::{draw_cooldown, draw_recipes, draw_refinery, RecipeUi, RecipeView, RefineryUi, RefineryView};
 
+#[path = "hud_gacha.rs"]
+mod gacha_ui;
+pub use gacha_ui::{draw_gacha, GachaUi, GachaView, CELL as GACHA_CELL};
+
 #[path = "hud_repair.rs"]
 mod repair_ui;
 pub use repair_ui::{draw_equip_status, draw_repair, RepairUi, RepairView};
@@ -103,7 +107,7 @@ pub use itemset_ui::{draw_switch_editor, SwitchUi, SwitchView};
 
 #[path = "hud_chat.rs"]
 mod chat_ui;
-pub use chat_ui::{draw_chat_room, draw_create_room, draw_invite_received, draw_prompt, ChatRoomUi, ChatRoomView};
+pub use chat_ui::{draw_chat_menu, draw_chat_room, draw_create_room, draw_invite_received, draw_prompt, draw_tab_option, ChatMenuAction, ChatRoomUi, ChatRoomView, TabOptionUi};
 
 #[path = "hud_customize.rs"]
 mod customize_ui;
@@ -171,7 +175,7 @@ pub use dialogs_ui::{info_box, confirm_box, draw_bank_money, draw_buy_count, dra
 pub use guild_ui::{draw_battle_texts, draw_guild_warehouse, draw_guild_window, draw_gware_money, draw_message_box, GridCell, GuildEdit, GuildRow, GuildUi, GuildView, GwareItem, GwareView, ListSpec, PageColors};
 pub use portal_ui::{draw_buy_bank, draw_loading, draw_reconnect_hold, draw_remission, draw_teleport, BuyBankView, PortalUi, RemissionUi, RemissionView, TeleportRow, TeleportView};
 pub use skills_ui::{draw_quickbar, draw_skill_book, draw_trainer, BookEntry, BookView, Shortcut, SkillUi, SlotView, TrainerEntry, TrainerView, EXTRA_BELTS, QUICK_SLOTS};
-pub use npc_ui::{draw_bank, draw_npc_dialog, draw_quests, draw_shop, BankView, DialogView, NpcUi, QuestEntry, QuestState, QuestView, ShopEntry, ShopView};
+pub use npc_ui::{draw_bank, draw_npc_dialog, draw_quest_tracker, draw_quests, draw_shop, BankView, DialogView, NpcUi, QuestEntry, QuestState, QuestView, ShopEntry, ShopView, TrackedQuest};
 
 /// Fenêtres de guilde d'Archonia (voir `hud_guild.rs`).
 const GUILD_WINDOWS: [&str; 18] = [
@@ -440,6 +444,9 @@ pub struct HudState {
     images: HashMap<String, Option<UiImage>>,
     exp_table: Option<HashMap<i32, u64>>,
     skill_icons: Option<HashMap<i32, String>>,
+    buff_icons: Option<HashMap<i32, String>>,
+    /// Dernier état dessiné, seulement pour le diagnostic opt-in ; jamais une ligne par image stable.
+    buff_draw_trace: HashMap<i32, (bool, bool, [u32; 4])>,
     minimap: MinimapState,
     /// Sac affiché dans la fenêtre d'inventaire (onglets « Bag 1 » à « Bag 5 »).
     inventory_layer: i16,
@@ -448,6 +455,8 @@ pub struct HudState {
     item_icons: Option<HashMap<i32, String>>,
     /// Messages système récents (texte, arrivée), affichés en orange à droite comme Archonia.
     system_messages: Vec<(String, Instant)>,
+    /// Message au centre de l'écran : lignes et fin (`FUN_1405b8c70`).
+    center_message: Option<(Vec<(String, Color32)>, Instant)>,
     /// Plus haut PV vu par CID : le serveur n'envoie pas le maximum des monstres.
     max_hp_seen: HashMap<i32, i32>,
     /// Phrases de `uimessage.txt` (voir `hud_dialogs.rs`), chargées au premier besoin.
@@ -544,6 +553,8 @@ impl HudState {
     }
 
     pub fn add_buff(&mut self, skill_tid: i32, duration_ms: u64) {
+        log::debug!(target: "archrust_buffs", "hud_ajout tid={skill_tid} duree_ms={duration_ms} renouvellement={} avant={}", self.buffs.iter().any(|b| b.skill_tid == skill_tid), self.buffs.len());
+        self.buff_draw_trace.remove(&skill_tid);
         let expires =
             (duration_ms > 0).then(|| Instant::now() + Duration::from_millis(duration_ms));
         self.buffs.retain(|b| b.skill_tid != skill_tid);
@@ -565,6 +576,13 @@ impl HudState {
         self.system_messages.drain(..excess);
     }
 
+    /// Message au centre de l'écran (`FUN_1405b8c70`, durée −1) : 200 ms par octet de la première ligne, 7 s au moins.
+    pub fn show_center_message(&mut self, lines: Vec<(String, Color32)>) {
+        let Some(first) = lines.first() else { return };
+        let ms = (first.0.len() as u64 * 200).max(7000);
+        self.center_message = Some((lines, Instant::now() + Duration::from_millis(ms)));
+    }
+
     /// PV maximum d'un personnage quand le serveur le donne (facteurs de la vue d'un monstre).
     pub fn note_max_hp(&mut self, cid: i32, max_hp: i32) {
         self.max_hp_seen.insert(cid, max_hp.max(1));
@@ -576,13 +594,20 @@ impl HudState {
     }
 
     pub fn remove_buff(&mut self, skill_tid: i32) {
+        log::debug!(target: "archrust_buffs", "hud_retrait tid={skill_tid} present={}", self.buffs.iter().any(|b| b.skill_tid == skill_tid));
         self.buffs.retain(|b| b.skill_tid != skill_tid);
+        self.buff_draw_trace.remove(&skill_tid);
     }
 
     /// Retire les améliorations échues (le serveur envoie aussi un retrait, mais on n'attend pas).
     pub fn expire_buffs(&mut self) {
         let now = Instant::now();
-        self.buffs.retain(|b| b.expires.is_none_or(|t| t > now));
+        self.buffs.retain(|b| {
+            let keep = b.expires.is_none_or(|t| t > now);
+            if !keep { log::debug!(target: "archrust_buffs", "hud_expiration tid={} duree_initiale_ms={}", b.skill_tid, b.total_ms); }
+            keep
+        });
+        self.buff_draw_trace.retain(|tid, _| self.buffs.iter().any(|b| b.skill_tid == *tid));
     }
 
     /// Part de l'expérience du niveau courant, entre 0 et 1, si le niveau et la table sont connus.
@@ -609,6 +634,7 @@ impl HudState {
                 .chain(options_ui::OPTION_WINDOWS.iter())
                 .chain(convert_ui::CONVERT_WINDOWS.iter())
                 .chain(refinery_ui::REFINERY_WINDOWS.iter())
+                .chain(gacha_ui::GACHA_WINDOWS.iter())
                 .chain(repair_ui::REPAIR_WINDOWS.iter())
                 .chain(product_ui::PRODUCT_WINDOWS.iter())
                 .chain(buddy_ui::BUDDY_WINDOWS.iter())
@@ -640,7 +666,7 @@ impl HudState {
             // fenêtres qui les affichent tels quels ; rien à remplacer en anglais (`ini`).
             let lang = crate::assets::text_dir();
             if let Some(fr) = (lang != "ini").then(|| assets.table(lang, "UI_1024X768.ini").ok()).flatten() {
-                for w in list.iter_mut().filter(|w| ["Character_Status", "UI_WORLD_MAP", "UI_Teleport", "UI_BuyBank", "UI_Bank", "UI_SplitItem", "UI_NPCTrade_BuyStackCount", "UI_BankConfirm", "UI_Party", "UI_SelfCharacterMenu", "UI_TargetCharacterMenu", "UI_PartyOption", "UI_LG_CHARSELECT", "UI_ConfirmDeleteChar", "UI_LG_CHARCREATE", "UI_ReconnectHold", "UI_Remission", "UI_ConfirmRecall", "UI_SHRINEITEM_BUY_CONFIRM"].contains(&w.name.as_str()) || GUILD_WINDOWS.contains(&w.name.as_str()) || menu_ui::MENU_WINDOWS.contains(&w.name.as_str()) || options_ui::OPTION_WINDOWS.contains(&w.name.as_str()) || convert_ui::CONVERT_WINDOWS.contains(&w.name.as_str()) || refinery_ui::REFINERY_WINDOWS.contains(&w.name.as_str()) || repair_ui::REPAIR_WINDOWS.contains(&w.name.as_str()) || product_ui::PRODUCT_WINDOWS.contains(&w.name.as_str()) || buddy_ui::BUDDY_WINDOWS.contains(&w.name.as_str()) || mail_ui::MAIL_WINDOWS.contains(&w.name.as_str()) || trade_ui::TRADE_WINDOWS.contains(&w.name.as_str()) || auction_ui::AUCTION_WINDOWS.contains(&w.name.as_str()) || chat_ui::CHAT_WINDOWS.contains(&w.name.as_str()) || customize_ui::CUSTOMIZE_WINDOWS.contains(&w.name.as_str()) || wanted_ui::WANTED_WINDOWS.contains(&w.name.as_str()) || summons_ui::SUMMONS_WINDOWS.contains(&w.name.as_str()) || shrine_ui::SHRINE_WINDOWS.contains(&w.name.as_str()) || boss_ui::BOSS_WINDOWS.contains(&w.name.as_str()) || siege_ui::SIEGE_WINDOWS.contains(&w.name.as_str()) || tax_ui::TAX_WINDOWS.contains(&w.name.as_str())) {
+                for w in list.iter_mut().filter(|w| ["Character_Status", "UI_WORLD_MAP", "UI_Teleport", "UI_BuyBank", "UI_Bank", "UI_SplitItem", "UI_NPCTrade_BuyStackCount", "UI_BankConfirm", "UI_Party", "UI_SelfCharacterMenu", "UI_TargetCharacterMenu", "UI_PartyOption", "UI_LG_CHARSELECT", "UI_ConfirmDeleteChar", "UI_LG_CHARCREATE", "UI_ReconnectHold", "UI_Remission", "UI_ConfirmRecall", "UI_SHRINEITEM_BUY_CONFIRM"].contains(&w.name.as_str()) || GUILD_WINDOWS.contains(&w.name.as_str()) || menu_ui::MENU_WINDOWS.contains(&w.name.as_str()) || options_ui::OPTION_WINDOWS.contains(&w.name.as_str()) || convert_ui::CONVERT_WINDOWS.contains(&w.name.as_str()) || refinery_ui::REFINERY_WINDOWS.contains(&w.name.as_str()) || gacha_ui::GACHA_WINDOWS.contains(&w.name.as_str()) || repair_ui::REPAIR_WINDOWS.contains(&w.name.as_str()) || product_ui::PRODUCT_WINDOWS.contains(&w.name.as_str()) || buddy_ui::BUDDY_WINDOWS.contains(&w.name.as_str()) || mail_ui::MAIL_WINDOWS.contains(&w.name.as_str()) || trade_ui::TRADE_WINDOWS.contains(&w.name.as_str()) || auction_ui::AUCTION_WINDOWS.contains(&w.name.as_str()) || chat_ui::CHAT_WINDOWS.contains(&w.name.as_str()) || customize_ui::CUSTOMIZE_WINDOWS.contains(&w.name.as_str()) || wanted_ui::WANTED_WINDOWS.contains(&w.name.as_str()) || summons_ui::SUMMONS_WINDOWS.contains(&w.name.as_str()) || shrine_ui::SHRINE_WINDOWS.contains(&w.name.as_str()) || boss_ui::BOSS_WINDOWS.contains(&w.name.as_str()) || siege_ui::SIEGE_WINDOWS.contains(&w.name.as_str()) || tax_ui::TAX_WINDOWS.contains(&w.name.as_str())) {
                     let Some(fw) = UiWindow::parse(&fr, None, &w.name) else { continue };
                     for c in &mut w.controls {
                         if let Some(d) = fw.control(&c.name).and_then(|x| x.display.clone()) {
@@ -687,6 +713,19 @@ impl HudState {
         let map = self
             .skill_icons
             .get_or_insert_with(|| load_skill_icons(assets));
+        map.get(&tid).cloned()
+    }
+
+    fn buff_icon(&mut self, assets: &Assets, tid: i32) -> Option<String> {
+        let map = self.buff_icons.get_or_insert_with(|| {
+            match assets.table("ini", "SKILLTEMPLATE.ini") {
+                Ok(t) => buff_icons_from_table(&t),
+                Err(e) => {
+                    log::warn!(target: "archrust_buffs", "table_icones_illisible fichier=SKILLTEMPLATE.ini erreur={e:#}");
+                    HashMap::new()
+                }
+            }
+        });
         map.get(&tid).cloned()
     }
 }
@@ -748,6 +787,18 @@ fn load_skill_icons(assets: &Assets) -> HashMap<i32, String> {
     let Ok(t) = assets.table("ini", "SKILLTEMPLATE.ini") else {
         return HashMap::new();
     };
+    skill_icons_from_table(&t)
+}
+
+fn skill_icons_from_table(t: &IniTable) -> HashMap<i32, String> {
+    icon_names_from_table(t, false)
+}
+
+fn buff_icons_from_table(t: &IniTable) -> HashMap<i32, String> {
+    icon_names_from_table(t, true)
+}
+
+fn icon_names_from_table(t: &IniTable, buffs_only: bool) -> HashMap<i32, String> {
     let Some(header) = t.section("") else {
         return HashMap::new();
     };
@@ -763,11 +814,11 @@ fn load_skill_icons(assets: &Assets) -> HashMap<i32, String> {
         .iter()
         .filter_map(|s| {
             let tid: i32 = s.name.parse().ok()?;
-            let icon = small
-                .as_deref()
-                .and_then(|c| s.get(c))
-                .or_else(|| big.as_deref().and_then(|c| s.get(c)))?;
-            Some((tid, icon.trim().to_ascii_lowercase()))
+            // Les buffs seuls suivent FUN_14069dea0 ; livre et raccourcis gardent leur repli.
+            let icon = small.as_deref().and_then(|c| s.get(c)).or_else(|| {
+                if buffs_only { None } else { big.as_deref().and_then(|c| s.get(c)) }
+            })?.trim();
+            (!buffs_only || !icon.is_empty()).then(|| (tid, icon.to_ascii_lowercase()))
         })
         .collect()
 }
@@ -940,6 +991,7 @@ pub fn draw_inventory(
     let money = hud.stats.money;
     egui::Area::new(egui::Id::new("archonia-inventory"))
         .default_pos(layout.window_origin(&w))
+        .default_size(size)
         .movable(true)
         .constrain(true)
         .order(egui::Order::Middle)
@@ -1057,6 +1109,13 @@ pub fn draw_inventory(
                             if resp.clicked() {
                                 out.push(ItemUi::SalesBox);
                             }
+                        } else if c.name == "CONTROL_531" {
+                            // `InventoryWaste_DragDropItem` : la même confirmation que hors des fenêtres.
+                            if let Some(drag) = resp.dnd_release_payload::<ItemDrag>() {
+                                if !drag.worn && !drag.bank {
+                                    out.push(ItemUi::Destroy(drag.iid));
+                                }
+                            }
                         } else if c.name == "CONTROL_LoneyButton" {
                             // « Chantra Bag » : inventaire Cash (`CInven_UIOpen`, voir `app_petbag.rs`).
                             if resp.clicked() {
@@ -1098,6 +1157,24 @@ pub fn draw(ctx: &egui::Context, hud: &mut HudState, assets: &Assets, scene: &Hu
     }
     draw_buffs(ctx, hud, assets, &painter, &layout, &windows);
     draw_system_messages(hud, &painter, &layout);
+    draw_center_message(hud, &painter, &layout);
+}
+
+/// Message au centre de l'écran (`FUN_1405b8c70`) : deux lignes de couleur, à 40 % de la hauteur (`0x3ecccccd`).
+fn draw_center_message(hud: &mut HudState, painter: &egui::Painter, layout: &Layout) {
+    if hud.center_message.as_ref().is_some_and(|(_, until)| Instant::now() >= *until) {
+        hud.center_message = None;
+    }
+    let Some((lines, _)) = &hud.center_message else { return };
+    let size = (14.0 * layout.scale).max(10.0);
+    let x = layout.screen.center().x;
+    let mut y = layout.screen.top() + layout.screen.height() * 0.4;
+    for (text, color) in lines {
+        let font = FontId::proportional(size);
+        painter.text(Pos2::new(x + 1.0, y + 1.0), Align2::CENTER_TOP, text, font.clone(), Color32::from_black_alpha(200));
+        painter.text(Pos2::new(x, y), Align2::CENTER_TOP, text, font, *color);
+        y += size + 4.0;
+    }
 }
 
 /// Barre de saisie de la discussion placée comme dans Archonia.
@@ -1112,6 +1189,8 @@ pub struct ChatBar {
     /// Onglets de la discussion d'Archonia (`MainChat_Tab_a/b/c.png`, FUN_1407a30a0) : texture et
     /// taille d'origine, repos / survol / choisi.
     pub tabs: [Option<(egui::TextureId, [f32; 2])>; 3],
+    /// Bouton `MainChat_Btn_Option_a/b/c.png` (voir `app_chattabs.rs`).
+    pub option: [Option<(egui::TextureId, [f32; 2])>; 3],
 }
 
 /// Dessine `Chat_Input_Normal` (395 × 25, en bas à gauche en 1920 × 1080) et rend la place de sa
@@ -1145,6 +1224,7 @@ pub fn chat_bar(ctx: &egui::Context, hud: &mut HudState, assets: &Assets, privat
         .map(|c| layout.rect(origin, c.pos, c.size))
         .unwrap_or(window);
     let tabs = ["MainChat_Tab_a.png", "MainChat_Tab_b.png", "MainChat_Tab_c.png"].map(|t| hud.image(ctx, assets, t));
+    let option = ["MainChat_Btn_Option_a.png", "MainChat_Btn_Option_b.png", "MainChat_Btn_Option_c.png"].map(|t| hud.image(ctx, assets, t));
     let id = (w.name == "Chat_Input_Private").then(|| w.control("Input_ID").map(|c| layout.rect(origin, c.pos, c.size))).flatten();
     Some(ChatBar {
         window,
@@ -1152,6 +1232,7 @@ pub fn chat_bar(ctx: &egui::Context, hud: &mut HudState, assets: &Assets, privat
         id,
         scale: layout.scale,
         tabs,
+        option,
     })
 }
 
@@ -1483,21 +1564,17 @@ fn draw_minimap(
     if hidden {
         return;
     }
-    // Cône de la caméra puis repère du joueur, au centre.
+    // Curseur de la caméra puis repère du joueur, au centre. FUN_1408d45d0 : `Main_Minimap_Cursor.png` à sa taille
+    // (45 × 110), coin haut gauche en (centre − largeur / 2, centre − (hauteur − 10) / 2), tourné autour du centre du
+    // contrôle ; l'angle y rejoint celui de la caméra à vitesse bornée (`+0x4dd8`, non repris : la rotation suit
+    // directement). L'ancien calage (pied de l'image au centre, × 0,8) rejetait le triangle au bord de la carte.
     let center = view_rect.center();
     let f = Vec2::new(scene.camera_forward.x, scene.camera_forward.z);
     if f.length() > 1e-3 {
         if let Some((tex, orig)) = hud.image(ctx, assets, "Main_Minimap_Cursor.png") {
             let f = f.normalized();
             let right = Vec2::new(-f.y, f.x);
-            let (wd, ht) = (orig[0] * layout.scale * 0.8, orig[1] * layout.scale * 0.8);
-            // L'image pointe vers le haut ; son pied est le centre.
-            let corners = [
-                center + f * ht - right * wd / 2.0,
-                center + f * ht + right * wd / 2.0,
-                center + right * wd / 2.0,
-                center - right * wd / 2.0,
-            ];
+            let corners = minimap_cursor_corners(center, f, right, orig, layout.scale);
             let uvs = [
                 Pos2::new(0.0, 0.0),
                 Pos2::new(1.0, 0.0),
@@ -1509,7 +1586,7 @@ fn draw_minimap(
                 mesh.vertices.push(egui::epaint::Vertex {
                     pos: *p,
                     uv,
-                    color: Color32::from_white_alpha(200),
+                    color: Color32::WHITE,
                 });
             }
             mesh.add_triangle(0, 1, 2);
@@ -1526,6 +1603,15 @@ fn draw_minimap(
             Color32::WHITE,
         );
     }
+}
+
+/// Coins (haut gauche, haut droit, bas droit, bas gauche) du curseur de la minicarte : l'image, qui pointe vers le haut,
+/// a son centre 5 px sous le centre du contrôle dans son propre repère, puis tourne autour de ce centre (FUN_1408d45d0).
+fn minimap_cursor_corners(center: Pos2, up: Vec2, right: Vec2, orig: [f32; 2], scale: f32) -> [Pos2; 4] {
+    let half = orig[0] * scale / 2.0;
+    let top = (orig[1] - 10.0) * scale / 2.0;
+    let bottom = (orig[1] + 10.0) * scale / 2.0;
+    [center + up * top - right * half, center + up * top + right * half, center - up * bottom + right * half, center - up * bottom - right * half]
 }
 
 /// Boutons de la minicarte reliés par leur rappel (`Action=3:`) : `Minimap_Plus_Click` /
@@ -1715,21 +1801,44 @@ fn draw_buffs(
             ),
             Vec2::splat(icon),
         );
-        let icon_name = hud.skill_icon(assets, b.skill_tid);
-        let tex = icon_name.as_deref().and_then(|name| {
-            let key = format!("skill:{name}");
+        let icon_name = hud.buff_icon(assets, b.skill_tid);
+        if icon_name.is_none() {
+            let key = format!("buff-missing:{}", b.skill_tid);
             if !hud.images.contains_key(&key) {
-                let loaded = assets.texture(name).ok().map(|img| UiImage {
-                    orig: [img.width as f32, img.height as f32],
-                    tex: upload(ctx, &format!("hud-{key}"), &img),
+                log::warn!(target: "archrust_buffs", "icone_absente tid={} colonne=SMALL_SKILL_TEXTURE repli=false", b.skill_tid);
+                hud.images.insert(key, None);
+            }
+        }
+        let tex = icon_name.as_deref().and_then(|name| {
+            let key = format!("buff:{name}");
+            if !hud.images.contains_key(&key) {
+                let loaded = assets.texture(name).map(|img| {
+                    if img.from_patch.as_deref() == Some("substitut") {
+                        log::warn!(target: "archrust_buffs", "texture_substitut tid={} icone={name}", b.skill_tid);
+                    } else {
+                        log::debug!(target: "archrust_buffs", "texture_chargee tid={} icone={name} taille={}x{} patch={:?}", b.skill_tid, img.width, img.height, img.from_patch);
+                    }
+                    UiImage {
+                        orig: [img.width as f32, img.height as f32],
+                        tex: upload(ctx, &format!("hud-{key}"), &img),
+                    }
+                }).map_err(|e| {
+                    log::warn!(target: "archrust_buffs", "texture_illisible tid={} icone={name} erreur={e:#}", b.skill_tid);
                 });
-                hud.images.insert(key.clone(), loaded);
+                hud.images.insert(key.clone(), loaded.ok());
             }
             hud.images
                 .get(&key)
                 .and_then(|i| i.as_ref())
                 .map(|i| i.tex.id())
         });
+        if log::log_enabled!(target: "archrust_buffs", log::Level::Debug) {
+            let zone = [r.min.x, r.min.y, r.max.x, r.max.y].map(f32::to_bits);
+            let state = (tex.is_some(), r.intersects(layout.screen), zone);
+            if hud.buff_draw_trace.insert(b.skill_tid, state) != Some(state) {
+                log::debug!(target: "archrust_buffs", "hud_dessin tid={} icone={icon_name:?} texture={} dans_ecran={} zone={r:?} ecran={:?}", b.skill_tid, state.0, state.1, layout.screen);
+            }
+        }
         match tex {
             Some(t) => {
                 painter.image(
@@ -1850,8 +1959,117 @@ pub fn draw_resurrection_with(ctx: &egui::Context, hud: &mut HudState, assets: &
 }
 
 #[cfg(test)]
+mod minimap_cursor_tests {
+    use super::*;
+
+    /// FUN_1408d45d0 : image de 45 × 110 tournée autour du centre, 50 px au-dessus, 60 au-dessous.
+    #[test]
+    fn curseur_autour_du_centre() {
+        let c = Pos2::new(100.0, 100.0);
+        let [tl, tr, br, bl] = minimap_cursor_corners(c, Vec2::new(0.0, -1.0), Vec2::new(1.0, 0.0), [45.0, 110.0], 1.0);
+        assert_eq!((tl, tr), (Pos2::new(77.5, 50.0), Pos2::new(122.5, 50.0)));
+        assert_eq!((bl, br), (Pos2::new(77.5, 160.0), Pos2::new(122.5, 160.0)));
+        // Regard vers la droite de l'écran : le haut de l'image passe à droite du centre.
+        let [tl, ..] = minimap_cursor_corners(c, Vec2::new(1.0, 0.0), Vec2::new(0.0, 1.0), [45.0, 110.0], 2.0);
+        assert_eq!(tl, Pos2::new(200.0, 55.0));
+    }
+}
+
+#[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    #[ignore = "nécessite ARCHRUST_GAME_DIR et les packs du client"]
+    fn icone_karkaen_reelle() {
+        let game = std::env::var_os("ARCHRUST_GAME_DIR").expect("ARCHRUST_GAME_DIR requis");
+        let assets = Assets::new(Some(game.into()), &[]);
+        let icons = load_item_icons(&assets);
+        assert_eq!(icons[&20091], "l000f39a");
+        assert!(assets.texture_found(&icons[&20091]));
+        let image = assets.texture(&icons[&20091]).unwrap();
+        assert_eq!((image.width, image.height, image.uv_scale), (50, 50, 1.0));
+        let ctx = egui::Context::default();
+        let mut hud = HudState::default();
+        assert!(texture_icon(&ctx, &mut hud, &assets, &icons[&20091]).is_some());
+        assert_eq!(hud.images[&format!("icon:{}", icons[&20091])].as_ref().unwrap().orig, [50.0, 50.0]);
+    }
+
+    #[test]
+    fn icones_buffs_colonne_petite_uniquement() {
+        let table = IniTable::parse("3=SKILL_TEXTURE\n9=SMALL_SKILL_TEXTURE\n[4]\n3=P0000004\n9= Q0000004 \n[1]\n3=P0000001\n[8]\n3=P0000008\n9=   \n");
+        let icons = buff_icons_from_table(&table);
+        assert_eq!(icons.len(), 1);
+        assert_eq!(icons[&4], "q0000004");
+        assert!(buff_icons_from_table(&IniTable::parse("3=SKILL_TEXTURE\n[4]\n3=P0000004\n")).is_empty());
+        let skills = skill_icons_from_table(&table);
+        assert_eq!(skills[&1], "p0000001", "Dual Slash conserve son icône de livre et de raccourci");
+        assert_eq!(skills[&4], "q0000004");
+        assert_eq!(skill_icons_from_table(&IniTable::parse("3=SKILL_TEXTURE\n[4]\n3=P0000004\n"))[&4], "p0000004");
+        let assets = Assets::new(None, &[]);
+        let mut hud = HudState::default();
+        hud.skill_icons = Some(skills);
+        hud.buff_icons = Some(icons);
+        assert_eq!(hud.skill_icon(&assets, 1).as_deref(), Some("p0000001"));
+        assert_eq!(hud.buff_icon(&assets, 1), None);
+        assert_eq!(hud.buff_icon(&assets, 4).as_deref(), Some("q0000004"));
+        // Le dessin doit lui aussi ignorer l'icône générale de Dual Slash.
+        hud.add_buff(1, 120_000);
+        let ctx = egui::Context::default();
+        let screen = Rect::from_min_size(Pos2::ZERO, Vec2::new(1920.0, 1080.0));
+        for _ in 0..2 {
+            let _ = ctx.run(egui::RawInput { screen_rect: Some(screen), ..Default::default() }, |ctx| {
+                let painter = ctx.layer_painter(egui::LayerId::background());
+                draw_buffs(ctx, &mut hud, &assets, &painter, &Layout::new(screen), &[]);
+            });
+        }
+        assert_eq!(hud.images.len(), 1, "aucune texture générale chargée pour un buff sans petite icône");
+        assert!(hud.images.contains_key("buff-missing:1"));
+        assert_eq!(hud.skill_icon(&assets, 1).as_deref(), Some("p0000001"));
+    }
+
+    #[test]
+    fn buffs_expiration_sans_creation_locale() {
+        let mut hud = HudState::default();
+        hud.expire_buffs();
+        assert!(hud.buffs.is_empty());
+        hud.add_buff(4, 120_000);
+        hud.add_buff(8, 0);
+        hud.add_buff(229, 1000);
+        hud.buffs.last_mut().unwrap().expires = Some(Instant::now() - Duration::from_secs(1));
+        hud.expire_buffs();
+        assert_eq!(hud.buffs.iter().map(|b| b.skill_tid).collect::<Vec<_>>(), vec![4, 8]);
+        assert_eq!(hud.buffs[0].total_ms, 120_000);
+        hud.remove_buff(4);
+        assert_eq!(hud.buffs.iter().map(|b| b.skill_tid).collect::<Vec<_>>(), vec![8]);
+    }
+
+    #[test]
+    #[ignore = "nécessite ARCHRUST_GAME_DIR et les packs du client"]
+    fn icones_buffs_reelles_dessinees_sans_fenetre() {
+        let game = std::env::var_os("ARCHRUST_GAME_DIR").expect("ARCHRUST_GAME_DIR requis");
+        let assets = Assets::new(Some(game.into()), &[]);
+        let mut hud = HudState::default();
+        // TID et noms vérifiés dans SKILLTEMPLATE et le pack texture/skill.
+        let cas = [(4, "q0000004"), (8, "q0000008"), (229, "q00000e5"), (328, "q0000148"), (452, "q00001c4")];
+        for (tid, nom) in cas {
+            assert_eq!(hud.buff_icon(&assets, tid).as_deref(), Some(nom));
+            hud.add_buff(tid, 120_000);
+        }
+        hud.expire_buffs();
+        assert_eq!(hud.buffs.len(), cas.len());
+        let ctx = egui::Context::default();
+        let screen = Rect::from_min_size(Pos2::ZERO, Vec2::new(1920.0, 1080.0));
+        let windows = hud.windows(&assets).to_vec();
+        let sortie = ctx.run(egui::RawInput { screen_rect: Some(screen), ..Default::default() }, |ctx| {
+            let painter = ctx.layer_painter(egui::LayerId::background());
+            draw_buffs(ctx, &mut hud, &assets, &painter, &Layout::new(screen), &windows);
+        });
+        for (_, nom) in cas {
+            let id = hud.images[&format!("buff:{nom}")].as_ref().expect("image chargée").tex.id();
+            assert!(sortie.shapes.iter().any(|s| matches!(&s.shape, egui::epaint::Shape::Mesh(m) if m.texture_id == id && m.vertices.iter().all(|v| screen.contains(v.pos) && v.pos.y < screen.center().y))), "icône {nom} absente du haut de l'écran");
+        }
+    }
 
     #[test]
     fn stats_merge_keeps_known_fields() {

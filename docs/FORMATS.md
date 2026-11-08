@@ -369,6 +369,21 @@ praticables : voir « Sol et blocage »).
   (`FUN_140196ab0`, cellule globale = x × 0,0025 + 6400) ; un départ bloqué ne bouge pas (ArchRust
   laisse en sortir). Autour de Tullan, les remparts et talus sont bloqués (`C343,412` : 40
   cellules) ; c'est ce qui empêche de « grimper aux murs » (point 26).
+* **Formats AMF** — le lecteur natif `FUN_140223d30` distingue les versions `0x1000` à
+  `0x1003`. `1000` : en-tête de 8 octets, cellules de 6 octets converties en `u32` par
+  `u16(cellule+2) | (u8(cellule+4) << 16)` ; `1001` : même conversion après 12 octets
+  d'en-tête. `1002` copie les cellules de 4 octets puis efface les bits absolus 12–15 ;
+  `1003` conserve leur valeur. Les versions modernes portent la largeur : 34 grilles
+  locales font 8 × 8. Le drapeau d'en-tête `0x2` provoque un retour avant la grille
+  (1 728 entrées locales). Le parseur actuel d'ArchRust suppose 12 octets et 16 × 16
+  sans ce dispatch : c'est un écart à corriger, pas une règle native.
+* **Diagonale et indexation AMF** — colonne x dans une ligne z. Le bit absolu 0 choisit
+  la diagonale des triangles et la formule d'interpolation de hauteur dans les deux
+  consommateurs examinés. Le bit absolu 12 force un argument de hauteur à 100 000 dans
+  `FUN_140528370` ; son nom métier reste ouvert, comme les bits 11 et historiques 13–15.
+  Les 18 échecs de décompression recensés sont une référence deux octets avant le tampon
+  de sortie, non contrôlée par le décodeur natif. Un octet dépend alors d'un état mémoire
+  inconnu ; le rejet du parseur sûr ne permet pas de reconstruire cette valeur.
 * **Segments** — après la grille, `u32` nombre puis `{x1, y1, z1, x2, y2, z2, f32}` (28 octets,
   écriture `FUN_1402241d0`) : murs à ne pas franchir (Anchorville : 4 à 18 par secteur, aucun à
   Tullan). Un segment ne bloque que le déplacement de sens opposé à sa normale `(−dz, dx)` de
@@ -397,7 +412,9 @@ praticables : voir « Sol et blocage »).
   cellule de 400 unités a ses six sommets propres : UV0 et les UV des couches vont de 0 à 1 par
   cellule (une répétition de texture par cellule ; quelques bases en atlas 2 × 2, pas de 0,5) ;
   les UV des masques sont en pas de 0,25 (case de l'atlas 4 × 4) ; les étages inutilisés gardent un
-  UV par défaut en pas de 0,5 ; UV5 n'est pas lu.
+  UV par défaut en pas de 0,5. Le shader général lit UV5 et le transmet à `oT5.xy`,
+  mais les couches des chemins examinés s'arrêtent à UV4. Les voies optimisées
+  remappent explicitement UV4/UV3 vers les étages 5/6.
 * **Masque** — `texture\world\a0001c0t.tif` : TIFF 256 × 256 non compressé, quatre échantillons
   (RGB blanc + un échantillon `ExtraSamples = 0`, « non précisé ») ; le quatrième porte 16 masques
   de transition 64 × 64 (bords, coins, coins inversés, plein noir, plein blanc). Les décodeurs
@@ -406,9 +423,15 @@ praticables : voir « Sol et blocage »).
   (`examples/terrain_mask_check.rs`) : sur les bords entre une cellule à une couche et une
   voisine sans couche, l'alpha lu tel quel vaut 1 vers une voisine de la texture de la couche et 0
   vers une voisine de même base (écart moyen 0,02 à 0,03, contre 0,3 à 0,8 si la case est retournée).
-* **Rendu** — couleur = base(UV0), puis pour chaque couche k :
+* **Rendu ArchRust** — couleur = base(UV0), puis pour chaque couche k :
   `mix(couleur, couche(UV 2k+2), masque(UV 2k+1).a)`, multipliée par la couleur prélit des
   sommets et l'éclairage. Les textures reçoivent des mipmaps (moyennes 2 × 2) au téléversement.
+  Le pipeline natif utilise `BLENDCURRENTALPHA`, des variantes en plusieurs passes
+  `SRCALPHA/INVSRCALPHA`, et selon la voie une modulation, `SPECULAR` et `TEMP`.
+  Ses seuls nombres d'entrées supplémentaires traités sont 0, 2 et 4 : avec 6
+  (trois couches supplémentaires), le répartiteur dessine la base seule. Les états
+  récupérés ne prouvent pas une équivalence numérique sur tout pilote, notamment
+  lorsque `ALPHAOP=DISABLE` accompagne un `COLOROP` actif.
 * **Texture `R`** — 128 × 128 pour tout le secteur, elle n'est référencée par aucun matériau du
   sol détaillé ; c'est celle du sol grossier (voir « Distance de vue, eau et herbe »).
   L'ancien rendu la plaquait sur l'UV0 de chaque cellule (le secteur entier réduit 16 fois par
@@ -663,7 +686,7 @@ sacs `CONTROL_Inven_Layer0…4` (« Bag 1 »…« Bag 5 », `INV_TAB.png` / `INV
 `CONTROL_Inventory_Grid` de 258 × 258 (`Grid=0:0:2:2:50:50` : 5 × 5 cases de 50 px, écart 2), argent
 `InventoryMoney` (paquet CHARACTER, champ 8), titre, corbeille, cadenas, boutons « Sell All », « Sell »,
 « Expanded Inventory », « Chantra Bag ». Un objet du sac a le statut 2 et sa case `[sac, ligne,
-colonne]` dans le mini `ITEM_GRID` (champ 7 d'AGPMITEM) ; ArchCore n'utilise que 4 × 4 cases de 4 sacs.
+colonne]` dans le mini `ITEM_GRID` (champ 7 d'AGPMITEM) ; ArchCore utilise les 5 × 5 cases des 5 sacs.
 Icône : colonne `TEXTURE` d'`ItemTemplateAll.ini`, fichier `l%07x` de `texture/item` en hexadécimal
 (vérifié : au-delà de 255, seuls les noms hexadécimaux existent). À l'entrée en jeu, les objets
 arrivent dans le champ 6 de `OPT_VIEW` op 2 sous forme de paquets AGPMITEM complets mis bout à bout
@@ -843,9 +866,9 @@ Réglages restés inactifs (ArchRust ne sait pas les honorer) :
   la ligne « Objets » (`OP_NaturalObj`, herbe AgcmGrass `FUN_140597390`, objets naturels) de la fenêtre
   `Option_Detail_Nature`, « Avancé » d'`OP_Shadow` (`OP_ShadowChar`, `…Self`, `…Object`), `OP_Water` (AgcmWater, eau non dessinée),
   `OP_AntiAliasing` (sans effet, comme dans Archonia : voir « Multiéchantillonnage »), `OP_HighOptimization` (libellé « V-Sync » ; liste non
-  relevée, présentation fixée à `AutoVsync`), `OP_WideView` (`FUN_1407080f0` non relevé), `OP_BrightVal`
-  (gamma), `OP_AutoExposure`, `OP_MatEffect`, `OP_Impact`, `OP_Bloom`, `OP_BloomVal` (post-traitements
-  AgcmPostFX absents) ;
+  relevée, présentation fixée à `AutoVsync`), `OP_BrightVal` (gamma) ; listes remplies, modifiables et
+  enregistrées dans `[video]` mais sans rendu (voir « Retour de bug n° 2 — interface du client » plus bas) :
+  `OP_WideView`, `OP_AutoExposure`, `OP_MatEffect`, `OP_Impact`, `OP_Bloom`, `OP_BloomVal`, `OP_SpeedTuning` ;
 - Affichage : `OP_ViewHelpBaloonTip`, `OP_ViewHelpBaloonChat`, `OP_ViewHelpUclie` (pas de bulles d'aide ni
   de discussion), `OP_ViewSelfBars` (barres PV/PM sous le nom, `FUN_1408291b0`, non dessinées),
   `OP_VisiblePartyBuffIcon` (pas d'icônes d'améliorations dans la fenêtre du groupe) ; `OP_VisibleViewItem`,
@@ -892,6 +915,10 @@ Création `FUN_140563f90`, dessin `FUN_1408270a0` → `FUN_140825a20` (nom) et `
 - **Police** : police n° 0 d'AgcmFont (`FUN_1404ed830`), « Georgia » 11 pour l'anglais, l'allemand,
   le français et l'espagnol (`FUN_1401417b0`), « 굴림 » 13 en coréen. Ombre d'un pixel, alpha au
   plus 0xB8 (`FUN_1404f0f80`). Les couleurs de police sont en `0xAABBGGRR`.
+  La taille 11 est une hauteur en pixels demandée au moteur FreeType embarqué, avec largeur 0
+  (`FUN_1409cb5d0`, appel `0x1404ee0f3`), pas une taille GDI en points. La face provient de
+  `texture/notpacked/af1.grp` (Georgia Bold). Une échelle optionnelle multiplie cette taille,
+  puis tronque en entier et impose un minimum de 8 (`0x1404edb0b`–`0x1404edb29`).
 - **Nom** : centré (`x = ancre − largeur/2`), haut à `ancre − hauteur de police`.
 - **Couleur du nom** (`board+0xEC`) : joueur blanc ; PNJ `0xFF0099FF` (#FF9900) ; monstre la
   colonne `name_color` du gabarit public (`CharacterTemplatePublic.ini`, absente de ce client,
@@ -968,10 +995,15 @@ n'est **jamais dessiné** : le passage de niveau n'a pas de mention.
   (`/aace plates on`).
 
 Écarts :
-- échelle des panneaux fixée à 1 (Archonia prend le maximum de 1 et d'un facteur du moteur,
-  `+0x82c` de `0x140f8a1c0`, non identifié) ;
+- constante locale d'échelle des panneaux fixée à 1. Le facteur natif `+0x82c` de
+  `0x140f8a1c0` est désormais identifié : `[Patch_Option] UIScale` d'`Ini/COption.ini`,
+  borné de 1 à 2, choix 1 / 1,25 / 1,5 / 1,75 / 2, appliqué avec `max(1, UIScale)`.
+  ArchRust possède déjà un zoom egui via la CVar `uiScale` : son équivalence doit être
+  vérifiée avant d'ajouter une deuxième multiplication ;
 - « Georgia » est lue dans `%WINDIR%\Fonts\georgia.ttf` et rendue par egui ; sa taille 11 est
-  prise comme taille egui (Archonia la passe à GDI) ; sans ce fichier, police par défaut d'egui ;
+  prise comme taille egui. Archonia charge Georgia Bold depuis `af1.grp` et demande une hauteur
+  de 11 pixels à FreeType ; l'équivalence des métriques et du rendu reste à vérifier.
+  Sans le fichier système, ArchRust emploie la police par défaut d'egui ;
 - non gérés, faute de données d'ArchCore : couleurs de hors-la-loi et de premier attaquant,
   relations (guerre de races, champs de bataille, combats de guildes), guildes alliées,
   titres, marques `TAG_*`, emblèmes, charisme, monture ;
@@ -1046,11 +1078,15 @@ Corrections :
   mains, pieds) ; seuls `Part` et `TEXTURE` changent. ArchRust ajoutait le modèle entier par objet,
   par-dessus les vêtements par défaut (`DEFAULT_ARMOUR_DFF`) : plusieurs surfaces au même endroit se
   disputaient la profondeur. Désormais (`scene::entity_meshes_with_equipment`), une armure de partie
-  2, 5, 6 ou 7 ne garde que sa pièce et remplace la pièce de cette partie. Les atomics ne portant pas
-  leur partie (extensions : 0x112 LOD, 0x1f pipeline, 0xfffff001), elle est déduite des os de la
-  peau (`scene::atomic_part`) : mains 101/102 et doigts, pieds 103/104 et 1024/1078, jambes si les
-  cuisses 41/51 pèsent plus que les bras 21/22/31/32, corps sinon. Reste à faire : la texture propre
-  à chaque pièce (`TEXTURE` ≠ `BASE_DFF`).
+  2, 5, 6 ou 7 ne garde que sa pièce et remplace la pièce de cette partie. Le code
+  actuel d'ArchRust déduit cette partie des os (`scene::atomic_part`). La reprise
+  native du 4 novembre établit un autre critère : l'entier `PartID` du plugin
+  utilisateur `0x11f` de la géométrie, copié à `atomic+0x114`, puis comparé au `Part`
+  normalisé (16–29 deviennent 2–15). Les modèles `b0000060.ecl` et `d0000150.ecl`
+  corroborent les parties 2 corps, 4 bras, 5 mains, 6 jambes, 7 pieds.
+  `TEXTURE` sélectionne l'icône `L%07x` de l'interface ; `BASE_DFF` sélectionne
+  `D%07x.ECL`, dont les matériaux portent les textures 3D. Leur différence ne demande
+  pas une substitution de texture d'armure dans ces chemins.
 - **Poids** renormalisés dans `animation::deform`.
 - **Normale dégénérée** : `deform` garde la normale de bind, et le shader remplace une normale
   nulle ou NaN (`safe_normal`), qui noircissait toute la couleur.
@@ -1070,7 +1106,9 @@ Corrections :
 
 **Rendu** — les géométries skinnées gardent leur liaison au squelette ; le moteur rejoue
 l'attente (variantes tirées selon les taux à chaque fin de cycle) ou la course quand l'entité se
-déplace, et réécrit positions et normales à 30 Hz au plus, à moins de 8 000 unités de la caméra.
+déplace, et réécrit positions et normales à chaque image près du joueur ou de la caméra
+(2 000 unités), à 30 Hz au plus au-delà et jusqu'à 8 000 unités, pas du tout hors du champ de la
+caméra (le temps du clip avance ; retour du champ : pose réécrite à l'image suivante).
 Vérifié en jeu sur ArchCore : TID 96 debout bras le long du corps au lieu de la pose de bind, et
 foulée de course pendant un `/goto`. Sondes : `examples/ean_probe.rs` (conventions) et
 `examples/ean_motion.rs` (amplitude des clips).
@@ -1100,6 +1138,14 @@ foulée de course pendant un `/goto`. Sondes : `examples/ean_probe.rs` (conventi
   en flottants et les passe comme angles X et Y du mini-paquet `CHAR_MOVE` (champs 4 et 5) qu'il
   reconstruit avec position, destination, cible suivie et distance de suivi : le champ 13 est
   l'orientation initiale (ArchCore y met `degree_y` des apparitions de PNJ).
+* **Mise à jour `CHARACTER` op 1** — le récepteur `FUN_140173f10` appelle
+  `FUN_140176730`, qui décode les champs 4/5 flottants de `CHAR_MOVE`. Dans la branche
+  reçue du serveur, avec `personnage+0x6b8` non nul et le drapeau `0x8`, il arrête le
+  déplacement puis applique X/Y via `FUN_14016a070` si X diffère de la sentinelle
+  −123, avant de réappliquer la position. Le setter écrit immédiatement les champs
+  `+0x180/+0x184` et la matrice, sans interpolation temporelle interne. Ce constat
+  suppose les deux angles présents et finis ; il ne démontre pas l'absence de
+  lissage dans tous les rappels et chemins de rendu.
 
 ArchRust tourne l'entité vers sa destination tant qu'elle marche, garde l'angle à l'arrêt, et part
 du champ 13 de la vue (sinon de la direction position → destination). Vérifié en jeu sur ArchCore :
@@ -1113,6 +1159,10 @@ en marche vers +X puis vers −Z, le TID 96 court face à sa destination ; arriv
   `DEFAULT_FACE_NUM`, `DEFAULT_FACE0000…` (noms `*.RWS` d'origine, ex. `H_KNI_M_FACE_A.RWS`),
   `DEFAULT_RENDER_TYPE_FACE…` (`6:0`), les mêmes colonnes pour `HAIR`, puis `CUSTOMIZE_REVIEW`.
   TID 96 : 24 visages, 58 coiffures.
+  `DEFAULT_RENDER_TYPE_FACE/HAIR%04d` se lit avec `%d:%d` : le suffixe est l'indice de
+  variante, le premier entier un sélecteur de rendu, le second une valeur indépendante.
+  Le mode 6 est suivi jusqu'au répartiteur `FUN_1404d42e0`, aux callbacks et aux lots du
+  moteur ; le nom du mode et les consommateurs généraux du second entier restent à établir.
 * **Fichiers** — `FUN_14074fc70` (visages) et `FUN_14074ff40` (cheveux) parcourent la liste du
   modèle ; quand l'octet `+0x2ad` du modèle est non nul, chaque fichier est
   nommé `"%s%.*x.%s"` avec `V` et 7 chiffres, soit `V%07x.ecl` = `TID × 0x200 + i` pour le visage i
@@ -1121,8 +1171,13 @@ en marche vers +X puis vers −Z, le TID 96 court face à sa destination ; arriv
   `v000c000…v000c017` et `v0006000…v0006039`, autant que les compteurs de la table ; TID 1 et 3 :
   14 et 15 visages en `v00002xx` / `v00006xx`. Les packs ne contenant que ces noms `v…`, c'est ce
   chemin qui sert (sinon le nom `*.RWS` de la table serait chargé tel quel).
-* **Choix** — le paquet `CHARACTER` porte le visage (champ 20) et la coiffure (champ 21) ; ArchRust
-  les lit pour le joueur, prend 0 pour les autres personnages et retombe sur 0 hors liste.
+* **Choix** — le paquet `CHARACTER` porte le visage (champ 20) et la coiffure (champ 21).
+  La vue initiale optimisée les transporte aussi : mini `OPT_VIEW_CHAR`, champs **16**
+  (visage) et **17** (coiffure), octets signés, absence = −1. `FUN_140260d40` les transmet
+  à `FUN_140175bb0`, qui applique les valeurs ≥0 aux champs `+0xbf0/+0xbf4` du personnage.
+  ArchRust lit les champs CHARACTER pour le joueur, prend encore 0 à l'apparition des
+  autres personnages et retombe sur 0 hors liste : le transport initial identifié est
+  un écart d'implémentation à raccorder, pas un champ réseau encore inconnu.
 * **Squelette** — chaque clump de tête porte sa propre copie de la hiérarchie (88 frames, 86 nœuds
   HAnim) et une peau à 86 os, dans le même ordre que `b0000060.ecl` : visage et cheveux se
   déforment avec le clip du corps, sans attache à un os. Vérifié en jeu : TID 96 avec visage et
@@ -1144,16 +1199,23 @@ Dossier `sound/` du client (lecteur : `crates/archrust-data/src/soundpak.rs`, mo
 
 ### `soundpak.info`
 
-Petit-boutiste, chaînes terminées par 0 dans des champs de taille fixe, un ou plusieurs groupes à la
-suite jusqu'à la fin du fichier :
+Petit-boutiste, chaînes terminées par 0 dans des champs de taille fixe. Le lecteur natif
+`FUN_1405c8380` utilise un nombre global de groupes :
 
 ```text
-groupe (40 octets) : u32 version (= 1), char[8] nom ("EFFECT"), 6 × u32 réservés
-                     (observés : 1001, 0, 1002, 0, 1003, 0), u32 nb_packs
+u32 nb_groupes (= 1 dans ce fichier)
+groupe (36 octets) : char[32] nom ("EFFECT"), u32 nb_packs
   pack (20 octets) : u8 drapeau (0x02), char[7] fichier ("SD.pk"), char[4] préfixe ("SD"),
                      u32 nb_entrées, u32 dernier_index
     entrée (28 octets) : u32 index, char[12] nom ("SD0000.WAV"), u32 décalage, u32 taille, u32 id
 ```
+
+Les six anciens « u32 réservés » sont les 24 derniers octets du tampon de nom,
+après son premier zéro dans le groupe observé. Le drapeau de pack est sauté par
+ce lecteur ; l'`id` final d'entrée est conservé dans les métadonnées mais n'est pas
+consommé par le chargeur suivi. Leurs sens historiques restent ouverts. Le chargeur
+transmet le chemin du pack, le décalage et la taille à FMOD. Le parseur ArchRust
+actuel représente encore le préfixe comme une version et des groupes de 40 octets.
 
 Le décalage et la taille situent le WAV complet (en-tête `RIFF` compris) dans le `.pk` du même
 dossier ; `dernier_index` peut dépasser `nb_entrées - 1` (trous de numérotation : `NP.pk` compte
@@ -1243,6 +1305,11 @@ boucle). Relevés détaillés d'Archonia.exe dans les en-têtes de ces fichiers.
 * **Compétences** — `ini/charactertemplateskillsound.ini`, `SKILL_EFFECT_SOUND<r><e><n>` =
   `rang:équipement:n°:fichier` (rang < 200) : son de la donnée d'effet n° `n°` des `SKILL_EFFECT_DATA`
   du même rang (rang dans `UsableSkillTName`) et du même ensemble ; joué avec l'effet, après son délai.
+* **Montures** — le départ d'animation passe de `FUN_1404be4f0` à `FUN_1404bd870`,
+  puis au rappel commun `FUN_1405695d0`, avec l'entité et l'état d'animation de la
+  monture. Le choix 2D/3D utilise cet identifiant, avec le forçage 2D éventuel ; il
+  ne remplace pas simplement le modèle sonore par celui du cavalier. Ce relevé
+  établit le déclenchement statique, sans observation sonore en jeu.
 * **Actions sociales** — colonne SOUND de `SOCIAL_PC.txt`. `ini/socialsound.ini` (`[111]
   soundname=A`…) n'est cité nulle part dans Archonia.exe : non lu.
 * **3D** (AgcmSound sur FMOD) — sons des autres personnages (volume 1,0, source suivie) et effets son
@@ -1250,8 +1317,14 @@ boucle). Relevés détaillés d'Archonia.exe dans les en-têtes de ces fichiers.
   joués ici ; 0 boucle = en boucle jusqu'à la fin du jeu). Un son ponctuel n'est lancé qu'à 8 000
   unités au plus de la caméra ; atténuation **linéaire** de 1 à 0 entre 0 et 6 000 unités
   (`FMOD_3D_LINEARROLLOFF`, distances de `SoundResource`) ; auditeur = caméra. Panoramique :
-  loi à puissance constante sur l'axe droit de la caméra (choix d'ArchRust, celle de FMOD n'est pas
-  relevée). `AudioSettings::spatial = false` (comme `Sound=2D` de `COption.ini`) : tout en 2D.
+  loi à puissance constante sur l'axe droit de la caméra dans ArchRust. La DLL FMOD
+  2.2.3 fournie a été relevée séparément : pour la voie mono 3D vers sa paire stéréo,
+  la réduction mathématique est `s=sin(azimut)×sinc(étalement/2)`,
+  `L=G×(sqrt(2−s²)−s)/2`, `R=G×(sqrt(2−s²)+s)/2` (angles en radians dans ces formules,
+  `sinc(x)=sin(x)/x`, limite 1 en zéro). Au centre, chaque gain vaut environ
+  `G/√2`. Les approximations flottantes natives, paramètres effectifs, entrées
+  non mono et traitement final empêchent d'en déduire une équivalence sonore globale.
+  `AudioSettings::spatial = false` (comme `Sound=2D` de `COption.ini`) : tout en 2D.
 * **Ambiances** — Archonia joue à la fois, en boucle, tous les effets son des cinq `EffectIndex` de la
   tranche composée (`FUN_140581fd0`) ; la composante « effets » (bit 8 des gabarits) se choisit
   séparément des couleurs (`FUN_14057ed30`) : un ciel local d'événement Nature (`Function=11`,
@@ -1279,7 +1352,10 @@ Le lecteur des sons (`EffectSet::sounds`) est gardé pour l'ambiance. Le décoda
 FUN_1408db680 → FUN_1408da030) et lit exactement les 3 428 jeux du client :
 
 ```text
-fiche (124 o) : 0x24 durée (ms), 0x2c drapeaux du jeu, 0x68 nb textures, 0x6c nb bases,
+fiche (124 o) : 0x24 durée (ms), 0x28 mode temporel, 0x2c drapeaux du jeu,
+       0x30..0x3c quatre mots préservés au rôle ouvert,
+       0x40 centre xyz + rayon (sphère initiale), 0x50 deux coins AABB (24 o),
+       0x68 nb textures, 0x6c nb bases,
        0x70 nb dépendances, 0x74/0x78 bloc
 bloc : textures (0x84 o : u32 indice, char[64] nom, char[64] masque), dépendances (12 o), bases
 dépendance : u32 parent (drapeau 2 : 16 bits bas = indice de base, 16 bits hauts = ID de nœud HAnim
@@ -1309,7 +1385,8 @@ Boucle d'animation : 2 = répétée, 1 = une fois (déduit). Déclencheurs : `ee
 `rang:équipement:n°:EID:x:y:z:échelle:nœud:délai`, rang = indice du nom dans les `UsableSkillTName`
 de `CharacterTemplatePublic.ini`), `charactertemplateeventeffect.ini` (`n:EID:x:y:z:échelle:nœud:délai`,
 conditions filtrées par FUN_1405748b0 : 0x1 apparition (FUN_14056a0e0, effets permanents), 0x40
-attaque (FUN_140568e80), 0x100 coup reçu (FUN_140571d80) observés ; 0x200 mort déduit).
+attaque (FUN_140568e80), 0x100 coup reçu (FUN_140571d80) ; 0x200 mort confirmé par le rappel
+d'animation de type 5 (reprise ci-dessous).
 
 Relevés ajoutés (code : `effset.rs`, `effect_particles.rs`, `app_effects.rs`) :
 
@@ -1317,7 +1394,8 @@ Relevés ajoutés (code : `effset.rs`, `effect_particles.rs`, `app_effects.rs`) 
 base (mémoire) : +0x2c délai, +0x30 durée, +0x38 boucle, +0x3c drapeaux ; rotation (a, b, c) :
   a autour de Y, b autour de X, c autour de Z ; ordre Z·Y·X (objets : X·Y·Z) (FUN_1408f83d0)
 boucle (FUN_1408ec780) : 0 une fois (la base s'arrête), 1 temps brut, 2 répétée, 3 aller-retour
-particules (type 1, 204 o) : max, intervalle, 64 o non lus, vitesse±, décalage±, nombre+écart,
+particules (type 1, 204 o) : max, intervalle, 64 o lus/réécrits sans usage opérationnel établi,
+  vitesse±, décalage±, nombre+écart,
   2 vitesses d'angle, 2×(min, max), direction, axe, cône, drapeaux de direction (1 sphère,
   2 cône, 0x40 sans repère, 0x80 aucune), forme (0 point, 1 boîte, 2 cercle, 3 sphère), dims,
   rotation±, vie+écart, gravité, vent, écarts (FUN_1408f8f30) ; p = p0 + v·t·échelle
@@ -1381,9 +1459,32 @@ RtAnim des objets (animation 7, AgcdEffAnim_RtAnim : vtable 0x140d8fa58, lecture
 ArchRust (`app_effects.rs`, `EffectsGlue::object_pose`) : pose du clip à `t_base / 1000` s, mondes
 des cadres et peau déformée dans cette pose, nœuds des dépendances lus dans la même pose.
 
-Pas encore rendus : lumières projecteurs (aucune dans les données), repère libre des bases
-(drapeaux 0x28/0x40), effets des objets équipés (0x40 sur les objets), conditions 0x2, 0x8, 0x10,
-0x20, 0x80, ailes et capes des colliers.
+Pas encore rendus dans ces chemins : lumières projecteurs (aucune dans les données), repère
+libre des bases (drapeaux 0x28/0x40), effets des objets équipés (0x40 sur les objets), conditions
+0x2, 0x8, 0x10, 0x20, 0x80. Les ailes et capes des colliers sont décrites dans le retour de bug n° 2.
+
+## Gacha (« Fortune Gate », type 0x57)
+
+AgpmEventGacha (constructeur `FUN_14027cd00`, réception `FUN_14027e640`), AgcmUIEventGacha (`FUN_1405ff280`) et le
+contrôle AcUIGacha (`FUN_140880a60`, `FUN_140880df0`). Code : `archrust_netclient::gacha`, `app_gacha.rs`,
+`hud_gacha.rs`.
+
+- **Paquet** (drapeaux 2) : 0 op (I8), 1 EVENT_BASE (objet du monde, fonction 38), 2 CID, 3 à 7 INT32, 8 bloc mémoire.
+  Op 0 (clic, champ 3 = `*(événement+8)`) → op 1 : 3 code, 4 TID et 5 nombre de l'objet demandé, 6 or, 7 charisme,
+  8 TID de la bande (u32). Op 2 (« Start ») → op 3 : 3 TID tiré, 4 code.
+- **Codes** (`FUN_1405ffe00`, boîte d'information centrée 412 × 180) : 1 `sysstr` 729 (objets), 2 730 (or), 3 739
+  (charisme), 4 731 (sac plein), 5 732, 6 733 (niveau). L'op 1 ouvre `UI_Gacha` pour 0 à 4 (sans message), 5 et 6
+  ne donnent que le message ; elle est ignorée pendant un tirage.
+- **Coût** (`Gacha_TextData`, `FUN_1405ff580`) : objet demandé → 812 « You need %s %d. », ou 734 avec de l'or ; sinon
+  735 (or) suivi de 811 (charisme). Les `%s` et `%d` sont pris chacun dans l'ordre.
+- **Bande** (`GachaWindow`, type 16, 300 × 50 en (33, 91)) : cases de 50 ; au repos `p = 0,065 × ms` ; résultat :
+  cible `(7 N − 2 + i) × 50`, départ `p mod 50 N`, 2000 ms, `départ + (1 − cos πt)/2 × (cible − départ)` ; objet au
+  centre `((p / 50) mod N + 2) mod N` (nom dans `Gacha_ItemName`, `U_LB_A1.wav` ou `U_LB_A2.wav` à chaque changement) ;
+  rendu : icônes 50 × 50 en `k × 50 − p mod 50` gardées entre 0 et 320 de la fenêtre, `Gacha_cover.png` en (0, 68)
+  316 × 95, à l'arrêt `Gacha_zoom.png` en (107, 66) et l'icône tirée en (120, 79) à leur taille. Fin : `sysstr` 736
+  « You obtained %s item. ». « Start » et « Close » sont sans effet pendant l'arrêt.
+- **Écart** : Archonia pose le drapeau 0x400 du personnage pendant l'arrêt (sens non relevé) ; ArchRust ne bloque que
+  les nouvelles demandes. Commandes d'essai : `/gacha`, `/gacha start`, `/gacha fermer`.
 
 ## Production (récolte, cuisine, alchimie)
 
@@ -1654,7 +1755,7 @@ Sans paquet, Archonia part de 12 h 00 à la vitesse ×6 (1 h de jeu = 10 min, un
 couleur (texture `SKY00001`, une lune : les tranches de jour ont `Sun=-1`) ; `EffectInterval`,
 `EffectIndex/Rate_01..05` ; `BackGroundMusic` ; `WeatherEffect1/2`). Chaque clé présente met un bit de
 la tranche : 1 couleurs et lumières, 2 brouillard, 4 nuages / horizon / astre, 8 effets, 0x10 musique,
-0x20 météo ; la composition copie chaque composante séparément. `WeatherEffect1` : bit 2 étoiles (0-5 h
+0x20 météo ; la composition copie chaque composante séparément. `WeatherEffect1` : masque 0x2 étoiles (0-5 h
 et 18-23 h), bit 0x20 gabarit abrité (s'impose pendant la météo), autres bits inconnus. Textures :
 `ini/alefskysetting.ini` `[Texture]` `NN=SKY000NN.tif` (nuages = masques alpha blancs, `SKY00000` = bande
 d'horizon opaque en bas, transparente en haut). Reflets : `ini/LensFlare.ini` (`FN=n:fichier`,
@@ -1666,6 +1767,22 @@ pendant un effet de nature, `NEFFECT_SKYSET` (98 neige, 99 pluie) sauf gabarit a
 25 000 ms de temps de jeu à chaque changement de tranche ou de gabarit (couleurs et distances linéaires,
 fondu croisé des couches), aucune variation à l'intérieur d'une tranche. Nuages : défilement = vitesse ×
 Δ temps de jeu × 1,5 × k.
+
+Le ciel local utilise le canal auxiliaire 1 des secteurs, avec six `u32` par cellule :
+un sélecteur pour chacune des six composantes, distinctes des six tranches horaires.
+Le demi-mot haut contient l'ID signé de ciel, le bas une distance horizontale
+quantifiée approximativement par `tronc(distance / 400)`. Un candidat d'ID différent
+remplace l'ancien seulement si sa distance est strictement inférieure à l'ancien
+entier bas multiplié par 400. L'ordre de chargement et la quantification peuvent
+donc modifier le résultat ; ce n'est pas une moyenne spatiale ni une recherche
+exacte du centre le plus proche. Le sélecteur ne lit ensuite que les ID hauts et
+applique séparément les composantes admises par le gabarit.
+
+`EffectInterval` est initialisé à 1000 puis copié sans conversion depuis la tranche
+`+0x84` jusqu'à l'état courant `+0x19c0`. Les 899 instructions accessibles de la
+boucle principale de ciel et les trois récepteurs d'événement examinés ne l'emploient
+pas comme minuteur. Son unité et son éventuel consommateur hors de ces chemins
+restent ouverts ; la valeur par défaut ne démontre pas des millisecondes.
 
 **Météo** (`ini/natureeffect.ini`) : `[Textures]` `TEXTURE_NAME=n:fichier` (`NE_Snow`, `NE_Rain`,
 `NE_Pollen`, 8 × 8), blocs `NEFFECT_ID`, `TEXTURE_ID`, `NEFFECT_TYPE` (0 flocons qui oscillent, 1-3
@@ -1936,8 +2053,9 @@ Relevés dans Archonia (`party.rs`, `social.rs`, `npc.rs` d'`archrust-netclient`
   `AGPMADMIN_CHAR` (drapeaux 1) `{op i8, CID i32, nom char[49], niveau MJ i16, ? i8, compte char[49]}`. Niveau > 0 :
   clic gauche sur la carte du monde (carte de zone ou de région) ou sur la minicarte = commande MJ `/move x,z`.
 - **Carte du monde** (`UI_WORLD_MAP`, touche M) : `ini/worldmap.ini`, section par carte `{GroupID, ParentGroupID,
-  XStart, ZStart, XEnd, ZEnd, RegionTexture, UIActiveAreaSX/SY/EX/EY}`. L'image (`texture/worldmap`, 1024 × 1024)
-  porte le cadre de la fenêtre ; px = SX + (x − XStart) / (XEnd − XStart) × (EX − SX), py idem avec z (vérifié sur
+  XStart, ZStart, XEnd, ZEnd, RegionTexture, UIActiveAreaSX/SY/EX/EY}`. L'image (pack `texture/ui`, 1024 × 1024 :
+  FUN_14068b8f0 la charge par `FUN_14078e8a0(contrôle, carte + 0x104, "Texture\\UI\\", 1)` ; le pack `texture/worldmap`,
+  sans les 92 images nommées comme `Human_Limelight_N.png`, n'est lu que par FUN_140702c40, jamais appelée) porte le cadre de la fenêtre ; px = SX + (x − XStart) / (XEnd − XStart) × (EX − SX), py idem avec z (vérifié sur
   Tullan). Le continent (sans parente) a des boutons de zone (contrôles type 21, `…_A` / `…_B`).
 - **Fenêtre du personnage** : caractéristiques = `FACTOR_STATUS` (0 CON, 1 STR, 2 INT, 3 DEX, 4 CHA, 6 WIS, × 100) ;
   onglets et lignes = `ini/characterpropertyview.xml` (`CharacterPropertyAttack/Defense/Attribute/PVP`, nom
@@ -2149,6 +2267,42 @@ Relevés détaillés (adresses, niveaux de confiance) : en-têtes de `camera.rs`
   `Shadow`, `VH_BALOONCHAT`, `VS_BARS`.
 - **Capture** : Impr. écran → `screen\SC%y%m%d-%H%M%S.bmp` dans le dossier du jeu.
 
+## Ciblage au sol, effet de pierres sur la cible, effets secondaires
+
+- **Compétences au sol** : `range` 7, 701 ou 702 de `SKILL_SPEC.txt` (Meteoric Shower, Narcolepsy, Imposed Fatigue :
+  701 ; Concealment, `<Hero>ShadowIllusion`, `<Gracelynn>ShadowIllusion` : 702). La 1ʳᵉ demande ne vérifie ni n'envoie
+  rien : repère au sol, largeur = `area_r` × 100 du niveau, `targeting.ini` `[Textures2]` (0-2 `ET_Alkadia_*` pour
+  l'ArchLord, 3-5 `ET_Selection_*`) : 128 sous 400, 256 sous 700, sinon 512. Il suit le curseur. Bouton gauche relâché
+  sur le sol : AGPMSKILL op 7, champ 2 le joueur, action (mini `AGPMSKILL_ACTION`) champ 0 = 0, 1 = base du joueur,
+  **3 = point visé (`Vec3F`)**, 4 = 0. Échap annule ; le clic droit n'annule pas. Le serveur doit centrer la zone sur le
+  champ 3 pour ces compétences. Voir `app_groundcast.rs`.
+- **`ee_ss_target.txt`** (`LEVEL`, `SPIRIT_STONE`, `EID`, `OFFSET_*`, `SCALE`, `NODE_ID`, `GAP`) : à chaque coup qui touche, selon
+  l'arme de l'attaquant (partie 10, sinon 9) et ses `n` sockets remplies : chance `30 + 29(n−1)/9 + 11(Rank−1)/4` sur 100,
+  catégorie au prorata des pierres (eau, feu, terre, air, magie), `LEVEL` = moitié de `n` arrondie au-dessus. Voir
+  `app_stones.rs`. La table `W1`…`W5` par niveau de renforcement (`FUN_14082d0b0`) n'est jamais remplie : rien à jouer.
+- **AGPMSKILL op 10** (1 genre, 2 base, 4 CID) : ligne d'`ee_common_char.txt` jouée sur le personnage du champ 2, le code
+  d'Archonia étant le rang de la ligne : 1 `TIMEATTACK`, 2 `TELEPORT`, 3 `ABSORBMANA`, 4 `ABSORBLIFE`, 6 `MENTALCIRCUIT`,
+  8 `LENS_STONE`, 9 `DETECT_SCROLL`, 10 `CURE`. Genre 5 : rien. Genre 7 : si ce personnage n'est pas le joueur, le joueur cesse
+  de l'attaquer et de le cibler.
+- **Refus** : AGPMSKILL op 7, type d'action 5 à 17 = refus (`Skill_Cast_*`, 13 sans texte), ne touche pas la recharge affichée.
+  Résultats d'attaque 2, 3, 4 : `CharacterAtkResultNotEnoughArrow`, `…Bolt`, `…MP`.
+- **`ItemTooltipDesc.txt`** (`TID`, `Name`, `Description`, `\n` en toutes lettres, 640 octets au plus) : fin de l'infobulle.
+- **`levelupmessage.txt`** (`Level`, `TID`, `Color1`, `Message1`, `Color2`, `Message2`) : ligne du gabarit sinon TID 0, deux lignes
+  au centre de l'écran à 40 % de la hauteur, couleurs `0xRRGGBB` (lecture déduite), `max(200 ms × octets de la 1ʳᵉ ligne, 7 s)`.
+  Retouches d'Archonia écartées (niveau 1, « level-up rewards »).
+- **`QuestNameColor.xml`** : `<Accept>` `NEW` / `ING` / `COMPLETE` selon la quête (nouvelle, au journal, terminée) ; `<Journal>`
+  `Mission` (`Category` 1) / `Epic` : titres du suivi à l'écran (`questj_base_bg`, `questj_base_b`, `questj_btn_x_*`,
+  `questj_btn_win_*`, 10 cases). `<Main>` et ses scénarios : lus par l'exécutable, sans appelant, donc non repris.
+- **`UI_ChatTab_Option`, menus de la discussion** : bouton `MainChat_Btn_Option_a/b/c.png` : Font Size (sysstr 833 : 12, 13, 14, 15 =
+  polices 2, 0, 9, 4), Tab Function (834 : ON, OFF), Add Tab (835). Onglet non permanent : Delete Menu (814), Change Menu (815).
+  12 canaux, bits 0-11 : sysstr 821, 822, 823, 824, 825, 828, 829, 830, 836, 838, 839, 840 ; 8 onglets au plus. Réglages :
+  `ChatSetting.SYJ` du client, `ini\CUSTOMDATA\<nom>.SYJ` dans Archonia ; `saved-variables\chatsetting-<nom>.syj` ici, même syntaxe :
+  `<Option Font="0" TabEnable="1" />`, `<Tab Name="General" MsgType=0#1#2 />`. Voir `app_chattabs.rs`.
+- **`OP_Water`, `OP_ShadowSelf`** : enregistrés sans effet. `FUN_1405909a0` ramène toute valeur sous 2 à 2 (eau unique) ;
+  `OP_ShadowSelf` vise le module de carte d'ombre (`+0x1738`), pas l'ombre ronde.
+- **`ExcEffTable.txt`** (`KeyEffID`, `ExcEffID*`) : un jeu exclu ne part pas sur un personnage qui porte une de ses clés.
+- **`chatcmd.xml`** (`CmdString`, `CmdFunc`) : `tradeoff/on`, `pinoff/on`, `ginoff/on` (drapeaux de refus), `GOUT`, `PS <largeur>`, `fps`.
+
 ## Ops complétées (quêtes, groupe, PvP, guilde, compétences, discussion, objets, portails)
 
 Relevés d'Archonia (spec `SPEC-OPS-MANQUANTES`, confiance O sauf mention ; détails dans les en-têtes des
@@ -2184,19 +2338,340 @@ modules `npc`, `party`, `pvp`, `guild`, `skills`, `chat`, `consumables`, `items`
 (ajout d'Archonia), PVP 17 (le serveur envoie l'op 18 code 11), GUILD 30 / 31. Drapeaux des minis de guilde et
 de groupe : 1 octet (déduit, ≤ 5 champs).
 
-## Inconnues
+## Inconnues restantes
 
-* association des équipements `d%07x` aux objets portés ;
-* sons : loi de panoramique de FMOD ; grille pondérée exacte des ciels locaux (`FUN_1402278a0`,
-  six canaux par cellule) ; sons d'animation des montures ; `EffectInterval` (toujours 0 dans
-  `skyset.ini`) ; bit 0 de l'octet 0 et bits 2–7 de l'octet 1 des cellules `.amf` (octet 0 >> 1 = sol,
-  octet 1 bit 0 = sol bloqué, bit 1 = ciel) ; rôle des champs `id` et `drapeau` de `soundpak.info` ;
-* jeux d'effets : sens des octets propres aux particules, traînées, lumières et cadres mobiles ;
-  champs 0x28–0x64 des fiches ; drapeaux des bases autres que 1 ; conditions d'`AgcmEventEffect` ;
-* `.ean` : rôle des blocs `0x29`, `0x2a`, `0x10` et `0x0c` ; animations selon l'arme (`FUN_1404addf0`) ; 74 clés atypiques dans `a058f302.ean` et `a0800500.ean` ;
-* têtes : visage et coiffure des autres joueurs (aucun champ identifié dans la vue optimisée), rôle de `DEFAULT_RENDER_TYPE_*` et de `CUSTOMIZE_REVIEW` ;
-* orientation : angles X/Y du mini-paquet `CHAR_MOVE` de `CHARACTER` (op 1) à l'arrêt, non appliqués ; rotation progressive éventuelle entre deux angles ;
-* jeu d'UV 5 du sol ; mode de mélange exact des couches dans le pipeline D3D d'Archonia (le mélange par l'alpha du masque est déduit des données) ; secteurs à plus de deux couches ;
-* `world/octree` ; mode exact de BMODE/BOP/RENDERBMODE_L1 de l'eau, cadence du défilement de l'eau, ordre des couleurs A/B de l'herbe ; `images/*.bm1` (BMP) ; fichiers `.syj`, `.grp`.
-* objets du monde : sens de chaque bit des drapeaux AgcmObject (seul `0x10000` = repère est établi, et seulement par les données), animations `ANIMATION`/`ANIM_SPEED` ;
-* panneaux au-dessus des personnages : facteur d'échelle `+0x82c` de `0x140f8a1c0`, valeurs par défaut des options d'affichage des noms (`+0x1e1c` à `+0x1e30` du gestionnaire), sens GDI exact de la taille 11 de « Georgia », ordre des octets des couleurs `IDColor_*` (lues sans l'échange rouge/bleu appliqué aux `BG_*_NAME`), nœud du squelette servant d'ancre aux chiffres et mentions ;
+Inventaire réconcilié le 4 novembre 2026. Les points ci-dessous sont des questions de
+comportement ou de fidélité ; ils ne constituent pas un comptage de toutes les fonctions du
+binaire. Les armes, boucliers et lances sont décrits dans « Objets portés », les ensembles
+d'animation dans la même section, la caméra `CUSTOMIZE_REVIEW` dans l'aperçu du coiffeur,
+les ailes et capes dans le retour de bug n° 2. Ces sujets ne sont plus globalement inconnus.
+
+Après analyse globale Ghidra, l'inventaire privé contient 69 180 fonctions internes
+exécutables reconnues : 69 178 pseudo-codes automatiques vérifiés par empreinte et
+deux erreurs internes conservées, accompagnées d'équivalents scalaires manuels
+avec préconditions. Les exports portent encore 756 marqueurs de tables de sauts
+non reconstruites et 163 de suppression de blocs inaccessibles (comptés par
+fonction, groupes pouvant se chevaucher). Le traitement de cet inventaire est
+terminé ; ni la découverte de tout le code, ni l'exactitude complète du pseudo-code,
+ni la fidélité en exécution ne sont démontrées. Le bilan privé est
+`data/re/2026-11-04-archonia/BILAN-DECOMPILATION.txt`, avec couverture dans
+`coverage-final.json` et suivi des 124 questions initiales dans `unknowns-current.json`.
+Ce registre compte 28 réponses établies statiquement, 27 partielles et 33 ouvertes ;
+les autres entrées distinguent documents anciens, choix locaux, validations runtime
+et données serveur absentes. Aucun pourcentage global de compréhension n'en est déduit.
+
+* sons : configuration et paramètres effectifs du panoramique FMOD, entrées non mono
+  et traitement final ; sens historique
+  des champs `id` et `drapeau` de `soundpak.info`. La structure des groupes et le
+  déclenchement des sons d'animation de monture sont établis dans « Sons » ;
+* ciel : sens et unité d'`EffectInterval` hors des chemins examinés (333 valeurs non
+  nulles parmi les 942 clés présentes) ; ordre effectif de construction et cycle de vie
+  de la grille des ciels locaux. Ses six sélecteurs et leur règle quantifiée sont établis ;
+* cellules `.amf` : bit absolu 11, sens métier du bit 12 et sens historique de 13–15 ;
+  cycle de vie après un retour faux du lecteur. La diagonale (bit 0), l'ordre x dans z
+  et les différences de versions sont établis dans « Sol et blocage » ;
+* jeux d'effets : rôle opérationnel des mots préservés des particules et des quatre mots
+  de fiche `0x30/34/38/3c` ; drapeaux de jeu `0x1`, `0x2`, `0x10`, certains drapeaux de base et
+  repères libres ; intitulé de l'événement objet de condition 0x2 et catégories exactes de
+  résolution d'attaque associées à 0x80. D, l'action M1, N et les conditions d'animation
+  sont décrits dans la reprise ci-dessous.
+  Les structures des particules, traînées, lumières, cadres mobiles et leurs dépendances
+  déjà décrites dans « Effets » ne sont plus globalement inconnues ;
+* `.ean` : provenance des NaN et conséquence visuelle en exécution. Le chemin de
+  chargement et le traitement sans réparation des clés sont établis ci-dessous ;
+* têtes : consommateurs généraux du second entier de `DEFAULT_RENDER_TYPE_*` et sens
+  complet du mode de rendu 6. Les champs initiaux de visage/coiffure de la vue optimisée
+  sont identifiés (16/17, décrits dans « Têtes par défaut ») ;
+* orientation : éventuel lissage ultérieur dans les rappels/rendus. L'application
+  des champs X/Y à l'arrêt et leur écriture immédiate par le setter sont établies ;
+* terrain : fidélité exacte du mélange sur le pilote et remappage UV de la variante
+  à 2/3 textures avec shader actif. Le transport d'UV5 et le repli sur la base seule
+  au-delà de deux couches sont établis dans « Textures du sol » ;
+* `world/octree` ; mode exact de BMODE/BOP/RENDERBMODE_L1 de l'eau, fréquence d'invocation
+  du défilement UV, niveau LOD de l'herbe. Son ordre de couleur est établi :
+  `min(Directional × 0,5 + Ambient, 1)` ;
+* objets du monde : sens de chaque bit des drapeaux AgcmObject (seul `0x10000` = repère
+  est établi, et seulement par les données). `ANIMATION`/`ANIM_SPEED` sont déjà décrits
+  dans les animations du décor ; l'horloge par objet reste distincte de l'horloge par
+  modèle employée dans ArchRust ;
+* panneaux au-dessus des personnages : valeurs par défaut des options d'affichage des noms
+  (`+0x1e1c` à `+0x1e30` du gestionnaire),
+  équivalence des métriques FreeType et egui, nœud du squelette servant d'ancre aux chiffres
+  et mentions. Les `IDColor_*` restent dans leur ordre natif `0xAABBGGRR` ; l'échange rouge/bleu
+  actuel d'`app_pvp.rs` est un écart d'implémentation, pas une inconnue du format ;
+
+### Structures vérifiées dans les fichiers du client
+
+Inventaire local du 4 novembre 2026 : 4 580 entrées `.ean` (extensions majuscules
+comprises), 3 805 contenus distincts, 14 228 blocs et 12 050 169 clés HAnim.
+Les structures de blocs et leurs bornes ont été parcourues sur toutes ces entrées.
+Cette couverture des fichiers ne mesure pas la compréhension de toutes les fonctions
+de l'exécutable.
+
+* `0x29` : 3 283 débuts de groupe, chacun avec un `u32` égal à 1 puis un bloc chaîne
+  `0x02` (nom terminé par zéro et remplissage). `0x2a` : 3 283 fins de groupe, toutes
+  sans contenu ; les groupes sont équilibrés dans chaque fichier.
+* `0x10` : 3 081 clumps RenderWare, avec des sous-blocs dont les bornes sont valides.
+  Parmi eux, 3 056 contenus font 236 octets et leur structure initiale vaut `[0,1,0]` ;
+  ils ne doivent pas être assimilés à des clumps vides.
+* `0x0c` : deux splines dans `a062b300.ean` et `d0062b00.ean` : nom sur 32 octets,
+  `i32` nombre de points = 4, `i32` type = 2, puis quatre vecteurs de trois `f32`.
+  Cette disposition correspond à celle du lecteur de spline d'effets déjà décrit.
+* Les 74 clés atypiques (30 dans `a058f302.ean`, 44 dans `a0800500.ean`) contiennent
+  des NaN explicites `0x7fc00000` dans le quaternion et la translation. La normalisation
+  d'un quaternion ne résout pas la translation invalide. Le lecteur de type 1,
+  l'interpolation et la construction de matrice du chemin examiné ne testent pas
+  la finitude et ne réparent pas ces valeurs. Des pistes affectées sont réellement
+  pondérées : 14/18/18 sommets pour les pistes 9/11/20 du modèle `a0000028.ecl`,
+  65 sommets pour la piste 30 des modèles `a00007ff.ecl` et `a000166d.ecl`, poids 1.
+  Ce n'est donc pas une réserve universellement inutilisée. L'origine des NaN et
+  leur résultat visuel restent distincts de ce constat statique.
+* Le chemin EAN direct des personnages et effets (`FUN_1406c5610` → recherche
+  `0x1b` → `FUN_14037a0a0`) saute les blocs `0x29/0x2a/0x10/0x0c` avant le premier
+  HAnim `0x1b` ; il ne lit pas la suite après celui-ci. Il ne construit pas une
+  hiérarchie de groupes à partir de ces blocs. Le chemin alternatif de personnages
+  cherche un `.glb` de même base et peut construire un HAnim depuis GLTF/GLB ;
+  aucun GLB correspondant aux trois modèles affectés n'est présent dans les index
+  character/etc vérifiés. Le fichier `a08a7000.ean`, sans `0x1b`, ne fournit pas une
+  animation à ce lecteur direct ; aucun repli fictif n'est déduit de son nom.
+* Les 15 `images/*.bm1` sont des BMP Windows : signature `BM`, DIB de 40 octets,
+  pixels à l'offset 54, un plan, 24 bits, sans compression. Sept ont deux octets
+  supplémentaires en fin de fichier.
+* `texture/notpacked/af1.grp` et `af2.grp` sont des polices TrueType : Georgia Bold
+  (585 glyphes, 18 tables) et FZCuYuan-M03 (22 024 glyphes, 14 tables). Les tables
+  restent dans les bornes des fichiers. Le chargement d'`af1.grp` par le FreeType
+  embarqué et sa sélection comme Georgia Bold nominale à 11 pixels sont établis ;
+  le rôle de chaque autre police n'est pas recensé exhaustivement.
+* `.syj` est déjà décrit dans les réglages de discussion : fichier par défaut chiffré
+  avec la dérivation INI habituelle, fichier de personnage examiné en clair. Les choix
+  de géométrie des fenêtres d'ArchRust sont un écart d'implémentation distinct.
+
+Les SHA-256, compteurs et particularités par fichier sont conservés dans l'inventaire
+privé `data/re/2026-11-04-archonia/formats-inventory.json` de l'espace de travail.
+
+### Paramètres et événements vérifiés dans le code natif
+
+Reprise sur le PE SHA-256 `e9c7609b02c30a17959aac37321750f6785e64f5b582f660a7c5bfef6cddc98f`,
+par contrôle des octets, désassemblage Capstone et décompilation Ghidra locale ciblée.
+Les preuves privées sont `findings-buffs.json`, `findings-effect-conditions.json`,
+`findings-font-colors.json`, `findings-board-scale.json` et `findings-water-grass.json`
+dans `data/re/2026-11-04-archonia/`. Ce sont des relevés statiques, distincts d'Evidence REA
+et d'un essai du client en exécution.
+
+Les compléments `findings-armor-parts-textures.json`, `findings-terrain-layers.json`,
+`findings-ean-runtime-path.json`, `findings-amf-layout.json`,
+`findings-amf-rejections.json`, `findings-sky-weights-interval.json` et
+`findings-soundpak-mounts.json` conservent les chemins précis, empreintes et limites
+des résultats ajoutés aux sections correspondantes. Aucun de ces relevés n'annonce
+une correction du code produit ou une validation en jeu.
+Le chemin d'orientation et ses gardes sont conservés dans `findings-movement-angles.json`.
+La dépendance FMOD est traitée dans `findings-fmod-pan.json` avec ses propres
+Evidence REA exportées et ses contrôles d'octets ; sa session a été fermée.
+Les champs de fiches et la révolution sont détaillés dans `findings-effect-flags-fields.json`.
+
+| Condition AgcmEventEffect | Liaison établie |
+|---|---|
+| `0x2` | AgcmObject événement 3 → `FUN_14056ac00` ; intitulé du cycle de vie encore ouvert. L'apparition objet utilise déjà `0x1`, dans `FUN_14056a0e0`. |
+| `0x8` | Type d'animation 0 → rappel 2 → attente ; emploi supplémentaire par un équipement. |
+| `0x10` | Types 1 et 9 → rappel 3 → marche et variante. |
+| `0x20` | Types 2, 7 et 8 → rappel 4 → course et variantes. |
+| `0x80` | Rappel 11 de résolution/réaction d'attaque sur la cible ; un test « dégâts positifs » n'est pas établi. |
+| `0x200` | Type 5 → rappel 7 → mort. |
+
+Le parseur de `CUST_DATA` (`FUN_14056b7e0`) rattache D/M/N aux offsets `0x0c/0x30/0x34`.
+Le chemin buff demande D=1 ; le lancement demande le sélecteur 0, qui admet D≤0. Une lettre
+absente vaut −1 et la dernière occurrence remplace les précédentes. M1 déclenche une mise
+à jour de la représentation et des objets portés ; son retour ne rejette pas l'effet.
+
+N contrôle un entier attaché au personnage : si l'attachment manque ou N<0, ce contrôle
+n'exclut rien ; sinon sa valeur doit être non nulle et égale à N. Le producteur observé
+(`FUN_140567f50`, rappel 0 d'AgcmEventNature) écrit pour les personnages PC
+`bool(WeatherEffect1 & 0x4)`. Les 69 occurrences N1 des données de personnages visent
+EID 3478, effet de souffle/buée. Le masque ne désigne pas simplement la nuit. Un setter
+alternatif `FUN_140575a00` accepte aussi une valeur signée de 16 bits ; sa joignabilité
+n'est pas établie par les recherches de références directes.
+
+Le facteur d'échelle des panneaux vient de `UIScale`, distinct de `FontScale`. Les couleurs
+`IDColor_*` sont lues comme la valeur hexadécimale préfixée de `ff`, conservée en ABGR
+jusqu'au texte : pas d'échange rouge/bleu supplémentaire. Le chemin actuel d'ArchRust
+et les métriques de sa police restent des écarts d'implémentation à vérifier/corriger.
+
+Pour l'herbe, la chaîne lecteur de ciel → couleurs courantes → rappel démontre
+`min(Directional × 0,5 + Ambient, 1)`. Pour l'eau, la boucle des UV ajoute les coefficients
+U/V directement à chaque invocation de `FUN_14058cb70` ; elle n'utilise pas le temps écoulé.
+Sa fréquence réelle n'est pas démontrée. `RENDERBMODE_L1` sélectionne trois chemins de
+rappels (−1, autre valeur signée <9, ≥9) ; la signification complète des états D3D et
+l'emploi de `BMODE_L1/BOP_L1` restent ouverts.
+
+Le mot de fiche `.eff` `0x28` initialise le mode temporel du contrôleur : arrêt en
+fin de durée, temps brut, boucle ou aller-retour selon les branches du helper
+`FUN_1408ec810`. Les 3 428 fiches ne portent que 0, 1 ou 2 ; la durée de chaque base
+reste distincte. Les champs `0x40..0x64` sont une sphère initiale et deux coins
+d'AABB, utilisés pour les volumes de visibilité ; les quatre mots `0x30..0x3c`
+restent transportés sans rôle opérationnel attribué.
+
+Révolution : premier `vec3` = axe, second = base radiale ; les clés donnent la
+hauteur axiale, le rayon et la vitesse angulaire. Le code applique à la base radiale
+la rotation d'angle `temps_brut_ms × vitesse(temps_remappé) × 0,001` degrés puis
+ajoute la hauteur selon l'axe. Il ne calcule pas l'intégrale d'une vitesse variable.
+Les conditions, échelles et approximations natives sont conservées dans la preuve.
+Les 64 octets et le dernier `u32` des particules sont initialisés, lus et réécrits ;
+ils sont nuls dans les 3 596 systèmes présents. Cela n'établit pas leur inutilité.
+Enfin les bits de fiche `+0x8c` doivent rester distincts des drapeaux d'instance
+`+0x60` et de ceux des contrôleurs : leurs noms ne se déduisent pas de tests du
+même masque dans une autre classe.
+
+
+## Retour en jeu n° 2 : inventaire et corbeille (4 novembre 2026)
+
+`UI_Inventory` : cinq onglets `CONTROL_Inven_Layer0` à `4`, grille `CONTROL_Inventory_Grid`
+258 × 258, cellules 50 × 50 espacées de 2 : cinq lignes et cinq colonnes, 125 places au total.
+Les coordonnées réseau restent `[sac, ligne, colonne]`, chacune dans 0..5 ; l'agrandissement
+ne change ni le format des paquets ni les coordonnées des objets déjà enregistrés.
+`InventoryWaste_DragDropItem` du contrôle `CONTROL_531` ouvre la confirmation
+`Item_ConfirmDestroyItem`, puis AGPMITEM op 21 après accord. Aucun paquet à l'annulation.
+La recherche de place libre pour séparer une pile parcourt les 125 cases.
+
+## Retour de bug n° 2 — sorts, buffs et modèles au sol
+
+`SKILL_BUFF` (mini 152) : champ 0 TID de compétence, 1 durée restante U64 (ms),
+2 TID du modèle du lanceur. Ce dernier est conservé par les ops 4 et 6 ; il ne
+faut pas lui substituer le CID du porteur ni son modèle. L'op 5 retire les
+contrôleurs appartenant à (CID du porteur, TID de compétence).
+
+`charactertemplateskill.ini` : `SKILL_ANIMATION_NAME` = rang:ensemble:nom du clip,
+recherche de l'ensemble courant puis 0 seulement. Lancement corporel type -11,
+arrêt du déplacement avant le clip ; les montures ne suivent pas ce type négatif.
+`SKILL_EFFECT_CONDITION` = rang:ensemble:indice:bits ; `SKILL_EFFECT_DATA` =
+rang:ensemble:indice:EID:x:y:z:échelle:nœud:délai. Buff actif : ensemble 0,
+condition 0x80000. Sélecteur d'événement : 1 pour le buff, 0 pour le lancement.
+`CUST_DATA` : le buff exige D=1 ; le lancement accepte D≤0 (D absent vaut −1).
+Le parseur d'Archonia conserve la dernière occurrence d'une lettre. M1 appelle une mise à
+jour de la représentation et des objets portés ; il ne rejette pas l'effet.
+Ces points sont établis par `FUN_14056ad80` → `FUN_140572c00`, le parseur `FUN_14056b7e0`
+et le contrôle `FUN_1405686b0` ; aucune exécution du client n'est impliquée.
+Les contrôleurs des buffs restent distincts des effets d'apparition et d'équipement.
+Icônes de buffs : `SMALL_SKILL_TEXTURE`, pack `texture/skill` ; le repli vers
+`SKILL_TEXTURE` reste réservé aux autres usages du HUD.
+
+`FIELD_DFF` utilise le préfixe **F** (`f%07x.ecl`) ; BASE_DFF utilise D.
+Pas de repli de FIELD_DFF sur BASE_DFF : cela dessinait une armure complète
+à la place du butin. Les réglages de placement existants sont conservés.
+
+Validation, limites et mesures CPU : `docs/retour-bug-2-personnages.md` et rapports
+associés. La cadence proche des poses est celle des images ; le rendu garde les
+derniers octets de chaque tampon d'instance et évite une écriture identique,
+y compris après un aperçu hors écran. Aucun gain FPS n'est déduit de ces mesures.
+
+
+Ailes et capes : les objets On/Off de type d'usage 12 restent des améliorations de compétence
+(628/629/662), sans apparence ajoutée. Les runes de type 9, sous-types 22/23 et 33, serties dans
+un collier (genre 16) suivent `ExtraType` → colonne `ID` de `ee_common_char.txt` → groupe
+`WING_ID`/`CLOAK_ID` → variante de race/classe. Archonia : `FUN_140753370`, lecture
+`FUN_14082de30`, résolution `FUN_1408af6c0`/`FUN_1408af9d0`. Les effets restent indépendants
+de ceux de l'arme et des sorts, et disparaissent au retrait du collier. L'infobulle garde
+`[occupés/total]` et nomme les runes visuelles serties, même sans `OptionTID`.
+`UI_Necklace_Put_04.WAV` est un son de l'interface, pas une fenêtre ni un format d'emplacement.
+
+Sertissage : les runes EP8 comme 4571/4607 existent en inventaire Cash. Le glisser de ce sac
+était déjà implémenté dans ArchRust ; ArchCore ignorait la rune car il ne la cherchait que
+dans le sac normal. AGPMITEMCONVERT op 3 utilise désormais aussi une rune Cash non allumée,
+avec les mêmes contrôles de partie, de socket, de niveau et d'exclusion. La cible reste un
+objet du sac normal. Les règles communes d'Archonia admettent le statut 51 (`FUN_14032b9c0`),
+bien que ses propres rappels de dépôt du forgeron soient plus restrictifs. Cette différence
+explicite corrige le dépôt demandé sans ajouter de fenêtre ou de paquet.
+
+
+Forgeron : `Convert_AddItem` = `FUN_140607f80`, grille matériau `this+0x1808`.
+`FUN_1408825c2` sélectionne automatiquement une potion à l'ouverture physique ; `FUN_140608140`
+réévalue le catalyseur après dépôt. ArchRust reproduit cette sélection pour les potions EP8 :
+usage 8, sous-type 0 (486, 4873, 6360 dans les données). Une sélection compatible reste posée ;
+sinon une potion liée au propriétaire (drapeau 8 du champ 19 d’AGPMITEM) prime, puis la dernière de la grille.
+Les variantes de sous-type 1 ne figurent pas dans ces données et ne sont pas auto-sélectionnées.
+Les fenêtres d'inventaire et du forgeron déclarent leur taille initiale à egui pour garder leur
+position d'origine. Tests sans fenêtre : dépôt sur les deux grilles et la corbeille, sélection de
+potion, conservation et remplacement d'une pile consommée.
+
+La préparation CPU `SkinPoseBatch` partage, pour une seule pose, les matrices monde
+non rooted et la correspondance HAnim entre les géométries du même clump ; chaque
+atomic garde son inverse propre. Le monde rooted des attaches reste distinct.
+Aucun partage entre personnages ni entre images ; le chemin wearer est inchangé.
+La référence publique `deform` reste disponible pour la comparaison bit à bit.
+La rétention des animateurs utilise un index temporaire à partir de 128 entités,
+sans modifier les valeurs ni créer d'animateur absent.
+
+Champ de la caméra (`render_frustum.rs`, choix d'ArchRust) : quatre plans latéraux tirés des
+lignes de `render_view_proj` ; une pièce dont la sphère englobante (bornes du maillage × plus
+grande échelle du modèle ; pièces animées : rayon × 2, 150 au moins) sort d'un plan n'est ni
+envoyée ni dessinée. Rayon nul : toujours dessinée. Cadence des poses à 30 Hz : le reste de la
+période est reporté (il était remis à zéro, ce qui donnait 24 poses/s à 60 ips avec de la gigue).
+Les noms de textures des pièces passent en minuscules dans `create_mesh`.
+
+
+Contrôles complémentaires du retour n° 2 : l'icône 20091 est celle prescrite par
+`TEXTURE=62362`, `l000f39a`, 50 × 50, UV 1 ; le test de pixels avec le pack réel passe.
+Le casque 22116 doit garder sa partie déclarée 3 même si l'estimation des os du maillage
+indique le corps 2 : le remplacement de l'armure 22117 (partie 2) préserve alors le casque.
+Le verrou d'Archonia envoie AGPMITEM op 0x24 avec le masque 0x2000 (Confirm
+`0x1407c1a10`, constructeur `0x1401ca610`). Son appartenance historique à l'EP8 reste indéterminée. L'intention de déverrouiller emprunte la même confirmation ; le basculement exact côté serveur n'est pas démontré par ce seul binaire.
+
+## Diagnostic opt-in des icônes de buffs
+
+`RUST_LOG=info,archrust_buffs=debug` active les traces communes au décodage SKILL
+(ops 4/5/6/7), à la décision CID local du moteur, au cycle de vie du HUD, à la
+résolution de `SMALL_SKILL_TEXTURE` et à la demande de dessin. Le dessin est
+journalisé à sa première apparition et lors d'un changement de disponibilité ou
+de rectangle, pas à chaque image stable. Aucun état de jeu ne dépend des traces.
+Les paquets bruts et les identifiants de connexion ne sont pas enregistrés par ce
+canal. L'op 7 reste une recharge/un lancement, jamais un ajout de buff local.
+Commande de capture, lecture des étapes et proposition d'arrêt serveur au point
+exact de `skills::begin` : `docs/retour-bug-2-diagnostic-17-et-serveur-29.md`.
+
+
+Point 08, étude approfondie : `ItemLock_MoveItem` (`0x1407c1c60`) accepte les statuts 2/13/15/51 ;
+`ItemLock_Confirm` (`0x1407c1a10`, blocs froids inclus) envoie le même op 0x24 et masque 0x2000 au
+champ 19 pour les deux intentions, sans mutation locale du drapeau. La branche de réception
+0x24 invoque le rappel 0x6f (111), sans modifier les drapeaux. Les mises à jour génériques
+op 2 (`0x1401b515b`) et op 0x20 (`0x1401c6111`) acceptent le mot de drapeaux reçu, zéro compris ;
+`Item_Locked_Type` dépend ensuite du bit 0x2000. Le XOR serveur est une déduction du contrat,
+pas une formule observée. Dans le répartiteur examiné, op 0x21 est une branche par défaut :
+une autre énumération ne prouve ni le paquet de réponse natif ni l’absence historique du verrou.
+La compatibilité EP8 reste indéterminée ; aucune nouvelle mécanique ajoutée.
+
+## Retour de bug n° 2 — interface du client (points 10, 18, 20 à 22, 25, 27, 28)
+
+- **Textes à chaque image (point 10)** : `sysstr(id)` relisait et déchiffrait `sysstr.txt` à chaque appel (2,07 ms
+  avec `server-data/`, mesuré en test) ; les infobulles des compétences en font une dizaine par compétence et sont
+  refaites à chaque image (barre de raccourcis, livre, instructeur). Chez l'instructeur, les onglets à arbre (Combo,
+  Heroic, Scion) n'ont pas de catégorie : la liste invisible recomposait l'infobulle des 45 compétences de la guerrière
+  (653 lignes, plus d'une seconde par image). Désormais : `sysstr.txt` lu une fois (`Assets::sysstr_map`, oublié au
+  rechargement des packs, 190 ns par appel), infobulles gardées par (TID, niveau, bonus) (38 µs pour toute la classe),
+  liste de l'instructeur construite pour les onglets à liste seulement, fenêtres d'arbre sans fondu d'apparition
+  (chaque onglet à arbre est une autre fenêtre : `Action=1:2:0:1:UI_SkillBuy` puis `1:1:0:1:UI_SkillHighLevelUp`).
+- **Socles de gacha (point 18)** : objets `Function=38` des `obj%05d.ini` (AgpmEventGacha, AgcmUIEventGacha, fenêtre
+  `UI_Gacha`) : `가차시스템_방어구` 5780, `_악세사리` 5891, `_무기` 9081 (17 de chaque, trois côte à côte dans les villes),
+  `_카리스마포인트` 13173 (7). Modèle `H0169400.ECL`… animé par `E0016940` (colonne 26), effet d'apparition colonne 21
+  `0:1` / 22 `0:186:0:-330:0:1:991:délai` (jeu 186 sous le nœud 991, à 370 du pied dans la pose de repos). Le gacha est
+  de l'épisode 8 (tables `gachadroptable*.txt` du serveur d'origine), pas un ajout d'Archonia. ArchRust joue le jeu 186
+  au point du nœud 991 en pose de repos (sans suivre le flottement), à portée de tracé des objets. Clic, fenêtre et
+  tirage : section « Gacha » ci-dessous (ArchCore tient les tables, le client n'a que `GachaDropTableWeapon.txt`).
+- **Options GFX (point 20)** : listes d'AgcmUIOption (FUN_1407099d0, libellés FUN_140706500) : `OP_WideView`,
+  `OP_AutoExposure`, `OP_MatEffect`, `OP_Impact` → `Option_Msg_OFF` / `_ON` ; `OP_Bloom` → `OFF`, `TYPE1` à `TYPE4`.
+  Dans la fenêtre, le libellé « Bloom » (295, 286) est en face d'`OP_AutoExposure` (381, 284) et « Brightness » (295,
+  362) en face d'`OP_Bloom` (381, 359). Rappels : FUN_1407080f0 (`caméra+0x770`, projection recalculée à angle
+  inchangé), FUN_140705400 (`Bloom` recopié dans `AutoExposure`), FUN_140705180 / FUN_14070ee50 (`Light_Adapt`
+  d'AgcmPostFX), FUN_140706800 / FUN_140711210, FUN_140706430 / FUN_140710eb0 ; tout réglage allumé coupe
+  `AUTOTUNING`. Clés de `COption.ini` : `WideView`, `Bloom`, `AutoExposure`, `MatEffect`, `ImpactFX`, `GlowIntensity`
+  (20), `AUTOTUNING`. ArchRust les enregistre (`[video]` : `wide_view`, `bloom`, `auto_exposure`, `mat_effect`,
+  `impact_fx`, `glow_intensity`, `speed_tuning`) ; le rendu n'a pas de passe AgcmPostFX.
+- **Fenêtre du personnage (points 21, 22)** : niveau, nom et pourcentage d'expérience reconnus par le nom du contrôle
+  (`Edit_CharacterLevel`, `CONTROL_30392`, `CONTROL_32636`) : en français, `display` vient d'`ini_fr/UI_1024X768.ini`
+  où le coréen de la fonction d'affichage est illisible. Plaque `CONTROL_642` : « race classe » (FUN_1404fab20 cas 5,
+  `%s` puis ` %s`, noms d'`ini/chartype.ini`). Libellés des propriétés gardés dans leur colonne (jusqu'à la valeur
+  `Edit_Value_NN`) : police réduite, puis deux lignes.
+- **Minicarte (point 27)** : FUN_1408d45d0 dessine `Main_Minimap_Cursor.png` (45 × 110) à sa taille, coin haut gauche en
+  (centre − l / 2, centre − (h − 10) / 2), tourné autour du centre du contrôle ; l'angle (`+0x4dd8`) rejoint celui de la
+  caméra à vitesse bornée (non repris).
+- **Clic sur un portail (point 28)** : objet visé par les triangles de son volume de sélection (colonne 25 `PICK_DFF`
+  d'`objecttemplate.ini`, sinon le modèle dessiné) et non plus sa sphère englobante, et seulement si le sol n'est pas
+  devant (marge 50).

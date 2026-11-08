@@ -102,6 +102,41 @@ pub struct PortalObject {
     pub placement: Placement,
 }
 
+/// Objets de gacha d'une tuile (`Function=38`, AgpmEventGacha) : les trois socles des villes (`가차시스템_방어구`,
+/// `_악세사리`, `_무기`, TID 5780, 5891, 9081) et celui des points de charisme (13173).
+pub fn tile_gachas(assets: &Assets, tile: u32) -> Vec<(u32, Placement)> {
+    let Ok(table) = assets.table("ini", &format!("obj{tile:05}.ini")) else {
+        return Vec::new();
+    };
+    let mut out = Vec::new();
+    for s in &table.sections {
+        let Ok(id) = s.name.trim().parse::<u32>() else { continue };
+        if !s.get_all("Function").any(|v| v.trim() == "38") {
+            continue;
+        }
+        let Some(position) = s.get("Position").and_then(vec3_of) else { continue };
+        let placement = Placement {
+            tid: s.get("TID").and_then(|t| t.trim().parse().ok()).unwrap_or(0),
+            position,
+            scale: s.get("Scale").and_then(vec3_of).unwrap_or(Vec3::ONE),
+            degree_x: s.get_f32("DegreeX").unwrap_or(0.0),
+            degree_y: s.get_f32("DegreeY").unwrap_or(0.0),
+            apm_flags: apm_flags_of(s),
+        };
+        out.push((id, placement));
+    }
+    out
+}
+
+/// Point de la pose de repos du nœud HAnim `node` du modèle `tid`, dans le repère de l'objet (frame racine annulée).
+pub fn template_node_position(assets: &Assets, tid: u32, node: u32) -> Option<Vec3> {
+    let file = template_model(assets, tid)?;
+    let clump = assets.clump("object", &file).ok()?;
+    let world = clump.world_matrices();
+    let i = clump.frames.iter().position(|f| f.hanim.as_ref().is_some_and(|h| h.node_id == node))?;
+    Some((root_inverse(assets, &file) * *world.get(i)?).w_axis.truncate())
+}
+
 /// Portails d'une tuile (`ini/obj%05d.ini`).
 pub fn tile_portals(assets: &Assets, tile: u32) -> Vec<PortalObject> {
     let Ok(table) = assets.table("ini", &format!("obj{tile:05}.ini")) else {
@@ -219,6 +254,35 @@ pub fn template_collision(assets: &Assets, tid: u32) -> Option<String> {
         .map(|f| f.trim().to_ascii_lowercase())
         .filter(|f| !f.is_empty())
         .or_else(|| template_model(assets, tid))
+}
+
+/// Volume de sélection d'un modèle d'objet : colonne 25 `PICK_DFF` d'`objecttemplate.ini`, sinon le modèle dessiné.
+pub fn template_pick(assets: &Assets, tid: u32) -> Option<String> {
+    let table = assets.table("ini", "objecttemplate.ini").ok()?;
+    let t = table.section(&tid.to_string())?;
+    t.get("25")
+        .map(|f| f.trim().to_ascii_lowercase())
+        .filter(|f| !f.is_empty())
+        .or_else(|| template_model(assets, tid))
+}
+
+/// Distance du triangle `[v0, v1, v2]` sur le rayon `from` + t × `dir` (Möller–Trumbore), `None` s'il n'est pas coupé.
+pub fn ray_triangle(from: Vec3, dir: Vec3, [v0, v1, v2]: [Vec3; 3]) -> Option<f32> {
+    let (e1, e2) = (v1 - v0, v2 - v0);
+    let h = dir.cross(e2);
+    let det = e1.dot(h);
+    if det.abs() < 1e-6 {
+        return None;
+    }
+    let inv = 1.0 / det;
+    let s = from - v0;
+    let u = inv * s.dot(h);
+    let q = s.cross(e1);
+    let v = inv * dir.dot(q);
+    if !(0.0..=1.0).contains(&u) || v < 0.0 || u + v > 1.0 {
+        return None;
+    }
+    Some(inv * e2.dot(q)).filter(|d| *d > 0.0)
 }
 
 /// Triangles d'un clump d'objet dans le repère de l'objet (frame racine annulée).
@@ -674,6 +738,16 @@ impl WorldObjects {
             }
         }
         false
+    }
+
+    /// Distance du premier triangle du volume de sélection de `p` (`PICK_DFF`, sinon le modèle dessiné) coupé par le rayon
+    /// du curseur : un objet n'est visé que sous le curseur, sa sphère englobante déborde largement sur le sol alentour.
+    /// `None` : pas coupé, ou objet pas encore chargé.
+    pub fn pick_distance(&self, assets: &Assets, p: &Placement, from: Vec3, dir: Vec3) -> Option<f32> {
+        self.placed_bounds(p)?;
+        let local = clump_triangles(assets, &template_pick(assets, p.tid)?)?;
+        let m = p.matrix();
+        local.iter().filter_map(|tri| ray_triangle(from, dir, tri.map(|v| m.transform_point3(v)))).min_by(f32::total_cmp)
     }
 
     /// Un triangle du modèle de `p` coupe le rayon entre 1 et `limit` unités.

@@ -80,6 +80,139 @@ pub struct BankView<'a> {
     pub can_buy: bool,
 }
 
+/// Couleur `<tag R=… G=… B=… />` (sans guillemets) d'une section de `QuestNameColor.xml` (FUN_1404f4d80).
+fn quest_color_in(text: &str, section: &str, tag: &str) -> Color32 {
+    let body = text.split(&format!("<{section}>")).nth(1).and_then(|t| t.split(&format!("</{section}>")).next()).unwrap_or("");
+    let Some(line) = body.lines().map(str::trim).find(|l| l.starts_with(&format!("<{tag}"))) else { return Color32::WHITE };
+    let value = |key: &str| line.split_once(key).and_then(|(_, r)| r.trim_start().split(|c: char| !c.is_ascii_digit()).next()?.parse::<u8>().ok()).unwrap_or(255);
+    Color32::from_rgb(value("R="), value("G="), value("B="))
+}
+
+/// `<Accept>` de `QuestNameColor.xml`, pour l'arbre des quêtes (`NEW`, `ING`, `COMPLETE`).
+///
+/// Archonia lit tout le fichier, mais ses accesseurs `<Accept>` (`FUN_1404f4ae0`), `<Main>` (`FUN_1404f4c00` : `Interval`, écart
+/// de niveau) et `EPICSCENARIO`, `MISSIONSCENARIO`, `AREA` (`FUN_1404f4ba0`) n'ont ni appelant ni pointeur dans l'exécutable :
+/// ils ne sont donc pas repris. Seul `<Journal>` (`FUN_1404f4bb0`) sert, voir [`parse_journal_colors`]. `<Accept>` reste
+/// utilisé ici à la place de couleurs qui n'avaient pas de source.
+pub fn parse_quest_colors(text: &str) -> [Color32; 3] {
+    ["NEW", "ING", "COMPLETE"].map(|tag| quest_color_in(text, "Accept", tag))
+}
+
+/// `<Journal>` : `Mission` puis `Epic` (titres du suivi, `FUN_1404f4bb0` : gabarit `+0x10c` valant 1 → `Mission`, sinon `Epic`).
+pub fn parse_journal_colors(text: &str) -> [Color32; 2] {
+    ["Mission", "Epic"].map(|tag| quest_color_in(text, "Journal", tag))
+}
+
+#[cfg(test)]
+mod color_tests {
+    use super::*;
+
+    #[test]
+    fn couleurs_des_quetes() {
+        let xml = "<!-- c -->\n<Accept>\n\t<NEW\t\tR=255\t\tG=255\t\tB=0\t/>\n\t<ING\t\tR=255\t\tG=255\tB=255\t\t/>\n\t<COMPLETE\tR=127\tG=127\t\tB=127\t\t/>\n</Accept>\n<Main><NEW R=1 G=2 B=3 /></Main>\n<Journal>\n\t<Mission \tR=255 G=192\tB=0 \t/>\n\t<Epic\t\tR=128 G=255 B=128\t\t/>\n</Journal>";
+        assert_eq!(parse_quest_colors(xml), [Color32::from_rgb(255, 255, 0), Color32::WHITE, Color32::from_rgb(127, 127, 127)]);
+        assert_eq!(parse_journal_colors(xml), [Color32::from_rgb(255, 192, 0), Color32::from_rgb(128, 255, 128)]);
+    }
+
+    /// Avec les données du client : couleurs du suivi et images câblées dans l'exécutable.
+    #[test]
+    fn suivi_avec_les_donnees_du_client() {
+        let Some(dir) = std::env::var_os("ARCHRUST_GAME_DIR") else { return };
+        let assets = Assets::new(Some(dir.into()), &[]);
+        assert_eq!(parse_journal_colors(&assets.read_text("ini", "QuestNameColor.xml").unwrap_or_default())[0], Color32::from_rgb(255, 192, 0));
+        for t in ["questj_btn_x_a.png", "questj_btn_win_a.png", "questj_base_bg.png", "questj_base_b.png"] {
+            assert!(assets.texture_found(t), "{t}");
+        }
+    }
+}
+
+/// Couleurs des noms de quêtes, lues une fois.
+fn quest_colors(ctx: &egui::Context, assets: &Assets) -> [Color32; 3] {
+    let id = egui::Id::new("quest-name-colors");
+    if let Some(c) = ctx.data(|d| d.get_temp::<[Color32; 3]>(id)) {
+        return c;
+    }
+    let c = parse_quest_colors(&assets.read_text("ini", "QuestNameColor.xml").unwrap_or_default());
+    ctx.data_mut(|d| d.insert_temp(id, c));
+    c
+}
+
+/// Une case du suivi à l'écran (`FUN_14059d1d0`).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TrackedQuest {
+    pub tid: i32,
+    pub title: String,
+    /// `Category` vaut 1 : couleur `Mission`, sinon `Epic`.
+    pub mission: bool,
+    /// Objectifs restants (ceux qui sont remplis sont cachés).
+    pub lines: Vec<String>,
+}
+
+/// Bouton du suivi : quatre images `<nom>_a…d`, ici repos, survol et enfoncé. Rend s'il est cliqué.
+#[allow(clippy::too_many_arguments)]
+fn tracker_button(ctx: &egui::Context, ui: &mut egui::Ui, hud: &mut HudState, assets: &Assets, painter: &egui::Painter, name: &str, r: Rect, id: (i32, usize)) -> bool {
+    let resp = ui.interact(r, egui::Id::new(("archonia-quest-tracker", name, id)), egui::Sense::click());
+    let state = if resp.is_pointer_button_down_on() { "c" } else if resp.hovered() { "b" } else { "a" };
+    if let Some((tex, _)) = hud.image(ctx, assets, &format!("{name}_{state}.png")) {
+        painter.image(tex, r, Rect::from_min_max(Pos2::ZERO, Pos2::new(1.0, 1.0)), Color32::WHITE);
+    }
+    resp.clicked()
+}
+
+/// Suivi à l'écran (AgcmUIQuestJournal, `FUN_14061c360`) : fenêtre sans entrée dans l'ini, créée à (800, 180) large de 200 sur
+/// un écran de 1024, ancrée ici à droite comme les autres fenêtres de ce côté. 10 cases empilées (`FUN_14061cd00` : x 4, y 4 puis
+/// hauteur + 2) de 200 × 63 (`questj_base_bg`), 200 × 17 réduites (`questj_base_b`) ; texte à (2, 2), large de 196 ; croix à 2 du
+/// bord, y 1, et bouton de réduction à sa gauche, à 2. Rend le TID à retirer du suivi (`FUN_14061bae0`).
+pub fn draw_quest_tracker(ctx: &egui::Context, hud: &mut HudState, assets: &Assets, rows: &[TrackedQuest], collapsed: &mut [bool; 10]) -> Option<i32> {
+    if rows.is_empty() {
+        return None;
+    }
+    let layout = Layout::new(ctx.screen_rect());
+    let s = layout.scale;
+    let origin = Pos2::new(layout.screen.right() - (1024.0 - 800.0) * s, layout.screen.top() + 180.0 * s);
+    let colors_id = egui::Id::new("quest-journal-colors");
+    let colors = ctx.data_mut(|d| *d.get_temp_mut_or_insert_with(colors_id, || parse_journal_colors(&assets.read_text("ini", "QuestNameColor.xml").unwrap_or_default())));
+    let uv = Rect::from_min_max(Pos2::ZERO, Pos2::new(1.0, 1.0));
+    let font = FontId::proportional((11.0 * s).max(9.0));
+    let mut removed = None;
+    egui::Area::new(egui::Id::new("archonia-quest-tracker")).fixed_pos(origin).order(egui::Order::Background).show(ctx, |ui| {
+        let painter = ui.painter().clone();
+        let mut y = 4.0;
+        for (i, row) in rows.iter().enumerate().take(collapsed.len()) {
+            let small = collapsed[i];
+            let h = if small { 17.0 } else { 63.0 };
+            let r = layout.rect(origin, [4.0, y], [200.0, h]);
+            y += h + 2.0;
+            if let Some((tex, _)) = hud.image(ctx, assets, if small { "questj_base_b.png" } else { "questj_base_bg.png" }) {
+                painter.image(tex, r, uv, Color32::WHITE);
+            }
+            // Réduite : le texte n'a que 15 de haut, le titre seul paraît.
+            let text_at = r.min + Vec2::splat(2.0 * s);
+            let wrap = 196.0 * s;
+            let title = ctx.fonts(|f| f.layout(row.title.clone(), font.clone(), colors[if row.mission { 0 } else { 1 }], wrap));
+            let title_h = title.size().y;
+            painter.galley(text_at, title, Color32::WHITE);
+            if !small {
+                let body = ctx.fonts(|f| f.layout(row.lines.join("\n"), font.clone(), Color32::WHITE, wrap));
+                painter.galley(text_at + Vec2::new(0.0, title_h), body, Color32::WHITE);
+            }
+            let size = |hud: &mut HudState, name: &str| hud.image(ctx, assets, name).map_or([16.0, 16.0], |(_, sz)| sz);
+            let x_size = size(hud, "questj_btn_x_a.png");
+            let win_size = size(hud, "questj_btn_win_a.png");
+            let x_at = 200.0 - 2.0 - x_size[0];
+            let x_r = layout.rect(r.min, [x_at, 1.0], x_size);
+            if tracker_button(ctx, ui, hud, assets, &painter, "questj_btn_x", x_r, (row.tid, i)) {
+                removed = Some(row.tid);
+            }
+            let win_r = layout.rect(r.min, [x_at - 2.0 - win_size[0], 1.0], win_size);
+            if tracker_button(ctx, ui, hud, assets, &painter, "questj_btn_win", win_r, (row.tid, i)) {
+                collapsed[i] = !collapsed[i];
+            }
+        }
+    });
+    removed
+}
+
 /// État d'une quête dans une liste.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum QuestState {
@@ -554,12 +687,13 @@ pub fn draw_quests(ctx: &egui::Context, hud: &mut HudState, assets: &Assets, vie
                         egui::ScrollArea::vertical().id_salt((id, "tree")).max_height(r.height()).show(ui, |ui| {
                             ui.set_width(r.width() - 24.0 * s);
 
+                            let [new, ongoing, complete] = quest_colors(ctx, assets);
                             for e in view.entries {
+                                // FUN_1404f4ae0 (AgcmQuest) : terminée, au journal, sinon nouvelle.
                                 let color = match e.state {
-                                    QuestState::Available => Color32::from_rgb(255, 220, 120),
-                                    QuestState::InProgress => Color32::from_rgb(200, 200, 200),
-                                    QuestState::Ready => Color32::from_rgb(140, 230, 120),
-                                    QuestState::Done => Color32::GRAY,
+                                    QuestState::Available => new,
+                                    QuestState::InProgress | QuestState::Ready => ongoing,
+                                    QuestState::Done => complete,
                                 };
                                 let text = egui::RichText::new(e.name.as_str()).size(font * 1.05).color(color);
                                 if ui.selectable_label(Some(e.tid) == view.selected, text).clicked() {

@@ -82,6 +82,24 @@ pub struct ItemTemplateInfo {
     pub part: i64,
     /// Taille maximale d'une pile (1 : ne s'empile pas).
     pub stack: i64,
+    /// Ligne présente dans `itemdatatable.txt` de `server-data/` ; `None` sans cette table du serveur.
+    pub server: Option<bool>,
+    /// Colonnes `Class` et `Race` d'`itemdatatable.txt` ; `None` si la table n'a pas été lue.
+    pub classes: Option<Vec<i64>>,
+    pub races: Option<Vec<i64>>,
+    /// Colonnes `MinSocket`, `MaxSocket`, absentes si vides.
+    pub min_socket: Option<i64>,
+    pub max_socket: Option<i64>,
+    /// Statistiques non nulles d'`itemdatatable.txt` (nom exact de la colonne, valeur).
+    pub stats: Vec<(String, f64)>,
+}
+
+/// Modèle de monstre (`CharacterDataTable.txt`) pour `ArchRust.GetMonsterTemplates`.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct MonsterTemplateInfo {
+    pub tid: i32,
+    pub name: String,
+    pub level: i64,
 }
 
 impl ItemTemplateInfo {
@@ -131,6 +149,8 @@ pub struct HostState {
     pub inventory: Vec<ItemInfo>,
     /// Catalogue des objets du client, trié par TID (donné une fois par le moteur à l'entrée en jeu).
     pub item_templates: std::sync::Arc<Vec<ItemTemplateInfo>>,
+    /// Modèles de monstres, triés par TID (donnés une fois par le moteur à l'entrée en jeu).
+    pub monster_templates: std::sync::Arc<Vec<MonsterTemplateInfo>>,
     pub camera: CameraInfo,
     /// Matrice vue × projection (colonnes) pour `WorldToScreen`.
     pub view_proj: [f32; 16],

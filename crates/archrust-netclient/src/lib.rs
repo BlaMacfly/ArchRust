@@ -19,6 +19,7 @@ pub mod connection;
 pub mod consumables;
 pub mod convert;
 pub mod customize;
+pub mod gacha;
 pub mod ext;
 pub mod guild;
 pub mod items;

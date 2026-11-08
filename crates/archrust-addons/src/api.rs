@@ -134,6 +134,39 @@ fn item_template_table(lua: &Lua, t: &ItemTemplateInfo) -> mlua::Result<Table> {
     e.set("part", t.part)?;
     e.set("stack", t.stack.max(1))?;
     e.set("category", t.category())?;
+    if let Some(server) = t.server {
+        e.set("server", server)?;
+    }
+    let ints = |list: &[i64]| lua.create_sequence_from(list.iter().copied());
+    if let Some(classes) = &t.classes {
+        e.set("classes", ints(classes)?)?;
+    }
+    if let Some(races) = &t.races {
+        e.set("races", ints(races)?)?;
+    }
+    if let Some(v) = t.min_socket {
+        e.set("minSocket", v)?;
+    }
+    if let Some(v) = t.max_socket {
+        e.set("maxSocket", v)?;
+    }
+    Ok(e)
+}
+
+/// Fiche complète de `GetItemTemplate` : `stats`, table « colonne → nombre » (entier si la valeur est entière).
+fn item_template_full(lua: &Lua, t: &ItemTemplateInfo) -> mlua::Result<Table> {
+    let e = item_template_table(lua, t)?;
+    if t.classes.is_some() {
+        let stats = lua.create_table()?;
+        for (name, v) in &t.stats {
+            if v.fract() == 0.0 {
+                stats.set(name.as_str(), *v as i64)?;
+            } else {
+                stats.set(name.as_str(), *v)?;
+            }
+        }
+        e.set("stats", stats)?;
+    }
     Ok(e)
 }
 
@@ -1186,9 +1219,25 @@ pub fn install(lua: &Lua, shared: Shared) -> mlua::Result<()> {
             lua.create_function(move |lua, tid: i64| {
                 let st = s.borrow();
                 match item_template(&st.host.item_templates, tid as i32) {
-                    Some(t) => Ok(Value::Table(item_template_table(lua, t)?)),
+                    Some(t) => Ok(Value::Table(item_template_full(lua, t)?)),
                     None => Ok(Value::Nil),
                 }
+            })?,
+        )?;
+        let s = shared.clone();
+        ar.set(
+            "GetMonsterTemplates",
+            lua.create_function(move |lua, ()| {
+                let st = s.borrow();
+                let list = lua.create_table()?;
+                for (i, m) in st.host.monster_templates.iter().enumerate() {
+                    let e = lua.create_table()?;
+                    e.set("tid", m.tid)?;
+                    e.set("name", m.name.as_str())?;
+                    e.set("level", m.level)?;
+                    list.set(i + 1, e)?;
+                }
+                Ok(list)
             })?,
         )?;
         let s = shared.clone();

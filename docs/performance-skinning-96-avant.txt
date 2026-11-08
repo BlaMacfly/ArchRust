@@ -1,0 +1,9 @@
+SHA256 animation.rs : CFF8460B919B518CD10D5E05C2068B5EAB106EE60F083F9D1F7B10A51ACDF472
+SHA256 rw.rs : 9FA98B50EEDB3CA998126C68BFDFB10EE6439798E519B9CFEC801521F70D54F3
+TID 96 clip=a0060200.ean poses=60 appels_par_mesure=600 ; CPU seulement, temps en microsecondes
+modele=a0000060.ecl frames=87 pieces=0 sommets=0
+modele=b0000060.ecl frames=95 pieces=8 sommets=1237
+essai=1 sample=1523 world=3524 matrices_toutes_pieces=43206 deform_toutes_pieces=57211 recherche_lineaire=2421 recherche_indexee_construction_incluse=3561
+essai=2 sample=2211 world=3647 matrices_toutes_pieces=45828 deform_toutes_pieces=62663 recherche_lineaire=1417 recherche_indexee_construction_incluse=2451
+essai=3 sample=1846 world=2856 matrices_toutes_pieces=40662 deform_toutes_pieces=52829 recherche_lineaire=1563 recherche_indexee_construction_incluse=2269
+essai=4 sample=1549 world=2665 matrices_toutes_pieces=44697 deform_toutes_pieces=50998 recherche_lineaire=1442 recherche_indexee_construction_incluse=2028

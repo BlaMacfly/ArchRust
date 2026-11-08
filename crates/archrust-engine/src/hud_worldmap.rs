@@ -1,7 +1,9 @@
 //! Carte du monde d'Archonia : fenêtre `UI_WORLD_MAP` (780 × 575, `UIPos` 100,50), ouverte par la
 //! touche M (`Hotkey=0:50` « World Map », `WorldMap_Toggle`). Le contrôle de type 16 (`WorldMap`)
-//! affiche l'image de la carte choisie dans `ini/worldmap.ini` (`RegionTexture`, pack
-//! `texture/worldmap`, 1024 × 1024) : cette image porte aussi le cadre de la fenêtre. La zone
+//! affiche l'image de la carte choisie dans `ini/worldmap.ini` (`RegionTexture`, pack `texture/ui`,
+//! FUN_14068b8f0 : `FUN_14078e8a0(contrôle, carte + 0x104, "Texture\UI\\", 1)`, 1024 × 1024 ; le pack
+//! `texture/worldmap`, sans les 92 images nommées, n'est lu que par FUN_140702c40, jamais appelée) : cette
+//! image porte aussi le cadre de la fenêtre. La zone
 //! `UIActiveAreaSX…EY` de l'image couvre le rectangle du monde `XStart…ZEnd` (x vers la droite,
 //! z vers le bas).
 //!
@@ -58,30 +60,6 @@ pub fn map_to_world(area: [f32; 4], bounds: [f32; 4], px: f32, py: f32) -> [f32;
     [bounds[0] + fx * (bounds[2] - bounds[0]), bounds[1] + fz * (bounds[3] - bounds[1])]
 }
 
-/// Image du pack `texture/worldmap` (taille d'origine pour les UV).
-fn worldmap_image(ctx: &egui::Context, hud: &mut HudState, assets: &Assets, name: &str) -> Option<(egui::TextureId, [f32; 2])> {
-    let key = format!("worldmap:{}", name.to_ascii_lowercase());
-    if !hud.images.contains_key(&key) {
-        let loaded = match assets.image("texture/worldmap", &name.to_ascii_lowercase()) {
-            Ok(img) => {
-                let orig = assets
-                    .read_packed("texture/worldmap", &name.to_ascii_lowercase())
-                    .ok()
-                    .filter(|b| b.len() >= 24 && b.starts_with(b"\x89PNG"))
-                    .map(|b| [u32::from_be_bytes(b[16..20].try_into().unwrap()) as f32, u32::from_be_bytes(b[20..24].try_into().unwrap()) as f32])
-                    .unwrap_or([img.width as f32, img.height as f32]);
-                Some(UiImage { tex: upload(ctx, &format!("hud-{key}"), &img), orig })
-            }
-            Err(e) => {
-                log::debug!("carte du monde : texture/worldmap/{name} : {e:#}");
-                None
-            }
-        };
-        hud.images.insert(key.clone(), loaded);
-    }
-    hud.images.get(&key)?.as_ref().map(|i| (i.tex.id(), i.orig))
-}
-
 /// Dessine la carte du monde ; les demandes s'ajoutent à `out`.
 pub fn draw_world_map(ctx: &egui::Context, hud: &mut HudState, assets: &Assets, view: &WorldMapView, out: &mut Vec<WorldMapUi>) {
     let Some(w) = super::npc_ui::window(hud, assets, "UI_WORLD_MAP") else { return };
@@ -89,7 +67,7 @@ pub fn draw_world_map(ctx: &egui::Context, hud: &mut HudState, assets: &Assets, 
         let s = layout.scale;
         let map_rect = layout.rect(origin, [0.0, 0.0], w.size);
         // Image de la carte, au pixel près depuis le coin haut gauche (cadre compris).
-        if let Some((tex, orig)) = worldmap_image(ctx, hud, assets, view.texture) {
+        if let Some((tex, orig)) = hud.image(ctx, assets, view.texture) {
             let uv = Pos2::new((w.size[0] / orig[0]).min(1.0), (w.size[1] / orig[1]).min(1.0));
             let draw = Rect::from_min_size(map_rect.min, Vec2::new(map_rect.width() * (orig[0] / w.size[0]).min(1.0), map_rect.height() * (orig[1] / w.size[1]).min(1.0)));
             painter.image(tex, draw, Rect::from_min_max(Pos2::ZERO, uv), Color32::WHITE);

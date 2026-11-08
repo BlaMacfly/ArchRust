@@ -156,6 +156,20 @@ impl App {
 mod tests {
     use super::*;
 
+    /// Avec les données du client (`ARCHRUST_GAME_DIR`) : les images de `worldmap.ini` sont dans le pack
+    /// `texture/ui` que lit Archonia (FUN_14068b8f0), dont celle de Limelight Northern du retour de bug.
+    #[test]
+    fn images_du_client() {
+        let Some(dir) = std::env::var_os("ARCHRUST_GAME_DIR") else { return };
+        let assets = Assets::new(Some(dir.into()), &[]);
+        let maps = load_maps(&assets);
+        assert!(maps.len() > 200, "{}", maps.len());
+        assert!(maps.iter().any(|m| m.group == "Limelight Northern" && m.texture.eq_ignore_ascii_case("Human_Limelight_N.png")));
+        let missing: Vec<&str> = maps.iter().filter(|m| assets.image("texture/ui", &m.texture.to_ascii_lowercase()).is_err()).map(|m| m.texture.as_str()).collect();
+        eprintln!("images de carte absentes de texture/ui : {missing:?}");
+        assert!(!missing.contains(&"Human_Limelight_N.png"), "{missing:?}");
+    }
+
     #[test]
     fn carte_du_joueur() {
         let m = |group: &str, parent: &str, b: [f32; 4]| MapEntry { group: group.into(), parent: parent.into(), bounds: b, texture: "t.png".into(), area: [0.0; 4] };

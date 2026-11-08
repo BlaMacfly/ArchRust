@@ -28,6 +28,8 @@ pub enum ItemUi {
     DropOnEquip(ItemDrag),
     /// Maj + clic : séparer une pile.
     Split(i32),
+    /// Objet du sac lâché sur la corbeille : demander confirmation.
+    Destroy(i32),
     /// Bouton « Sell » de l'inventaire : boîte de ventes (voir `app_auction.rs`).
     SalesBox,
     /// Bouton « Chantra Bag » de l'inventaire : inventaire Cash (voir `app_petbag.rs`).
@@ -219,13 +221,22 @@ pub fn draw_character(
                     1 if c.textures.is_empty() && c.name != "CONTROL_29628" && display.starts_with("1:") && display.len() > 2 => {
                         shadow_text(&painter, r.left_center(), Align2::LEFT_CENTER, &display[2..], font, Color32::from_rgb(235, 225, 200));
                     }
-                    1 if value("현재_레벨") => {
+                    // Par le nom du contrôle : `display` vient d'`ini_fr/UI_1024X768.ini`, où le texte coréen de la
+                    // fonction d'affichage (`현재_레벨`, `캐릭터_이름`, `경험치`) n'est plus lisible (Windows-1252).
+                    1 if c.name == "Edit_CharacterLevel" => {
                         // Le fond dessine déjà « Lv ».
                         let text = stats.level.map_or(String::new(), |l| l.to_string());
                         shadow_text(&painter, r.center(), Align2::CENTER_CENTER, &text, font, Color32::from_rgb(255, 230, 160));
                     }
-                    1 if value("캐릭터_이름") => {
-                        shadow_text(&painter, r.left_center(), Align2::LEFT_CENTER, name, font * 1.05, Color32::WHITE);
+                    // Centré (`CtrlFont` : alignement 17).
+                    1 if c.name == "CONTROL_30392" => {
+                        shadow_text(&painter, r.center(), Align2::CENTER_CENTER, name, font * 1.05, Color32::WHITE);
+                    }
+                    // Plaque du haut, « race classe » (FUN_1404fab20, cas 5 : `%s` puis ` %s`, noms de `chartype.ini`).
+                    1 if c.name == "CONTROL_642" => {
+                        let f = |i: u8| stats.factors.get(&(archrust_netclient::world::factor_part::TYPE, i)).copied();
+                        let text = f(0).zip(f(2)).map_or(String::new(), |(race, class)| super::status_ui::race_class_name(assets, race, class));
+                        shadow_text(&painter, r.center(), Align2::CENTER_CENTER, &text, font, Color32::from_rgb(255, 240, 200));
                     }
                     1 if value("HP_All") || value("MP_All") => {
                         let (cur, max) = if value("HP_All") { (stats.hp, stats.max_hp) } else { (stats.mp, stats.max_mp) };
@@ -242,7 +253,7 @@ pub fn draw_character(
                             control_image(ctx, hud, assets, &painter, r, c.size, tex, f);
                         }
                     }
-                    1 if value("경험치") => {
+                    1 if c.name == "CONTROL_32636" => {
                         if let Some(f) = exp {
                             shadow_text(&painter, r.center(), Align2::CENTER_CENTER, &format!("{:.1} %", f * 100.0), font, Color32::WHITE);
                         }

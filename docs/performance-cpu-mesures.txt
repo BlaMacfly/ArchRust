@@ -1,0 +1,28 @@
+CPU, profil dev opt-level=1 ; aucune mesure FPS/GPU. Temps en microsecondes.
+Copie hôte synthétique : 4096 instances x 240 images ; cache de production inclus.
+uploads dynamique=0% essai=1 avant=17065 apres=17182 copies_avant=983040 copies_apres=4096
+uploads dynamique=0% essai=2 avant=12681 apres=14092 copies_avant=983040 copies_apres=4096
+uploads dynamique=0% essai=3 avant=23035 apres=15907 copies_avant=983040 copies_apres=4096
+uploads dynamique=0% essai=4 avant=15838 apres=13132 copies_avant=983040 copies_apres=4096
+uploads dynamique=10% essai=1 avant=11805 apres=27644 copies_avant=983040 copies_apres=102086
+uploads dynamique=10% essai=2 avant=10724 apres=27476 copies_avant=983040 copies_apres=102086
+uploads dynamique=10% essai=3 avant=12492 apres=27142 copies_avant=983040 copies_apres=102086
+uploads dynamique=10% essai=4 avant=10900 apres=13975 copies_avant=983040 copies_apres=102086
+uploads dynamique=100% essai=1 avant=15566 apres=30997 copies_avant=983040 copies_apres=983040
+uploads dynamique=100% essai=2 avant=19357 apres=27643 copies_avant=983040 copies_apres=983040
+uploads dynamique=100% essai=3 avant=11902 apres=35556 copies_avant=983040 copies_apres=983040
+uploads dynamique=100% essai=4 avant=19201 apres=26396 copies_avant=983040 copies_apres=983040
+retain n=32 x100 essai=1 avant=0 apres=94
+retain n=32 x100 essai=2 avant=0 apres=148
+retain n=32 x100 essai=3 avant=10 apres=77
+retain n=32 x100 essai=4 avant=0 apres=78
+retain n=256 x100 essai=1 avant=2565 apres=858
+retain n=256 x100 essai=2 avant=3744 apres=576
+retain n=256 x100 essai=3 avant=2720 apres=555
+retain n=256 x100 essai=4 avant=2253 apres=944
+retain n=2000 x100 essai=1 avant=236487 apres=7220
+retain n=2000 x100 essai=2 avant=175609 apres=10205
+retain n=2000 x100 essai=3 avant=151572 apres=8068
+retain n=2000 x100 essai=4 avant=223311 apres=10085
+seuil_pose images=60 ancien=30 fluide=60
+seuil_pose images=144 ancien=29 fluide=144

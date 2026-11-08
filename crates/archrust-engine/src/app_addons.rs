@@ -4,7 +4,7 @@
 
 use super::*;
 use crate::addon_ui::{AddonUi, AddonUiOutput};
-use archrust_addons::{CameraInfo, ItemInfo, ItemTemplateInfo, UnitInfo};
+use archrust_addons::{CameraInfo, ItemInfo, ItemTemplateInfo, MonsterTemplateInfo, UnitInfo};
 use winit::keyboard::ModifiersState;
 
 /// CVars du moteur que les AddOns peuvent lire et modifier (`GetCVar` / `SetCVar`).
@@ -98,10 +98,96 @@ fn unit_of(e: &Entity, moving: bool) -> UnitInfo {
 /// Catalogue des objets du client pour les AddOns, trié par TID : nom, icône (colonne `TEXTURE`, texture `l%07x`
 /// comme les icônes du HUD), niveau requis (seconde colonne `Level`, bloc `RestrictFactor`), `Type`, `Kind`, `Part`,
 /// taille de pile (`MaxStackableCount` si `IsStackable`).
+/// Colonnes numériques d'`itemdatatable.txt` données dans `stats` (`<E>` : `ELEMENTS`), noms exacts de l'en-tête.
+const ITEM_STATS: [&str; 24] = ["Physical_Min_Damage", "Physical_Max_Damage", "Physical_Defense_Point", "PDR", "BlockRate", "ATK Speed", "ATK Range", "Physical_ATKRate", "Magic_ATKRate", "CON_Bonus_Point", "STR_Bonus_Point", "DEX_Bonus_Point", "INT_Bonus_Point", "Wis_Bonus_Point", "HP", "SP", "MP", "Hp_Buff", "Mp_Buff", "Attack_Buff", "Defense_Buff", "Run_Buff", "Rank", "DUR"];
+const ELEMENTS: [&str; 8] = ["Magic", "Water", "Fire", "Earth", "Air", "Poison", "Ice", "Linghtning"];
+
+/// Ligne d'`itemdatatable.txt` utile à la fiche d'un objet.
+#[derive(Debug, Clone, Default, PartialEq)]
+struct ItemRow {
+    classes: Vec<i64>,
+    races: Vec<i64>,
+    min_socket: Option<i64>,
+    max_socket: Option<i64>,
+    stats: Vec<(String, f64)>,
+}
+
+/// Lignes d'`itemdatatable.txt` par TID (la première d'un TID compte). Les noms de colonnes sont comparés sans leurs blancs.
+fn parse_item_rows(text: &str) -> HashMap<i32, ItemRow> {
+    let mut lines = text.lines();
+    let header: Vec<&str> = lines.next().unwrap_or_default().split('\t').map(str::trim).collect();
+    let col = |n: &str| header.iter().position(|h| h.eq_ignore_ascii_case(n));
+    let Some(tid_col) = col("TID") else { return HashMap::new() };
+    let (class, race, min, max) = (col("Class"), col("Race"), col("MinSocket"), col("MaxSocket"));
+    let mut names: Vec<String> = ITEM_STATS.iter().map(|s| s.to_string()).collect();
+    for e in ELEMENTS {
+        names.extend([format!("{e}_Min_Damage"), format!("{e}_Max_Damage"), format!("{e}_Defense_Point"), format!("{e}_Defense_Rate")]);
+    }
+    names.sort();
+    names.dedup();
+    let stat_cols: Vec<(usize, &str)> = names.iter().filter_map(|n| Some((col(n)?, header[col(n)?]))).collect();
+    let mut out = HashMap::new();
+    for line in lines {
+        let f: Vec<&str> = line.split('\t').collect();
+        let Some(tid) = f.get(tid_col).and_then(|t| t.trim().parse::<i32>().ok()) else { continue };
+        let cell = |c: Option<usize>| c.and_then(|c| f.get(c)).map(|v| v.trim()).filter(|v| !v.is_empty());
+        let list = |c: Option<usize>| cell(c).map_or(Vec::new(), |v| v.split(';').filter_map(|x| x.trim().parse::<i64>().ok()).collect());
+        let int = |c: Option<usize>| cell(c).and_then(|v| v.parse::<f64>().ok()).map(|v| v as i64);
+        let stats = stat_cols.iter().filter_map(|(c, n)| Some(((*n).to_string(), cell(Some(*c))?.parse::<f64>().ok().filter(|v| *v != 0.0)?))).collect();
+        out.entry(tid).or_insert(ItemRow { classes: list(class), races: list(race), min_socket: int(min), max_socket: int(max), stats });
+    }
+    out
+}
+
+/// Monstres de `CharacterDataTable.txt` (bit 0x4 de `Type`, voir `character_types` d'`app_combat.rs`) : TID et niveau de `base`,
+/// nom de `local` (table de la langue du client, sans quoi celui de `base`).
+fn parse_monsters(base: &str, local: &str) -> Vec<MonsterTemplateInfo> {
+    fn columns(line: &str) -> Vec<&str> {
+        line.split('\t').map(str::trim).collect()
+    }
+    let names: HashMap<i32, String> = {
+        let mut lines = local.lines();
+        let header = columns(lines.next().unwrap_or_default());
+        let at = |n: &str| header.iter().position(|h| h.eq_ignore_ascii_case(n));
+        match (at("TID"), at("Name")) {
+            (Some(t), Some(n)) => lines.filter_map(|l| { let f = columns(l); Some((f.get(t)?.parse().ok()?, f.get(n)?.to_string())) }).collect(),
+            _ => HashMap::new(),
+        }
+    };
+    let mut lines = base.lines();
+    let header = columns(lines.next().unwrap_or_default());
+    let at = |n: &str| header.iter().position(|h| h.eq_ignore_ascii_case(n));
+    let (Some(tid), Some(name), Some(ty), Some(lvl)) = (at("TID"), at("Name"), at("Type"), at("LVL")) else { return Vec::new() };
+    let mut out: Vec<MonsterTemplateInfo> = lines
+        .filter_map(|l| {
+            let f = columns(l);
+            let t: i32 = f.get(tid)?.parse().ok()?;
+            (f.get(ty)?.parse::<i64>().ok()? & 4 != 0).then(|| MonsterTemplateInfo {
+                tid: t,
+                name: names.get(&t).filter(|n| !n.is_empty()).cloned().unwrap_or_else(|| f.get(name).unwrap_or(&"").to_string()),
+                level: f.get(lvl).and_then(|v| v.parse::<f64>().ok()).map_or(0, |v| v as i64),
+            })
+        })
+        .collect();
+    out.sort_by_key(|m| m.tid);
+    out.dedup_by_key(|m| m.tid);
+    out
+}
+
+fn monster_templates(assets: &Assets) -> Vec<MonsterTemplateInfo> {
+    parse_monsters(&super::npc_glue::client_text_in(assets, "ini", "CharacterDataTable.txt"), &super::npc_glue::client_text(assets, "CharacterDataTable.txt"))
+}
+
 fn item_templates(assets: &Assets) -> Vec<ItemTemplateInfo> {
     let Ok(table) = assets.table("ini", "ItemTemplateAll.ini") else {
         return Vec::new();
     };
+    // Fiche d'`itemdatatable.txt` : celle du serveur (`server-data/`) si elle existe, qui dit aussi ce que le serveur connaît.
+    let server_text = assets.server_text("ini", "itemdatatable.txt");
+    let on_server = server_text.is_some();
+    let rows_text = server_text.unwrap_or_else(|| super::npc_glue::client_text_in(assets, "ini", "itemdatatable.txt"));
+    let rows = parse_item_rows(&rows_text);
+    let rows_read = !rows.is_empty();
     let Some(header) = table.section("") else {
         return Vec::new();
     };
@@ -117,6 +203,7 @@ fn item_templates(assets: &Assets) -> Vec<ItemTemplateInfo> {
             let num = |v: Option<&str>| v.and_then(|v| v.trim().parse::<f64>().ok()).map_or(0, |v| v as i64);
             let icon = num(get(&texture));
             let stack = if num(get(&stackable)) != 0 { num(get(&max_stack)).max(1) } else { 1 };
+            let row = rows.get(&tid);
             Some(ItemTemplateInfo {
                 tid,
                 name: get(&name).unwrap_or_default().trim().to_string(),
@@ -126,6 +213,12 @@ fn item_templates(assets: &Assets) -> Vec<ItemTemplateInfo> {
                 kind: num(get(&kind)),
                 part: num(get(&part)),
                 stack,
+                server: on_server.then(|| rows.contains_key(&tid)),
+                classes: rows_read.then(|| row.map_or(Vec::new(), |r| r.classes.clone())),
+                races: rows_read.then(|| row.map_or(Vec::new(), |r| r.races.clone())),
+                min_socket: row.and_then(|r| r.min_socket),
+                max_socket: row.and_then(|r| r.max_socket),
+                stats: row.map_or(Vec::new(), |r| r.stats.clone()),
             })
         })
         .collect();
@@ -345,6 +438,8 @@ impl App {
                 .get_or_insert_with(|| std::sync::Arc::new(item_templates(&self.assets)))
                 .clone();
             self.addons.set_host(|h| h.item_templates = templates);
+            let monsters = std::sync::Arc::new(monster_templates(&self.assets));
+            self.addons.set_host(|h| h.monster_templates = monsters);
             self.addon_glue.inventory_sig = None;
             self.sync_addons_frame();
             self.sync_addons_world();
@@ -727,6 +822,43 @@ impl App {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn fiche_d_objet_et_monstres() {
+        let rows = parse_item_rows("TID\tName\tClass\tRace\t MinSocket \tMaxSocket\tATK Speed\tFire_Min_Damage\tDUR\n7\tx\t1;2;4\t2\t1\t3\t60\t0\t\n8\ty\t\t\t\t\t\t1.5\t100\n7\tdoublon\t9\t\t\t\t\t\t\n");
+        let a = &rows[&7];
+        assert_eq!((a.classes.clone(), a.races.clone(), a.min_socket, a.max_socket), (vec![1, 2, 4], vec![2], Some(1), Some(3)));
+        assert_eq!(a.stats, vec![("ATK Speed".to_string(), 60.0)], "valeurs non nulles seulement");
+        let b = &rows[&8];
+        assert!(b.classes.is_empty() && b.races.is_empty() && b.min_socket.is_none());
+        assert_eq!(b.stats, vec![("DUR".to_string(), 100.0), ("Fire_Min_Damage".to_string(), 1.5)]);
+        let base = "TID\tName\tType\tLVL\n1\tArcher\t196609\t1\n450\tDeer\t4\t3\n451\tWorm\t12\t7\n";
+        let local = "TID\tName\n450\tCerf\n451\t\n";
+        let m = parse_monsters(base, local);
+        assert_eq!(m, vec![MonsterTemplateInfo { tid: 450, name: "Cerf".into(), level: 3 }, MonsterTemplateInfo { tid: 451, name: "Worm".into(), level: 7 }]);
+    }
+
+    /// Avec `server-data/` (`ARCHRUST_GAME_DIR`) : un objet propre à Archonia est signalé, les monstres sont lus.
+    #[test]
+    fn catalogue_avec_les_donnees_du_serveur() {
+        let Some(dir) = std::env::var_os("ARCHRUST_GAME_DIR") else { return };
+        let dir = std::path::PathBuf::from(dir);
+        let server = dir.join("server-data");
+        if !server.is_dir() {
+            return;
+        }
+        let assets = Assets::new(Some(dir), &[]).with_server_data(Some(&server));
+        let list = item_templates(&assets);
+        let archonia = list.iter().find(|t| t.tid == 15151).unwrap();
+        assert_eq!(archonia.server, Some(false), "15151 n'existe que chez Archonia");
+        let helm = list.iter().find(|t| t.tid == 22050).unwrap();
+        assert_eq!(helm.server, Some(true));
+        assert!(helm.classes.as_ref().is_some_and(|c| !c.is_empty()), "{helm:?}");
+        let on = list.iter().filter(|t| t.server == Some(true)).count();
+        let monsters = monster_templates(&assets);
+        eprintln!("{} objets dont {on} sur le serveur, {} monstres", list.len(), monsters.len());
+        assert!(on > 10_000 && monsters.len() > 100 && monsters.iter().all(|m| !m.name.is_empty()), "{on} {}", monsters.len());
+    }
 
     /// Avec les données du client (`ARCHRUST_GAME_DIR`) : catalogue des objets donné aux AddOns.
     #[test]

@@ -34,7 +34,7 @@ use crate::options::{DisplayOptions, RefuseOptions, VideoOptions};
 use crate::ui::PackAction;
 
 const TABS: [(&str, &str); 6] = [("GFX", "Option_Video"), ("Son", "Option_Sound"), ("Affichage", "Option_System"), ("Fonction", "Option_Option"), ("Avance", "Option_Advanced"), ("Video", "Option_VideoRes")];
-pub(super) const OPTION_WINDOWS: [&str; 7] = ["Option_Video", "Option_Sound", "Option_System", "Option_Option", "Option_Advanced", DETAIL_NATURE, "Option_VideoRes"];
+pub(super) const OPTION_WINDOWS: [&str; 9] = ["Option_Video", "Option_Sound", "Option_System", "Option_Option", "Option_Advanced", DETAIL_NATURE, "Option_VideoRes", DETAIL_EFFECT, DETAIL_SHADOW];
 /// Onglets d'`Option_VideoRes` (« Video », ouverte par `OpTabVid_Option_Video` d'`Option_Video`) : rang de
 /// [`TABS`] d'après le nom du bouton (`OpVR_Btn_GFX`…), ses libellés restant en anglais.
 const VIDEORES_TABS: [(&str, usize); 5] = [("OpVR_Btn_GFX", 0), ("OpVR_Btn_Sound", 1), ("OpVR_Btn_Display", 2), ("OpVR_Btn_Func", 3), ("OpVR_Btn_Adv", 4)];
@@ -44,11 +44,17 @@ const WINDOW_MODES: [&str; 3] = ["Fullscreen", "Windowed", "Borderless"];
 /// listes Oui / Non (`OP_AntiAliasing` ramené à 0 / 1 par FUN_14070ed10, `OP_HighOptimization` « V-Sync »).
 const SHADOW_LABELS: [&str; 4] = ["Option_Msg_OFF", "Option_Msg_LOW", "Option_Msg_MEDIUM", "Option_Msg_HIGH"];
 const ON_OFF_LABELS: [&str; 2] = ["Option_Msg_OFF", "Option_Msg_ON"];
+/// Libellés d'`OP_Bloom` (FUN_140706500, `+0x1820`).
+const BLOOM_LABELS: [&str; 5] = ["Option_Msg_OFF", "Option_Msg_TYPE1", "Option_Msg_TYPE2", "Option_Msg_TYPE3", "Option_Msg_TYPE4"];
 /// Fenêtre « Environnement » ouverte par le bouton détail (`OP_Nature`) de l'onglet GFX : reflets
 /// (`OP_LensFlare`), brouillard (`OP_Fog`), effets météo (`OP_Sky`) en cases Oui/Non ; « Objets »
 /// (`OP_NaturalObj`, herbe) en trois cases exclusives `OP_Detail_Nature_Radio_H/M/L`
 /// (`CtrlUserData2=3/2/1:0:OP_NaturalObj`).
 const DETAIL_NATURE: &str = "Option_Detail_Nature";
+/// Boutons « Adv. » : niveaux d'effets (`OP_EffectField`, `OP_EffectCombat` 3 à 0, `OP_EffectUI`, `OP_EffectSkill` 1 / 0)
+/// et ombres (`OP_ShadowChar` 3 à 0, `OP_ShadowSelf`, `OP_ShadowObject` 1 / 0).
+const DETAIL_EFFECT: &str = "Option_Detail_Effect";
+const DETAIL_SHADOW: &str = "Option_Detail_Shadow";
 /// Libellés de la liste `OP_Nature` (`uimessage.txt`).
 const NATURE_LABELS: [&str; 3] = ["Option_Msg_LOW", "Option_Msg_MEDIUM", "Option_Msg_HIGH"];
 /// Libellés de la liste `OP_Effect` (0 à 4, `Effect` de `COption.ini`) : choix d'`uimessage.txt`
@@ -88,6 +94,8 @@ fn option_flag<'b>(action: &str, display: &'b mut DisplayOptions, refuse: &'b mu
         "OP_RefuseTrade" => &mut refuse.trade,
         "OP_RefusePartyIn" => &mut refuse.party,
         "OP_RefuseGuildIn" => &mut refuse.guild,
+        "OP_RefuseGuildBattle" => &mut refuse.guild_battle,
+        "OP_RefuseGuildRelation" => &mut refuse.guild_relation,
         "OP_RefuseBuddy" => &mut refuse.buddy,
         _ => return None,
     })
@@ -174,8 +182,10 @@ pub fn draw_options(ctx: &egui::Context, hud: &mut HudState, assets: &Assets, ed
                         }
                     }
                     (3, n) if n.ends_with("ResetUIPos") => {
+                        // `OpAdv_ResetUIPositions` (FUN_140611eb0) : `ResetUIPos_Question` demande d'abord (voir plus bas).
                         if button(ctx, ui, hud, assets, &painter, r, c, fixed.unwrap_or(""), font, true, ("options-reset", tab)).clicked() {
-                            ctx.memory_mut(|m| m.reset_areas());
+                            let text = crate::app::portal_glue::ui_event_text(assets, "ResetUIPos_Question");
+                            ctx.data_mut(|d| d.insert_temp(egui::Id::new("options-reset-ask"), text));
                         }
                     }
                     // Onglet Son : interrupteurs et curseurs reliés aux réglages audio.
@@ -211,12 +221,17 @@ pub fn draw_options(ctx: &egui::Context, hud: &mut HudState, assets: &Assets, ed
                         }
                     }
                     // GFX et Video : ombre, multiéchantillonnage, V-Sync, résolution, mode de fenêtre.
-                    (5, _) if (tab == 0 && matches!(c.action.as_deref(), Some("OP_Shadow" | "OP_AntiAliasing" | "OP_HighOptimization"))) || (tab == 5 && matches!(c.action.as_deref(), Some("OP_Resolution" | "OP_WindowMode"))) => {
+                    (5, _) if (tab == 0 && matches!(c.action.as_deref(), Some("OP_Shadow" | "OP_AntiAliasing" | "OP_HighOptimization" | "OP_WideView" | "OP_Bloom" | "OP_AutoExposure" | "OP_MatEffect" | "OP_Impact"))) || (tab == 5 && matches!(c.action.as_deref(), Some("OP_Resolution" | "OP_WindowMode"))) => {
                         let action = c.action.as_deref().unwrap_or("");
                         let text = match action {
                             "OP_Shadow" => ui_message(hud, assets, SHADOW_LABELS[video.shadow.min(3) as usize]),
                             "OP_AntiAliasing" => ui_message(hud, assets, ON_OFF_LABELS[video.multisampling as usize]),
                             "OP_HighOptimization" => ui_message(hud, assets, ON_OFF_LABELS[video.vsync as usize]),
+                            "OP_WideView" => ui_message(hud, assets, ON_OFF_LABELS[video.wide_view as usize]),
+                            "OP_AutoExposure" => ui_message(hud, assets, ON_OFF_LABELS[video.auto_exposure as usize]),
+                            "OP_MatEffect" => ui_message(hud, assets, ON_OFF_LABELS[video.mat_effect as usize]),
+                            "OP_Impact" => ui_message(hud, assets, ON_OFF_LABELS[video.impact_fx as usize]),
+                            "OP_Bloom" => ui_message(hud, assets, BLOOM_LABELS[video.bloom.min(4) as usize]),
                             "OP_Resolution" => video.resolution.map(|(w, h)| format!("{w} x {h}")).unwrap_or_default(),
                             _ => WINDOW_MODES[video.window_mode.min(2) as usize].to_string(),
                         };
@@ -226,6 +241,22 @@ pub fn draw_options(ctx: &egui::Context, hud: &mut HudState, assets: &Assets, ed
                         }
                         shadow_text(&painter, r.left_center() + Vec2::new(4.0 * s, 0.0), Align2::LEFT_CENTER, &text, font, Color32::WHITE);
                         combos.push((r, action));
+                    }
+                    // Intensité du bloom (`OP_BloomVal`, `GlowIntensity`) : curseur « Low » → « High ».
+                    (14, _) if tab == 0 && c.action.as_deref() == Some("OP_BloomVal") => {
+                        let cursor = w.controls.iter().skip_while(|x| x.name != name).nth(1).filter(|x| x.kind == 15);
+                        let mut value = video.glow_intensity.min(100) as f32 / 100.0;
+                        if slider(ctx, ui, hud, assets, &painter, r, c, cursor, &mut value, s, ("options-slide", name)) {
+                            video.glow_intensity = (value * 100.0).round() as u8;
+                            out.changed = true;
+                        }
+                    }
+                    // « Optimiser la vitesse du jeu » (`OP_SpeedTuning`, `AUTOTUNING`).
+                    (3, _) if tab == 0 && c.action.as_deref() == Some("OP_SpeedTuning") => {
+                        if checkbox(ctx, ui, hud, assets, &painter, r, c, video.speed_tuning, true, ("options-check", tab, name)).clicked() {
+                            video.speed_tuning = !video.speed_tuning;
+                            out.changed = true;
+                        }
                     }
                     // Gamma (`OP_BrightVal`, `BRIGHT=100:valeur`) : curseur « Dark » → « Bright ».
                     (14, _) if tab == 0 && c.action.as_deref() == Some("OP_BrightVal") => {
@@ -277,6 +308,26 @@ pub fn draw_options(ctx: &egui::Context, hud: &mut HudState, assets: &Assets, ed
                             video.hide_other_effects = !video.hide_other_effects;
                             out.changed = true;
                         }
+                    }
+                    // Boutons « Adv. » : `Option_Detail_Effect` (`CONTROL_28534`), `Option_Detail_Shadow` (`CONTROL_7608`).
+                    (3, "CONTROL_28534" | "CONTROL_7608") if tab == 0 => {
+                        if button(ctx, ui, hud, assets, &painter, r, c, fixed.unwrap_or(""), font, true, ("options-detail", name)).clicked() {
+                            let id = egui::Id::new(if name == "CONTROL_28534" { DETAIL_EFFECT } else { DETAIL_SHADOW });
+                            ctx.data_mut(|d| {
+                                let open = d.get_temp_mut_or_default::<bool>(id);
+                                *open = !*open;
+                            });
+                        }
+                    }
+                    // Liste `OP_Water` (`CONTROL_6118`, valeurs 0 à 4, FUN_1407128a0).
+                    (5, _) if tab == 0 && c.action.as_deref() == Some("OP_Water") => {
+                        let text = ui_message(hud, assets, EFFECT_LABELS[video.water.min(4) as usize]);
+                        if button(ctx, ui, hud, assets, &painter, r, c, "", font, true, ("options-combo", "OP_Water")).clicked() {
+                            cycle_option(video, "OP_Water", resolutions);
+                            out.changed = true;
+                        }
+                        shadow_text(&painter, r.left_center() + Vec2::new(4.0 * s, 0.0), Align2::LEFT_CENTER, &text, font, Color32::WHITE);
+                        combos.push((r, "OP_Water"));
                     }
                     // Bouton détail de l'environnement : fenêtre `Option_Detail_Nature`.
                     (3, _) if tab == 0 && c.action.as_deref() == Some("OP_Nature") => {
@@ -342,11 +393,26 @@ pub fn draw_options(ctx: &egui::Context, hud: &mut HudState, assets: &Assets, ed
     if draw_detail_nature(ctx, hud, assets, video) {
         out.changed = true;
     }
+    if draw_detail_radio(ctx, hud, assets, video) {
+        out.changed = true;
+    }
+    if let Some(text) = ctx.data(|d| d.get_temp::<String>(egui::Id::new("options-reset-ask"))).filter(|t| !t.is_empty()) {
+        if let Some(yes) = crate::hud::confirm_box(ctx, hud, assets, "options-reset-confirm", &text) {
+            ctx.data_mut(|d| d.insert_temp(egui::Id::new("options-reset-ask"), String::new()));
+            if yes {
+                ctx.memory_mut(|m| m.reset_areas());
+            }
+        }
+    }
     if ctx.input(|i| i.key_pressed(egui::Key::Escape)) {
         out.close = true;
     }
     if out.close {
-        ctx.data_mut(|d| d.insert_temp(egui::Id::new(DETAIL_NATURE), false));
+        ctx.data_mut(|d| {
+            d.insert_temp(egui::Id::new(DETAIL_NATURE), false);
+            d.insert_temp(egui::Id::new(DETAIL_EFFECT), false);
+            d.insert_temp(egui::Id::new(DETAIL_SHADOW), false);
+        });
     }
     Some(out)
 }
@@ -355,9 +421,34 @@ pub fn draw_options(ctx: &egui::Context, hud: &mut HudState, assets: &Assets, ed
 /// V-Sync, résolution, mode de fenêtre), sinon [`cycle_view`].
 fn cycle_option(video: &mut VideoOptions, action: &str, resolutions: &[(u32, u32)]) {
     match action {
-        "OP_Shadow" => video.shadow = (video.shadow.min(3) + 1) % 4,
+        // La liste récrit le détail (`OP_ShadowChar`, `OP_ShadowObject`).
+        "OP_Shadow" => {
+            video.shadow = (video.shadow.min(3) + 1) % 4;
+            video.shadow_detail = None;
+        }
+        "OP_Water" => video.water = (video.water.min(4) + 1) % 5,
         "OP_AntiAliasing" => video.multisampling = !video.multisampling,
         "OP_HighOptimization" => video.vsync = !video.vsync,
+        "OP_WideView" => video.wide_view = !video.wide_view,
+        // FUN_140705400 : `Bloom` recopié dans `AutoExposure` ; FUN_14070ee50, FUN_140711210, FUN_140710eb0 : un réglage allumé
+        // coupe le réglage automatique.
+        "OP_Bloom" => {
+            video.bloom = (video.bloom.min(4) + 1) % 5;
+            video.auto_exposure = video.bloom != 0;
+            video.speed_tuning &= !video.auto_exposure;
+        }
+        "OP_AutoExposure" => {
+            video.auto_exposure = !video.auto_exposure;
+            video.speed_tuning &= !video.auto_exposure;
+        }
+        "OP_MatEffect" => {
+            video.mat_effect = !video.mat_effect;
+            video.speed_tuning &= !video.mat_effect;
+        }
+        "OP_Impact" => {
+            video.impact_fx = !video.impact_fx;
+            video.speed_tuning &= !video.impact_fx;
+        }
         "OP_WindowMode" => video.window_mode = (video.window_mode.min(2) + 1) % 3,
         "OP_Resolution" => {
             if !resolutions.is_empty() {
@@ -374,7 +465,11 @@ fn cycle_option(video: &mut VideoOptions, action: &str, resolutions: &[(u32, u32
 fn cycle_view(video: &mut VideoOptions, action: &str) {
     match action {
         "OP_Nature" => video.nature = (video.nature.min(2) + 1) % 3,
-        "OP_Effect" => video.effect = (video.effect.min(4) + 1) % 5,
+        // FUN_14070fb80 récrit les quatre niveaux du détail.
+        "OP_Effect" => {
+            video.effect = (video.effect.min(4) + 1) % 5;
+            video.effect_detail = None;
+        }
         "OP_CharView" => video.char_view = (video.char_view + 1) % 4,
         _ => video.map_view = (video.map_view + 1) % 4,
     }
@@ -471,6 +566,158 @@ fn draw_detail_nature(ctx: &egui::Context, hud: &mut HudState, assets: &Assets, 
         });
     if close {
         ctx.data_mut(|d| d.insert_temp(id, false));
+    }
+    changed
+}
+
+/// Valeur d'une case d'`Option_Detail_Effect` / `Option_Detail_Shadow` : rappel et valeur (`CtrlUserData2`,
+/// 0 si absente). Attention, dans le fichier d'interface, la ligne « Object » appelle `OP_ShadowSelf` et la ligne
+/// « Own Shadow » `OP_ShadowObject` : c'est le rappel qui décide, comme dans Archonia.
+fn detail_value(c: &UiControl) -> Option<(&str, u8)> {
+    let action = c.action.as_deref()?;
+    let value = match c.name.rsplit('_').next().unwrap_or("") {
+        "H" => 3,
+        "M" => 2,
+        "L" => 1,
+        "On" => 1,
+        "Off" => 0,
+        _ => match c.name.as_str() {
+            // « Skill Effects » : On `CONTROL_14854`, Off `CONTROL_6648`.
+            "CONTROL_14854" => 1,
+            "CONTROL_6648" => 0,
+            _ => return None,
+        },
+    };
+    Some((action, value))
+}
+
+/// Niveaux d'une action du détail (`FUN_140707120`, `FUN_140707150`, `FUN_140707180`, `FUN_140705ea0`…).
+fn detail_get(video: &VideoOptions, action: &str) -> Option<u8> {
+    let (field, combat, ui, skill) = video.effect_levels();
+    Some(match action {
+        "OP_EffectField" => field.min(3),
+        "OP_EffectCombat" => combat.min(3),
+        "OP_EffectUI" => ui,
+        "OP_EffectSkill" => skill,
+        "OP_ShadowChar" => video.shadow_char(),
+        "OP_ShadowObject" => video.shadow_object() as u8,
+        "OP_ShadowSelf" => video.shadow_detail.map_or(0, |d| d.own),
+        _ => return None,
+    })
+}
+
+fn detail_set(video: &mut VideoOptions, action: &str, value: u8) {
+    if action.starts_with("OP_Effect") {
+        let (mut f, mut c, mut u, mut s) = video.effect_levels();
+        match action {
+            "OP_EffectField" => f = value,
+            "OP_EffectCombat" => c = value,
+            "OP_EffectUI" => u = value,
+            _ => s = value,
+        }
+        video.effect_detail = Some((f, c, u, s));
+    } else {
+        let mut d = video.shadow_detail.unwrap_or(crate::options::ShadowDetail { character: video.shadow_char(), object: video.shadow_object(), own: 0 });
+        match action {
+            "OP_ShadowChar" => d.character = value,
+            "OP_ShadowObject" => d.object = value != 0,
+            _ => d.own = value,
+        }
+        video.shadow_detail = Some(d);
+    }
+}
+
+#[cfg(test)]
+mod detail_tests {
+    use super::*;
+
+    #[test]
+    fn le_detail_remplace_la_liste_jusqu_au_prochain_choix() {
+        let mut v = VideoOptions::default();
+        assert_eq!(v.effect_levels(), (2, 2, 1, 1));
+        detail_set(&mut v, "OP_EffectUI", 0);
+        assert_eq!(v.effect_levels(), (2, 2, 0, 1));
+        cycle_view(&mut v, "OP_Effect");
+        assert_eq!(v.effect_levels(), (3, 3, 1, 1));
+        assert!(v.shadow_object() && v.shadow_char() == 3);
+        detail_set(&mut v, "OP_ShadowObject", 0);
+        assert!(!v.shadow_object() && v.shadow_char() == 3);
+        detail_set(&mut v, "OP_ShadowChar", 1);
+        assert_eq!(detail_get(&v, "OP_ShadowChar"), Some(1));
+        cycle_option(&mut v, "OP_Shadow", &[]);
+        assert_eq!(v.shadow_detail, None);
+        cycle_option(&mut v, "OP_Water", &[]);
+        assert_eq!(v.water, 3);
+        // `OP_Bloom` : quatre types puis arrêt, `AutoExposure` suit et coupe le réglage automatique (FUN_140705400).
+        v.speed_tuning = true;
+        cycle_option(&mut v, "OP_Bloom", &[]);
+        assert!(v.bloom == 1 && v.auto_exposure && !v.speed_tuning);
+        for _ in 0..4 {
+            cycle_option(&mut v, "OP_Bloom", &[]);
+        }
+        assert!(v.bloom == 0 && !v.auto_exposure);
+        v.speed_tuning = true;
+        cycle_option(&mut v, "OP_Impact", &[]);
+        assert!(v.impact_fx && !v.speed_tuning);
+        cycle_option(&mut v, "OP_WideView", &[]);
+        assert!(v.wide_view);
+    }
+}
+
+/// Fenêtres `Option_Detail_Effect` et `Option_Detail_Shadow` ouvertes ; rend `true` si un réglage a changé.
+fn draw_detail_radio(ctx: &egui::Context, hud: &mut HudState, assets: &Assets, video: &mut VideoOptions) -> bool {
+    let mut changed = false;
+    for name in [DETAIL_EFFECT, DETAIL_SHADOW] {
+        let id = egui::Id::new(name);
+        if !ctx.data(|d| d.get_temp::<bool>(id).unwrap_or(false)) {
+            continue;
+        }
+        let Some(w) = window(hud, assets, name) else { continue };
+        let layout = Layout::new(ctx.screen_rect());
+        let s = layout.scale;
+        let font = (10.5 * s).max(8.0);
+        let mut close = false;
+        egui::Area::new(egui::Id::new(("archonia-options-detail", name)))
+            .default_pos(layout.window_origin(&w))
+            .movable(true)
+            .constrain(true)
+            .order(egui::Order::Tooltip)
+            .show(ctx, |ui| {
+                let (rect, _) = ui.allocate_exact_size(Vec2::new(w.size[0], w.size[1]) * s, egui::Sense::hover());
+                let painter = ui.painter().clone();
+                if let Some((_, tex)) = w.textures.first() {
+                    control_image(ctx, hud, assets, &painter, rect, w.size, tex, 1.0);
+                }
+                for c in &w.controls {
+                    let r = layout.rect(rect.min, c.pos, c.size);
+                    let fixed = c.display.as_deref().and_then(|d| d.strip_prefix("1:"));
+                    match detail_value(c).filter(|_| c.kind == 3) {
+                        Some((action, value)) => {
+                            let checked = detail_get(video, action) == Some(value);
+                            if checkbox(ctx, ui, hud, assets, &painter, r, c, checked, true, ("detail-radio", name, c.name.as_str())).clicked() && !checked {
+                                detail_set(video, action, value);
+                                changed = true;
+                            }
+                        }
+                        None if c.kind == 3 => {
+                            if button(ctx, ui, hud, assets, &painter, r, c, fixed.unwrap_or(""), font, true, ("detail-radio", name, c.name.as_str())).clicked() {
+                                close = true;
+                            }
+                        }
+                        None => {
+                            if let Some((_, t)) = c.textures.first() {
+                                control_image(ctx, hud, assets, &painter, r, c.size, &t.clone(), 1.0);
+                            }
+                            if let Some(text) = fixed.filter(|t| !t.is_empty()) {
+                                shadow_text(&painter, r.left_center(), Align2::LEFT_CENTER, text, font, Color32::WHITE);
+                            }
+                        }
+                    }
+                }
+            });
+        if close {
+            ctx.data_mut(|d| d.insert_temp(id, false));
+        }
     }
     changed
 }

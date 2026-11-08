@@ -61,6 +61,35 @@ pub struct ItemConvert {
     pub filled: Vec<i32>,
 }
 
+/// `ItemTooltipDesc.txt` (`TID`, `Name`, `Description`) : descriptions non vides, tronquées à 640 octets.
+fn parse_tooltip_descs(text: &str) -> HashMap<i32, String> {
+    let mut out = HashMap::new();
+    for line in text.lines().skip(1) {
+        let c: Vec<&str> = line.split('\t').collect();
+        let (Some(tid), Some(desc)) = (c.first().and_then(|v| v.trim().parse::<i32>().ok()), c.get(2).map(|v| v.trim()).filter(|v| !v.is_empty())) else { continue };
+        let mut end = desc.len().min(640);
+        while !desc.is_char_boundary(end) {
+            end -= 1;
+        }
+        out.insert(tid, desc[..end].to_string());
+    }
+    out
+}
+
+#[cfg(test)]
+mod desc_tests {
+    use super::*;
+
+    #[test]
+    fn descriptions_d_objets() {
+        let long = "x".repeat(700);
+        let t = parse_tooltip_descs(&format!("TID\tName\tDescription\n84\tBell\tUne\\nDeux\n85\tVide\t\n86\tLong\t{long}\n"));
+        assert_eq!(t[&84], "Une\\nDeux");
+        assert!(!t.contains_key(&85));
+        assert_eq!(t[&86].len(), 640);
+    }
+}
+
 /// Colonnes utiles d'itemdatatable.txt.
 #[derive(Debug, Clone, Default)]
 struct ItemInfo {
@@ -68,6 +97,7 @@ struct ItemInfo {
     part: i64,
     item_type: i64,
     kind_type: i64,
+    subtype: i64,
     spirit: i64,
     rank: i64,
     min_socket: i64,
@@ -336,6 +366,7 @@ fn load_data(assets: &Assets) -> ConvertData {
         let col = |name: &str| cols.iter().position(|c| c.eq_ignore_ascii_case(name));
         let (tid, kind, part, item_type, kind_type, spirit, rank, min_socket, physical) =
             (col("TID"), col("Kind"), col("Part"), col("ItemType"), col("Type"), col("Spirit Type"), col("Rank"), col("MinSocket"), col("PhysicalRank"));
+        let subtype = col("SubType");
         let (option_tid, link_id) = (col("OptionTID"), col("Link_id"));
         let ids = |v: Option<&str>| v.map(|v| v.split(|c: char| !c.is_ascii_digit()).filter_map(|n| n.parse::<i32>().ok()).filter(|n| *n > 0).collect()).unwrap_or_default();
         for line in lines {
@@ -349,6 +380,7 @@ fn load_data(assets: &Assets) -> ConvertData {
                     part: num(get(part)),
                     item_type: num(get(item_type)),
                     kind_type: num(get(kind_type)),
+                    subtype: num(get(subtype)),
                     spirit: num(get(spirit)),
                     rank: num(get(rank)),
                     min_socket: num(get(min_socket)),
@@ -422,6 +454,19 @@ fn load_data(assets: &Assets) -> ConvertData {
     d
 }
 
+/// Catalyseur EP8 : usage 8, sous-type 0. Garde la sélection compatible ; sinon priorité à une
+/// potion liée au propriétaire (bit 8), puis dernière potion du parcours de la grille.
+fn physical_catalyst(data: &ConvertData, items: &HashMap<i32, ItemRecord>, flags: &HashMap<i32, u32>, current: Option<i32>) -> Option<i32> {
+    let eligible = |i: &&ItemRecord| {
+        let info = data.info(i.template_id);
+        i.status == Some(STATUS_INVENTORY) && i.count.unwrap_or(1) > 0 && info.usable(USABLE_REINFORCEMENT) && info.subtype == 0
+    };
+    if let Some(i) = current.and_then(|iid| items.get(&iid)).filter(|i| eligible(i)) { return Some(i.id) }
+    let mut candidates: Vec<_> = items.values().filter(eligible).collect();
+    candidates.sort_by_key(|i| (i.grid.unwrap_or([i16::MAX; 3]), i.id));
+    candidates.iter().find(|i| flags.get(&i.id).copied().unwrap_or(0) & 8 != 0).or_else(|| candidates.last()).map(|i| i.id)
+}
+
 /// Remplace les `%d` / `%s` d'une phrase d'Archonia dans l'ordre.
 fn fill(template: &str, args: &[String]) -> String {
     let mut out = String::new();
@@ -466,6 +511,8 @@ pub struct ConvertGlue {
     edit: String,
     /// Demande en attente de confirmation (`UI_ConvertConfirm`) et sa phrase.
     confirm: Option<(ConvertCommand, String)>,
+    /// `ItemTooltipDesc.txt` : descriptions par TID.
+    tooltip_descs: Option<HashMap<i32, String>>,
     /// Boîte d'information (`Convert_Err_*`).
     info: Option<String>,
     /// Signature des objets dont l'infobulle a été préparée.
@@ -494,6 +541,11 @@ impl ConvertGlue {
 
     /// État de conversion connu de l'objet `iid` pour les effets des pierres d'esprit : niveau de
     /// renforcement, nombre de sockets et contenu de chaque socket, dans l'ordre.
+    /// Colonne `Rank` d'`itemdatatable.txt` du modèle `tid` (facteur 10, 2 de l'objet, `FUN_140572e20`).
+    pub(super) fn item_rank(&mut self, assets: &Assets, tid: i32) -> i64 {
+        self.data(assets).info(Some(tid)).rank
+    }
+
     pub(super) fn socket_fills(&mut self, assets: &Assets, iid: i32) -> Option<(u8, u8, Vec<SocketFill>)> {
         let st = self.states.get(&iid)?.clone();
         let d = self.data(assets);
@@ -665,6 +717,12 @@ impl ConvertGlue {
                 }
             }
         }
+        // `ItemTooltipDesc.txt` (`FUN_140549ec0` : colonnes 0 TID, 2 description, 640 caractères au plus ;
+        // `\n` écrit en toutes lettres) : en dernier (place dans l'infobulle déduite).
+        let descs = self.tooltip_descs.get_or_insert_with(|| parse_tooltip_descs(&super::npc_glue::client_text(assets, "ItemTooltipDesc.txt")));
+        if let Some(text) = item.template_id.and_then(|t| descs.get(&t)) {
+            lines.extend(text.split("\\n").filter(|l| !l.trim().is_empty()).map(|l| (l.to_string(), normal)));
+        }
         lines
     }
 
@@ -800,6 +858,7 @@ pub fn panel(
     glue: &mut ConvertGlue,
     item_requests: &mut Vec<ItemUi>,
     items: &HashMap<i32, ItemRecord>,
+    item_flags: &HashMap<i32, u32>,
     hud: &mut HudState,
     assets: &Assets,
     net: Option<&NetLink>,
@@ -827,6 +886,9 @@ pub fn panel(
     }
     if glue.material.is_some_and(|i| !items.contains_key(&i)) {
         glue.material = None;
+        if glue.npc.is_some() && glue.tab == ConvertTab::Physical {
+            glue.material = physical_catalyst(glue.data(assets), items, item_flags, None);
+        }
     }
 
     if glue.npc.is_some() {
@@ -847,12 +909,16 @@ pub fn panel(
                 }
                 ConvertUi::Tab(t) => {
                     glue.tab = t;
-                    glue.material = None;
+                    glue.material = if t == ConvertTab::Physical { physical_catalyst(glue.data(assets), items, item_flags, None) } else { None };
                     glue.reset_edit(assets);
                 }
                 ConvertUi::DropItem(drag) => {
                     if items.get(&drag.iid).is_some_and(|i| i.status == Some(STATUS_INVENTORY)) {
                         glue.item = Some(drag.iid);
+                        if glue.tab == ConvertTab::Physical {
+                            let current = glue.material;
+                            glue.material = physical_catalyst(glue.data(assets), items, item_flags, current);
+                        }
                         glue.reset_edit(assets);
                     } else {
                         glue.info_event(assets, "Convert_Err_TryEquipItem");
@@ -915,7 +981,7 @@ impl App {
                 glue.npc = Some(npc);
                 glue.tab = ConvertTab::Physical;
                 glue.item = None;
-                glue.material = None;
+                glue.material = physical_catalyst(glue.data(&assets), &self.items, &self.auction.item_flags, None);
                 glue.reset_edit(&assets);
                 self.ui.show_inventory = true;
             }
@@ -1098,6 +1164,24 @@ impl App {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn potion_choisie_a_l_ouverture() {
+        let mut data = ConvertData::default();
+        data.items.insert(486, ItemInfo { item_type: 1, kind_type: USABLE_REINFORCEMENT, ..Default::default() });
+        data.items.insert(999, ItemInfo { item_type: 1, kind_type: USABLE_REINFORCEMENT, subtype: 1, ..Default::default() });
+        let item = |id, tid, status, grid| ItemRecord { operation: 0, id, template_id: Some(tid), owner_cid: None, count: Some(1), status: Some(status), grid: Some(grid) };
+        let mut items: HashMap<_, _> = [item(7, 486, 2, [0, 0, 0]), item(8, 486, 2, [4, 4, 4]), item(9, 999, 2, [4, 4, 4]), item(10, 486, 51, [0, 0, 0])].into_iter().map(|i| (i.id, i)).collect();
+        let flags = HashMap::new();
+        assert_eq!(physical_catalyst(&data, &items, &flags, None), Some(8));
+        assert_eq!(physical_catalyst(&data, &items, &flags, Some(7)), Some(7), "conserver la potion posée");
+        let flags = HashMap::from([(7, 8)]);
+        assert_eq!(physical_catalyst(&data, &items, &flags, None), Some(7), "liée au propriétaire d'abord");
+        items.remove(&7);
+        assert_eq!(physical_catalyst(&data, &items, &flags, Some(7)), Some(8), "pile consommée : suivante");
+        items.remove(&8);
+        assert_eq!(physical_catalyst(&data, &items, &flags, None), None, "ni variante ajoutée ni potion Cash");
+    }
 
     /// Avec les données du client (`ARCHRUST_GAME_DIR`) : la Fighter Cuirass (172) est réservée aux
     /// orcs chevaliers de niveau 2, le Lunatic Rune Kilt (158) aux orcs mages de niveau 7 ; le

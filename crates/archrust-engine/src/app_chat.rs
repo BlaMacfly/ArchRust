@@ -90,6 +90,8 @@ pub struct ChatGlue {
     found: Option<String>,
     /// Entrée qui suit une création publique ou de guilde (`+0x17ac`).
     just_created: bool,
+    /// `chatcmd.xml` : commande → rappel.
+    commands: Option<std::collections::HashMap<String, String>>,
     /// Boîte d'information (`Action=4:0`).
     info: Option<String>,
     /// Dernier message système (types 8 à 10) et son heure.
@@ -354,6 +356,25 @@ pub(super) fn printf(format: &str, args: &[&str]) -> String {
     out
 }
 
+/// `chatcmd.xml` : `<ChatCmd CmdString="…" CmdFunc="…">`, commande sans la barre → rappel.
+pub(super) fn parse_chatcmd(text: &str) -> HashMap<String, String> {
+    let attr = |line: &str, key: &str| -> Option<String> {
+        let start = line.find(key)? + key.len();
+        let rest = line[start..].trim_start().strip_prefix('=')?.trim_start().strip_prefix('"')?;
+        Some(rest[..rest.find('"')?].to_string())
+    };
+    text.lines().filter(|l| l.contains("<ChatCmd")).filter_map(|l| Some((attr(l, "CmdString")?, attr(l, "CmdFunc")?))).collect()
+}
+
+/// Ligne reçue écartée : vide, ou écho d'une commande en `/` dans une discussion de joueurs. Les messages du serveur restent :
+/// ArchCore répond à une commande MJ refusée par `/create : objet inconnu : TID 15151. Syntaxe : …` (`send_system`, type
+/// `WHOLE_WORLD`), sans quoi le refus était muet, pour le joueur comme pour les AddOns.
+fn line_hidden(kind: i8, message: &str) -> bool {
+    use archrust_netclient::chat::chat_type as t;
+    let server = matches!(kind, t::WHOLE_WORLD | t::SYSTEM_LEVEL1 | t::SYSTEM_LEVEL2 | t::SYSTEM_LEVEL3 | t::SYSTEM_NO_PREFIX);
+    message.is_empty() || (message.starts_with('/') && !server)
+}
+
 impl App {
     /// Connexion au monde : plus de salon.
     pub(super) fn chat_observe(&mut self, ev: &WorldEvent) {
@@ -367,7 +388,7 @@ impl App {
     pub(super) fn chat_received(&mut self, kind: i8, from: &str, message: &str) {
         use archrust_netclient::chat::chat_type as t;
         let Some(class) = class_of(kind) else { return };
-        if message.starts_with('/') || message.is_empty() {
+        if line_hidden(kind, message) {
             return;
         }
         if matches!(kind, t::SYSTEM_LEVEL1 | t::SYSTEM_LEVEL2 | t::SYSTEM_LEVEL3) {
@@ -491,6 +512,51 @@ impl App {
         let lower = cmd.to_lowercase();
         let arg = arg.trim();
         let assets = self.assets.clone();
+        // Rappels actifs de `chatcmd.xml` (table FUN_140782bd0), alias coréens compris.
+        let func = self.chat.commands.get_or_insert_with(|| parse_chatcmd(&super::npc_glue::client_text_in(&assets, "ini", "chatcmd.xml"))).get(cmd.trim_start_matches('/')).cloned();
+        if let Some(func) = func {
+            let refuse = match func.as_str() {
+                "CallBack_OnRejectTradeOn" => Some((0, true)),
+                "CallBack_OnRejectTradeOff" => Some((0, false)),
+                "CallBack_OnRejectPartyOn" => Some((1, true)),
+                "CallBack_OnRejectPartyOff" => Some((1, false)),
+                "CallBack_OnRejectGuildOn" => Some((2, true)),
+                "CallBack_OnRejectGuildOff" => Some((2, false)),
+                _ => None,
+            };
+            if let Some((which, on)) = refuse {
+                // FUN_14050f440 : bit de `character+0xbf8`, envoyé au serveur (mêmes cases que les options).
+                let r = &mut self.options.refuse;
+                *[&mut r.trade, &mut r.party, &mut r.guild].into_iter().nth(which).unwrap() = on;
+                let flags = self.options.refuse.flags();
+                if let Some(net) = &self.net {
+                    net.send(Command::OptionFlags(flags));
+                }
+                self.save_options_if_needed(true);
+                return true;
+            }
+            match func.as_str() {
+                // FUN_1407821b0 → FUN_1406a5440 : confirmation de départ de la guilde, sauf pour le chef.
+                "CallBack_OnGuildLeaveOut" => {
+                    self.guild_slash("/gquitter", "");
+                    return true;
+                }
+                // FUN_140781fa0 → FUN_1404a6920 : fenêtre de vue de la caméra (largeur, hauteur au prorata de l'écran).
+                "CallBack_OnChangePerspective" => {
+                    if let (Ok(w), Some(gpu)) = (arg.parse::<f32>(), self.gpu.as_ref()) {
+                        if w > 0.0 {
+                            self.camera.fov_y = 2.0 * (w / gpu.renderer.aspect()).atan();
+                        }
+                    }
+                    return true;
+                }
+                "CallBack_OnViewFPS" => {
+                    self.ui.show_fps = !self.ui.show_fps;
+                    return true;
+                }
+                _ => {}
+            }
+        }
         let alias = |ids: std::ops::RangeInclusive<u32>| ids.filter_map(|i| super::npc_glue::sysstr(&assets, i)).any(|s| s == cmd);
         if lower == "/join" || alias(530..=533) {
             // `CallBack_OnSendMsgJoin` (FUN_140782460) : op 3.
@@ -524,6 +590,30 @@ impl App {
 mod tests {
     use super::*;
     use archrust_netclient::chat::chat_type as t;
+
+    #[test]
+    fn refus_mj_du_serveur_gardes() {
+        let refus = "/create : objet inconnu : TID 15151. Syntaxe : /create \"nom\" <TID> <quantité> <0|1>";
+        assert!(!line_hidden(t::WHOLE_WORLD, refus), "message système d'ArchCore (send_system)");
+        assert!(!line_hidden(t::SYSTEM_LEVEL1, "/SetExp : argument manquant"));
+        assert!(line_hidden(t::NORMAL, "/move 1,2"), "écho d'une commande dans la discussion");
+        assert!(line_hidden(t::WHOLE_WORLD, ""));
+        assert!(!line_hidden(t::NORMAL, "bonjour"));
+    }
+
+    #[test]
+    fn commandes_de_chatcmd() {
+        let m = parse_chatcmd("<ChatCmdList>\n<ChatCmd CmdString=\"tradeoff\" CmdFunc=\"CallBack_OnRejectTradeOn\">\n<ChatCmd CmdString=\"GOUT\" CmdFunc=\"CallBack_OnGuildLeaveOut\">\n");
+        assert_eq!(m["tradeoff"], "CallBack_OnRejectTradeOn");
+        assert_eq!(m["GOUT"], "CallBack_OnGuildLeaveOut");
+        // Avec les données du client : les commandes demandées pointent bien sur ces rappels.
+        let Some(dir) = std::env::var_os("ARCHRUST_GAME_DIR") else { return };
+        let assets = crate::assets::Assets::new(Some(dir.into()), &[]);
+        let m = parse_chatcmd(&crate::app::npc_glue::client_text_in(&assets, "ini", "chatcmd.xml"));
+        for (cmd, func) in [("tradeoff", "CallBack_OnRejectTradeOn"), ("tradeon", "CallBack_OnRejectTradeOff"), ("pinoff", "CallBack_OnRejectPartyOn"), ("pinon", "CallBack_OnRejectPartyOff"), ("ginoff", "CallBack_OnRejectGuildOn"), ("ginon", "CallBack_OnRejectGuildOff"), ("GOUT", "CallBack_OnGuildLeaveOut"), ("PS", "CallBack_OnChangePerspective"), ("fps", "CallBack_OnViewFPS")] {
+            assert_eq!(m.get(cmd).map(String::as_str), Some(func), "{cmd}");
+        }
+    }
 
     #[test]
     fn lignes_d_archonia() {

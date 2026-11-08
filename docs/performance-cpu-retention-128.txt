@@ -1,0 +1,36 @@
+CPU, profil dev opt-level=1 ; aucune mesure FPS/GPU. Temps en microsecondes.
+Copie hôte synthétique : 4096 instances x 240 images ; cache de production inclus.
+uploads dynamique=0% essai=1 avant=9933 apres=13633 copies_avant=983040 copies_apres=4096
+uploads dynamique=0% essai=2 avant=14849 apres=16501 copies_avant=983040 copies_apres=4096
+uploads dynamique=0% essai=3 avant=11519 apres=21824 copies_avant=983040 copies_apres=4096
+uploads dynamique=0% essai=4 avant=11463 apres=19704 copies_avant=983040 copies_apres=4096
+uploads dynamique=10% essai=1 avant=21020 apres=18946 copies_avant=983040 copies_apres=102086
+uploads dynamique=10% essai=2 avant=9957 apres=12447 copies_avant=983040 copies_apres=102086
+uploads dynamique=10% essai=3 avant=16270 apres=20001 copies_avant=983040 copies_apres=102086
+uploads dynamique=10% essai=4 avant=10324 apres=26748 copies_avant=983040 copies_apres=102086
+uploads dynamique=100% essai=1 avant=10167 apres=28116 copies_avant=983040 copies_apres=983040
+uploads dynamique=100% essai=2 avant=10980 apres=29418 copies_avant=983040 copies_apres=983040
+uploads dynamique=100% essai=3 avant=10379 apres=32620 copies_avant=983040 copies_apres=983040
+uploads dynamique=100% essai=4 avant=10014 apres=21866 copies_avant=983040 copies_apres=983040
+retain n=32 x100 essai=1 avant=44 apres=42
+retain n=32 x100 essai=2 avant=43 apres=96
+retain n=32 x100 essai=3 avant=46 apres=44
+retain n=32 x100 essai=4 avant=41 apres=45
+retain n=127 x100 essai=1 avant=1184 apres=621
+retain n=127 x100 essai=2 avant=559 apres=4401
+retain n=127 x100 essai=3 avant=554 apres=567
+retain n=127 x100 essai=4 avant=2620 apres=538
+retain n=128 x100 essai=1 avant=525 apres=292
+retain n=128 x100 essai=2 avant=985 apres=328
+retain n=128 x100 essai=3 avant=653 apres=351
+retain n=128 x100 essai=4 avant=658 apres=286
+retain n=256 x100 essai=1 avant=2739 apres=1491
+retain n=256 x100 essai=2 avant=2475 apres=1830
+retain n=256 x100 essai=3 avant=28064 apres=590
+retain n=256 x100 essai=4 avant=3424 apres=1066
+retain n=2000 x100 essai=1 avant=188901 apres=7213
+retain n=2000 x100 essai=2 avant=172654 apres=11194
+retain n=2000 x100 essai=3 avant=227634 apres=9467
+retain n=2000 x100 essai=4 avant=153120 apres=34412
+seuil_pose images=60 ancien=30 fluide=60
+seuil_pose images=144 ancien=29 fluide=144

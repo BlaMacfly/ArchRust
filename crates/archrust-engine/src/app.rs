@@ -33,6 +33,9 @@ use winit::window::{Window, WindowId};
 #[path = "app_addons.rs"]
 mod addon_glue;
 
+#[path = "app_animator_retention.rs"]
+mod animator_retention;
+
 #[path = "app_party.rs"]
 mod party_glue;
 
@@ -46,7 +49,7 @@ mod combat_glue;
 mod items_glue;
 
 #[path = "app_npc.rs"]
-mod npc_glue;
+pub(crate) mod npc_glue;
 
 #[path = "app_skills.rs"]
 mod skills_glue;
@@ -55,7 +58,7 @@ mod skills_glue;
 mod mastery_glue;
 
 #[path = "app_portal.rs"]
-mod portal_glue;
+pub(crate) mod portal_glue;
 #[path = "app_reconnect.rs"]
 mod reconnect_glue;
 
@@ -73,6 +76,8 @@ mod convert_glue;
 
 #[path = "app_refinery.rs"]
 mod refinery_glue;
+#[path = "app_gacha.rs"]
+mod gacha_glue;
 
 #[path = "app_product.rs"]
 mod product_glue;
@@ -149,6 +154,9 @@ mod effects_glue;
 #[path = "app_stones.rs"]
 mod stones_glue;
 
+#[path = "app_necklace.rs"]
+mod necklace_glue;
+
 #[path = "app_consumables.rs"]
 mod consumables_glue;
 
@@ -178,6 +186,12 @@ mod camera_glue;
 
 #[path = "app_decals.rs"]
 mod decals_glue;
+
+#[path = "app_groundcast.rs"]
+mod groundcast_glue;
+
+#[path = "app_chattabs.rs"]
+pub(crate) mod chattabs_glue;
 
 #[path = "app_shadow.rs"]
 mod shadow_glue;
@@ -345,8 +359,11 @@ pub struct App {
     convert: convert_glue::ConvertGlue,
     /// Effets des armes serties (pierres d'esprit, runes, renforcement), voir `app_stones.rs`.
     stones: stones_glue::StonesGlue,
+    necklace: necklace_glue::NecklaceGlue,
     /// Sphère d'alchimie : grille, recettes, prix et barre d'attente, voir `app_refinery.rs`.
     refinery: refinery_glue::RefineryGlue,
+    /// Socles de gacha (« Fortune Gate ») : fenêtre `UI_Gacha`, bande, voir `app_gacha.rs`.
+    gacha: gacha_glue::GachaGlue,
     /// Production : récolte, cuisine, alchimie, PNJ de production, voir `app_product.rs`.
     product: product_glue::ProductGlue,
     /// Amis et ignorés : listes, fenêtres, `IgnoreList.txt`, voir `app_buddy.rs`.
@@ -409,6 +426,10 @@ pub struct App {
     cam: camera_glue::CameraGlue,
     /// Ombres rondes sous les personnages et repère de destination au sol, voir `app_decals.rs`.
     decals: decals_glue::DecalsGlue,
+    /// Ciblage au sol des compétences de zone (voir `app_groundcast.rs`).
+    ground_cast: groundcast_glue::GroundCastGlue,
+    /// Menus et options des onglets de la discussion (voir `app_chattabs.rs`).
+    chat_tabs_ui: chattabs_glue::ChatTabsGlue,
     /// Ombres projetées des objets sur le sol (AgcmShadow2), voir `app_shadow.rs`.
     shadow2: shadow_glue::ShadowGlue,
     /// Bulles de discussion au-dessus des têtes (AgcmTextBoard), voir `app_balloon.rs`.
@@ -527,7 +548,9 @@ impl App {
             boards: Default::default(),
             convert: Default::default(),
             stones: Default::default(),
+            necklace: Default::default(),
             refinery: Default::default(),
+            gacha: Default::default(),
             product: Default::default(),
             buddy: Default::default(),
             mail: Default::default(),
@@ -559,6 +582,8 @@ impl App {
             return_login: Default::default(),
             cam: Default::default(),
             decals: Default::default(),
+            ground_cast: Default::default(),
+            chat_tabs_ui: Default::default(),
             shadow2: Default::default(),
             balloons: Default::default(),
             capture: Default::default(),
@@ -1444,6 +1469,7 @@ impl App {
         match ev {
             WorldEvent::Connected => {
                 // Nouvelle connexion au monde : les instantanés d'objets qui suivent repartent de zéro.
+                log::debug!(target: "archrust_buffs", "hud_reset raison=connexion avant={}", self.hud.buffs.len());
                 self.items.clear();
                 self.hud.buffs.clear();
                 // Amis, ignorés et courriers renvoyés par le serveur.
@@ -1792,6 +1818,7 @@ impl App {
             WorldEvent::Remission(ev) => self.on_remission(ev),
             WorldEvent::Convert(ev) => self.on_convert_event(ev),
             WorldEvent::Refinery(ev) => self.on_refinery_event(ev),
+            WorldEvent::Gacha(ev) => self.on_gacha_event(ev),
             WorldEvent::Product(ev) => self.on_product_event(ev),
             // Amis et ignorés (0x2B), courrier (0x2D) : voir `app_buddy.rs`, `app_mail.rs`.
             WorldEvent::Buddy(ev) => self.on_buddy_event(ev),
@@ -1882,12 +1909,16 @@ impl App {
                 }
             }
             WorldEvent::BuffAdded(buff) => {
+                let me = self.player.as_ref().map(|p| p.cid);
+                log::debug!(target: "archrust_buffs", "moteur_ajout porteur={} joueur={me:?} id={} tid={} duree_ms={} modele_lanceur={} accepte_hud={}", buff.owner, buff.skill_id, buff.skill_tid, buff.duration_ms, buff.caster_tid, me == Some(buff.owner));
                 if self.player.as_ref().is_some_and(|p| p.cid == buff.owner) {
                     log::info!("amélioration ajoutée : compétence TID {} ({} ms)", buff.skill_tid, buff.duration_ms);
                     self.hud.add_buff(buff.skill_tid, buff.duration_ms);
                 }
             }
             WorldEvent::BuffRemoved { owner, skill_tid } => {
+                let me = self.player.as_ref().map(|p| p.cid);
+                log::debug!(target: "archrust_buffs", "moteur_retrait porteur={owner} joueur={me:?} tid={skill_tid} accepte_hud={}", me == Some(owner));
                 if self.player.as_ref().is_some_and(|p| p.cid == owner) {
                     self.hud.remove_buff(skill_tid);
                 }
@@ -2191,6 +2222,8 @@ impl App {
             _ if self.ride_slash(cmd) => {}
             // Sphère d'alchimie : /sphere, /grille, /raffiner, /repeter, /recette (voir `app_refinery.rs`).
             _ if self.refinery_slash(cmd, arg) => {}
+            // Gacha : /gacha, /gacha start, /gacha fermer (voir `app_gacha.rs`).
+            _ if self.gacha_slash(cmd, arg) => {}
             // Production : /production, /recettes (voir `app_product.rs`).
             _ if self.product_slash(cmd) => {}
             // Amis, ignorés, courrier : /amis, /ignores, /courrier (voir `app_buddy.rs`, `app_mail.rs`).
@@ -2349,12 +2382,16 @@ impl App {
     }
 
     /// Animation des personnages : attente, marche ou course selon le déplacement, sommets réécrits à
-    /// 30 Hz au plus, seulement près de la caméra. Les animateurs sont reconstruits quand les
+    /// à chaque image pour le joueur et à moins de 2 000 unités du joueur ou du point visé ;
+    /// ailleurs, 30 Hz au plus dans le rayon existant. Les animateurs sont reconstruits quand les
     /// maillages d'une entité changent (équipement, modèle) ou que l'ensemble d'animations change
     /// (arme, monture : `worn::anim_equip`) ; un ensemble −1 laisse l'animation courante.
     fn animate(&mut self, dt: f32) {
         let Some(gpu) = &self.gpu else { return };
         let focus = self.camera.target;
+        // Personnage hors du champ : le temps de son clip avance, sa pose n'est pas réécrite (rien n'en est
+        // visible : les ombres projetées ne portent que sur le décor) ; elle l'est dès son retour dans le champ.
+        let frustum = crate::render::Frustum::new(self.camera.render_view_proj(gpu.renderer.aspect()));
         let seed = |cid: i32| (cid as u32).wrapping_mul(0x9e37_79b9) | 1;
         let stale = |slot: Option<&(usize, Option<Animator>)>, sig: usize, equip: i32| {
             slot.is_none_or(|(s, a)| *s != sig || (equip >= 0 && a.as_ref().is_some_and(|a| a.equip != equip)))
@@ -2371,11 +2408,11 @@ impl App {
                 self.player_animator = Some((sig, a));
             }
             if let Some((_, Some(a))) = &mut self.player_animator {
-                a.update(&self.assets, &gpu.renderer, dt, Self::is_moving(p), p.speeds.fast || p.speeds.riding, 30.0);
+                // Seuil de pose nul : suit chaque image sans arrondi de période à 60/144 Hz.
+                a.update(&self.assets, &gpu.renderer, dt, Self::is_moving(p), p.speeds.fast || p.speeds.riding, f32::INFINITY);
             }
         }
-        self.animators
-            .retain(|cid, _| self.entities.iter().any(|e| e.cid == *cid));
+        animator_retention::retain_present(&mut self.animators, &self.entities, |e| e.cid);
         for e in &self.entities {
             let sig = animation::signature(&e.meshes);
             let current = self.animators.get(&e.cid).and_then(|(_, a)| a.as_ref()).map_or(0, |a| a.equip);
@@ -2383,9 +2420,14 @@ impl App {
             if stale(self.animators.get(&e.cid), sig, equip) {
                 self.animators.insert(e.cid, (sig, Animator::new(&self.assets, e.tid, &e.meshes, seed(e.cid), equip, e.is_player)));
             }
-            let near = (e.position - focus).length() < Self::ANIMATION_RANGE;
+            let distance2 = e.position.distance_squared(focus);
+            let close = distance2 < 2000.0 * 2000.0
+                || self.player.as_ref().is_some_and(|p| e.position.distance_squared(p.position) < 2000.0 * 2000.0);
+            let near = close || distance2 < Self::ANIMATION_RANGE * Self::ANIMATION_RANGE;
             if let (Some((_, Some(a))), true) = (self.animators.get_mut(&e.cid), near) {
-                a.update(&self.assets, &gpu.renderer, dt, Self::is_moving(e), e.speeds.fast || e.speeds.riding, 30.0);
+                let shown = frustum.sphere(e.position + Vec3::Y * 100.0, 400.0);
+                let hz = if !shown { 0.0 } else if close { f32::INFINITY } else { 30.0 };
+                a.update(&self.assets, &gpu.renderer, dt, Self::is_moving(e), e.speeds.fast || e.speeds.riding, hz);
             }
         }
     }
@@ -2405,6 +2447,10 @@ impl App {
     fn escape_key(&mut self) {
         if self.ui.console_open {
             self.ui.console_open = false;
+            return;
+        }
+        // Ciblage au sol annulé (voir `app_groundcast.rs`).
+        if self.groundcast_escape() {
             return;
         }
         // Boîtes et fenêtres d'`UI_Hotkey` / `UI_EXIT`, puis `UI_Help` (voir `app_hotkey.rs`, `app_help.rs`).
@@ -2527,7 +2573,35 @@ impl App {
             .map(|(cid, _)| cid)
     }
 
+    /// Point du sol sous le curseur : terrain, ou objet praticable (marche d'escalier, pont) plus proche.
+    pub(super) fn cursor_ground_point(&self) -> Option<Vec3> {
+        let (gpu, (cx, cy)) = (self.gpu.as_ref()?, self.last_cursor?);
+        let (w, h) = (
+            gpu.renderer.config.width as f32,
+            gpu.renderer.config.height as f32,
+        );
+        let ndc = Vec3::new(
+            (cx as f32 / w) * 2.0 - 1.0,
+            1.0 - (cy as f32 / h) * 2.0,
+            0.0,
+        );
+        let inv = self.camera.view_proj(gpu.renderer.aspect()).inverse();
+        let near = inv.project_point3(ndc);
+        let far = inv.project_point3(Vec3::new(ndc.x, ndc.y, 1.0));
+        let dir = (far - near).normalize_or_zero();
+        let ground = self.terrain.raycast(near, dir, self.camera.far);
+        let max = ground.map_or(self.camera.far, |g| g.distance(near));
+        match self.objects.ridable_raycast(&self.assets, near, dir, max) {
+            Some(t) => Some(near + dir * t),
+            None => ground,
+        }
+    }
+
     fn click_ground(&mut self) {
+        // Ciblage au sol en cours : tout se joue au relâchement (voir `app_groundcast.rs`).
+        if self.groundcast_active() {
+            return;
+        }
         // Mort, objet au sol, attaque de la cible déjà choisie (voir `app_combat.rs`).
         if self.combat_left_click() {
             return;
@@ -2545,34 +2619,13 @@ impl App {
         if self.refinery_left_click() {
             return;
         }
-        let (Some(gpu), Some((cx, cy)), Some(player)) =
-            (&self.gpu, self.last_cursor, self.player.as_ref())
-        else {
+        // Clic sur un socle de gacha du décor (voir `app_gacha.rs`).
+        if self.gacha_left_click() {
             return;
-        };
-        let (w, h) = (
-            gpu.renderer.config.width as f32,
-            gpu.renderer.config.height as f32,
-        );
-        let ndc = Vec3::new(
-            (cx as f32 / w) * 2.0 - 1.0,
-            1.0 - (cy as f32 / h) * 2.0,
-            0.0,
-        );
-        let inv = self.camera.view_proj(gpu.renderer.aspect()).inverse();
-        let near = inv.project_point3(ndc);
-        let far = inv.project_point3(Vec3::new(ndc.x, ndc.y, 1.0));
-        let dir = (far - near).normalize_or_zero();
-        // Point cliqué : terrain, ou objet praticable (marche d'escalier, pont) plus proche.
-        let ground = self.terrain.raycast(near, dir, self.camera.far);
-        let max = ground.map_or(self.camera.far, |g| g.distance(near));
-        let hit = match self.objects.ridable_raycast(&self.assets, near, dir, max) {
-            Some(t) => near + dir * t,
-            None => match ground {
-                Some(g) => g,
-                None => return,
-            },
-        };
+        }
+        // Point cliqué : terrain, ou objet praticable.
+        let Some(hit) = self.cursor_ground_point() else { return };
+        let Some(player) = self.player.as_ref() else { return };
         // Archonia refuse une destination dans une cellule bloquée (`FUN_140168070`) et arrête
         // le trajet devant la première rencontrée (`FUN_140196ab0`).
         if self.terrain.blocked(hit.x, hit.z) {
@@ -2584,11 +2637,13 @@ impl App {
         if let Some(h) = Self::ground_height(&self.terrain, &self.objects, &self.assets, hit.x, hit.z) {
             hit.y = h;
         }
+        if self.skills_defer_move(hit) { return; }
         if let Some(p) = &mut self.player {
             p.destination = hit;
         }
-        // Le joueur se déplace : l'attaque en cours s'arrête.
+        // Le joueur se déplace : l'attaque en cours et le suivi s'arrêtent.
         self.combat_interrupt();
+        self.buddy.follow = None;
         self.walking = true;
         log::debug!("destination {:?} → {:?}", from, hit);
         if let Some(net) = &self.net {
@@ -2627,6 +2682,8 @@ impl App {
         // Portails des tuiles proches, liste fermée en s'éloignant (voir `app_portal.rs`).
         self.portal_frame();
         self.refinery_frame();
+        // Socles de gacha, bande de `UI_Gacha` (voir `app_gacha.rs`).
+        self.gacha_window_frame();
         // Compétences lancées depuis `UI_PDSkill`, PNJ de production (voir `app_product.rs`).
         self.product_frame();
         self.guild_frame();
@@ -2684,8 +2741,12 @@ impl App {
         // Effets des armes serties (`app_stones.rs`), puis effets d'Archonia : sons et triangles de l'image
         // (voir `app_effects.rs`).
         self.stones_frame();
+        self.necklace_frame();
         self.effects_frame();
-        // Ombres rondes et repère de destination, ajoutés aux lots d'effets (voir `app_decals.rs`).
+        // Repère du ciblage au sol (voir `app_groundcast.rs`), ombres rondes et repère de destination,
+        // ajoutés aux lots d'effets (voir `app_decals.rs`).
+        self.groundcast_frame();
+        self.buddy_target_menu_frame();
         self.decals_frame();
         // Ombres projetées des objets sur le sol (voir `app_shadow.rs`).
         self.shadow_frame();
@@ -2851,6 +2912,12 @@ impl App {
                     let bar = crate::hud::chat_bar(ctx, &mut self.hud, &self.assets, self.ui.whisper_target.is_some());
                     ui::chat_panel(ctx, &mut self.ui, &mut actions, bar);
                 }
+                // Onglets de la discussion : menus et options (voir `app_chattabs.rs`).
+                chattabs_glue::panel(ctx, &mut self.chat_tabs_ui, &player_name, &self.config.saved_dir, &mut self.hud, &self.assets, &mut self.ui);
+                // `/fps` : chiffre seul, en haut à gauche (place d'Archonia non relevée).
+                if self.ui.show_fps {
+                    ctx.debug_painter().text(egui::Pos2::new(4.0, 4.0), egui::Align2::LEFT_TOP, format!("{:.0}", self.fps), egui::FontId::proportional(13.0), egui::Color32::WHITE);
+                }
                 // Tableau de bord de développement (egui, pas une fenêtre d'Archonia) : seulement avec
                 // la console Lua ouverte (touche `).
                 if self.ui.console_open && self.addons.builtin_frame("ArchRustInfoFrame").0 {
@@ -2892,9 +2959,11 @@ impl App {
                 let me = self.player.as_ref().map_or(0, |p| p.cid);
                 pvp_glue::remission_panel(ctx, &mut self.pvp, &self.items, me, &mut self.hud, &self.assets, self.net.as_ref(), &mut self.ui);
                 // Forgeron et pierre d'esprit lâchée sur un objet du sac.
-                convert_glue::panel(ctx, &mut self.convert, &mut item_requests, &self.items, &mut self.hud, &self.assets, self.net.as_ref(), &mut self.ui);
+                convert_glue::panel(ctx, &mut self.convert, &mut item_requests, &self.items, &self.auction.item_flags, &mut self.hud, &self.assets, self.net.as_ref(), &mut self.ui);
                 // Sphère d'alchimie : clic droit sur un objet du sac pour le poser dans la grille.
                 refinery_glue::panel(ctx, &mut self.refinery, &mut item_requests, &self.items, &mut self.hud, &self.assets, self.net.as_ref(), &mut self.ui);
+                // Gacha (`UI_Gacha`) et ses messages.
+                gacha_glue::panel(ctx, &mut self.gacha, &mut self.hud, &self.assets, self.net.as_ref());
                 // Réparation (`UI_Repair`) et silhouette d'usure (`UI_EquipStatus`).
                 repair_glue::panel(ctx, &mut self.repair, &self.items, &mut self.hud, &self.assets, self.net.as_ref(), &mut self.ui);
                 // Potions refusées à cheval ou métamorphosé.
@@ -3138,6 +3207,9 @@ impl App {
         items.extend(self.ride.draw_items(self.entities.iter().chain(self.player.as_ref()), char_distance, char_eye));
         items.extend(loot_items);
         let view_proj = self.camera.render_view_proj(gpu.renderer.aspect());
+        // Pièces hors du champ de la caméra : ni envoyées ni dessinées (voir `render_frustum.rs`).
+        let frustum = crate::render::Frustum::new(view_proj);
+        items.retain(|item| frustum.keeps(item));
         let eye = self.camera.eye();
         if let Some((_, after)) = &self.config.screenshot {
             if !self.screenshot_done && self.started.elapsed().as_secs_f32() >= *after {
@@ -3266,6 +3338,15 @@ impl ApplicationHandler for App {
                             && !on_addon =>
                     {
                         self.click_ground()
+                    }
+                    // Relâché sur le sol : compétence au sol (voir `app_groundcast.rs`).
+                    MouseButton::Left
+                        if state == ElementState::Released
+                            && self.phase == Phase::InWorld
+                            && !consumed
+                            && !on_addon =>
+                    {
+                        self.groundcast_release()
                     }
                     MouseButton::Left
                         if state == ElementState::Pressed

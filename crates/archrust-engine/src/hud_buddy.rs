@@ -83,6 +83,10 @@ pub enum TargetMenuUi {
     AddFriend,
     /// `CONTROL_BAN` « Ignore User » (`BanAdd_Click`).
     Ignore,
+    /// `CONTROL_32451` « Guild Invitation » (`Guild_Send_Invite`).
+    GuildInvite,
+    /// `CONTROL_17535` « Follow » (`CharSetFollowTarget`, FUN_1404f9d70).
+    Follow,
 }
 
 /// Liste à lignes de 16 px d'une des deux fenêtres (`prefix` : `BUDDYLIST` ou `BANLIST`) : noms, icône en
@@ -332,6 +336,8 @@ pub fn draw_target_menu(ctx: &egui::Context, hud: &mut HudState, assets: &Assets
                     TargetMenuUi::Whisper => "CONTROL_23115",
                     TargetMenuUi::AddFriend => "CONTROL_BUDDY",
                     TargetMenuUi::Ignore => "CONTROL_BAN",
+                    TargetMenuUi::GuildInvite => "CONTROL_32451",
+                    TargetMenuUi::Follow => "CONTROL_17535",
                 };
                 let Some(c) = w.control(control) else { continue };
                 let r = Rect::from_min_size(at + Vec2::new(0.0, y) * s, Vec2::new(c.size[0], c.size[1]) * s);

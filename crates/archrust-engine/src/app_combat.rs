@@ -79,6 +79,8 @@ pub struct CombatGlue {
     pub town_confirm: bool,
     /// `UI_ResurrectTownConfirm` ouverte.
     confirm_town: bool,
+    /// `levelupmessage.txt`, lu à la première montée de niveau.
+    level_messages: Option<HashMap<(i32, i32), Vec<(String, egui::Color32)>>>,
 }
 
 /// Ce que la fenêtre egui dessine : textes projetés à l'écran (points egui).
@@ -108,19 +110,21 @@ fn character_types(assets: &Assets) -> HashMap<i32, u32> {
         .collect()
 }
 
-/// Modèle posé au sol d'un objet : colonne `FIELD_DFF` (sinon `BASE_DFF`), clump `d%07x.ecl`.
+/// Modèle posé au sol : `FIELD_DFF`, clump `f%07x.ecl`, sans repli sur le modèle porté.
 fn field_model(assets: &Assets, tid: i32) -> Option<String> {
     let table = assets.table("ini", "ItemTemplateAll.ini").ok()?;
-    let header = table.section("")?;
-    let item = table.section(&tid.to_string())?;
-    ["FIELD_DFF", "BASE_DFF"].iter().find_map(|name| {
-        let col = header.entries.iter().find(|(_, v)| v.eq_ignore_ascii_case(name))?.0.as_str();
-        let dff = item.get(col)?.trim().parse::<u32>().ok()?;
-        (dff > 0).then(|| format!("d{dff:07x}.ecl"))
-    })
+    field_model_in(&table, tid)
 }
 
-/// Maillages d'un modèle d'objet au sol (`character/<file>`). Certains (l'or, `d000010c.ecl`) portent
+fn field_model_in(table: &archrust_data::ini::IniTable, tid: i32) -> Option<String> {
+    let header = table.section("")?;
+    let item = table.section(&tid.to_string())?;
+    let col = header.entries.iter().find(|(_, v)| v.eq_ignore_ascii_case("FIELD_DFF"))?.0.as_str();
+    let dff = item.get(col)?.trim().parse::<u32>().ok()?;
+    (dff > 0).then(|| format!("f{dff:07x}.ecl"))
+}
+
+/// Maillages d'un modèle d'objet au sol (`character/<file>`). Certains (l'or, `f000010c.ecl`) portent
 /// des couleurs de sommets pré-éclairées presque noires : elles sont ignorées, sinon l'objet serait
 /// noir sous l'éclairage du moteur.
 fn field_meshes(renderer: &mut crate::render::Renderer, assets: &Assets, file: &str) -> anyhow::Result<Vec<(Arc<Mesh>, Mat4)>> {
@@ -154,6 +158,60 @@ fn loot_name(assets: &Assets, item: &GroundItem) -> String {
 
 
 
+
+#[cfg(test)]
+mod level_tests {
+    use super::*;
+
+    #[test]
+    fn messages_de_niveau_sans_les_retouches() {
+        let t = parse_level_messages("Level\tTID\tColor1\tMessage1\tColor2\tMessage2\n1\t0\t1\tWelcome to Archonia!\t2\tYou can now collect your Lv1 level-up rewards from the event NPC\n4\t0\t16705056\tNiveau 4.\t16777215\tVoyez l'instructeur.\n40\t0\t1\tYou can now collect your Lv40 level-up rewards from the event NPC\t2\t\n4\t96\t1\tChevalier.\t2\t\n");
+        assert_eq!(t[&(0, 4)], vec![("Niveau 4.".to_string(), egui::Color32::from_rgb(0xFE, 0xE6, 0x20)), ("Voyez l'instructeur.".to_string(), egui::Color32::WHITE)]);
+        assert_eq!(t[&(96, 4)][0].0, "Chevalier.");
+        assert!(!t.contains_key(&(0, 1)) && !t.contains_key(&(0, 40)));
+    }
+
+    /// Avec les données du client : l'événement existe, et aucune ligne ne cite Archonia.
+    #[test]
+    fn evenement_et_table_du_client() {
+        let Some(dir) = std::env::var_os("ARCHRUST_GAME_DIR") else { return };
+        let assets = crate::assets::Assets::new(Some(dir.into()), &[]);
+        assert!(crate::app::portal_glue::ui_event_text(&assets, LEVEL_UP_EVENT).contains("Level Gained"));
+        let t = parse_level_messages(&crate::app::npc_glue::client_text_in(&assets, "ini", "levelupmessage.txt"));
+        assert!(t.contains_key(&(0, 2)) && t.values().flatten().all(|(l, _)| !l.contains("Archonia")));
+    }
+}
+
+/// Événement de montée de niveau : « Level Gained!  You are now level {{…}} », `U_PC_LV.wav`.
+/// Nom coréen (`레벨업`, EUC-KR) tel que le rend la table d'interface, octet par octet.
+const LEVEL_UP_EVENT: &str = "\u{b7}\u{b9}\u{ba}\u{a7}\u{be}\u{f7}";
+
+/// `levelupmessage.txt` (`Level`, `TID`, `Color1`, `Message1`, `Color2`, `Message2`, `FUN_140500770`) : (TID, 0 pour la
+/// table commune ; niveau) → lignes. Les retouches d'Archonia sont écartées : la ligne du niveau 1 (« Welcome to
+/// Archonia! ») et les récompenses de son PNJ d'événement (« level-up rewards »). `FUN_1404fa9e0` passe ces deux lignes à
+/// `FUN_1405b8c70` : centre de l'écran, chacune dans sa couleur (`0xRRGGBB`, lecture déduite des valeurs du fichier).
+fn parse_level_messages(text: &str) -> HashMap<(i32, i32), Vec<(String, egui::Color32)>> {
+    let mut out = HashMap::new();
+    for line in text.lines().skip(1) {
+        let c: Vec<&str> = line.split('\t').collect();
+        let Some(level) = c.first().and_then(|v| v.trim().parse::<i32>().ok()).filter(|l| (2..=120).contains(l)) else { continue };
+        let tid = c.get(1).and_then(|v| v.trim().parse::<i32>().ok()).unwrap_or(0);
+        let color = |i: usize| {
+            let rgb = c.get(i).and_then(|v| v.trim().parse::<u32>().ok()).unwrap_or(0xFF_FFFF);
+            egui::Color32::from_rgb((rgb >> 16) as u8, (rgb >> 8) as u8, rgb as u8)
+        };
+        let lines: Vec<(String, egui::Color32)> = [(c.get(3), color(2)), (c.get(5), color(4))]
+            .into_iter()
+            .filter_map(|(m, col)| Some((m?.trim(), col)))
+            .filter(|(m, _)| !m.is_empty() && !m.contains("Archonia") && !m.contains("level-up rewards"))
+            .map(|(m, col)| (m.to_string(), col))
+            .collect();
+        if !lines.is_empty() {
+            out.insert((tid, level), lines);
+        }
+    }
+    out
+}
 
 impl App {
     fn combat_me(&self) -> i32 {
@@ -242,6 +300,18 @@ impl App {
                 if self.combat.attacking == Some(*cid) {
                     self.combat.attacking = None;
                 }
+            }
+            // Attaque refusée faute de flèches, de carreaux ou de PM (FUN_1404f84d0, FUN_1404f8540, FUN_1404f85b0) :
+            // message d'Archonia, seulement pour le joueur ; le serveur a arrêté l'attaque.
+            WorldEvent::CharacterAction { cid, result: Some(r @ (outcome::NOT_ENOUGH_ARROW | outcome::NOT_ENOUGH_BOLT | outcome::NOT_ENOUGH_MP)), .. } if *cid == me => {
+                let key = match *r {
+                    outcome::NOT_ENOUGH_ARROW => "CharacterAtkResultNotEnoughArrow",
+                    outcome::NOT_ENOUGH_BOLT => "CharacterAtkResultNotEnoughBolt",
+                    _ => "CharacterAtkResultNotEnoughMP",
+                };
+                let text = super::portal_glue::ui_event_text(&self.assets, key);
+                self.hud.push_system(&text);
+                self.combat_interrupt();
             }
             // Téléportation (résurrection au village) : la caméra suit le joueur.
             WorldEvent::CharacterMoved { cid, position, .. } if *cid == me => {
@@ -444,6 +514,17 @@ impl App {
                     let level = self.hud.stats.level.unwrap_or(0);
                     log::info!("niveau {level} atteint");
                     self.addons.fire("PLAYER_LEVEL_UP", level);
+                    // FUN_1404fa9e0 : événement `레벨업` (« Level Gained! »), puis `levelupmessage.txt`.
+                    let template = super::portal_glue::ui_event_text(&self.assets, LEVEL_UP_EVENT);
+                    self.hud.push_system(&super::guild_glue::fill_braces(&template, &level.to_string()));
+                    let assets = self.assets.clone();
+                    let tid = self.player.as_ref().map_or(0, |p| p.tid);
+                    let table = self.combat.level_messages.get_or_insert_with(|| parse_level_messages(&super::npc_glue::client_text(&assets, "levelupmessage.txt")));
+                    let row = table.get(&(tid, level)).or_else(|| table.get(&(0, level))).cloned();
+                    if let Some(lines) = row {
+                        self.hud.show_center_message(lines);
+                    }
+                    self.audio.play_effect("sound/ui/U_PC_LV.wav");
                 }
             }
             _ => {}
@@ -480,10 +561,16 @@ impl App {
         }
         self.combat.attacking = Some(cid);
         self.combat.pickup = None;
+        self.buddy.follow = None;
         // Le serveur mène la marche jusqu'à la cible : pas de paquet d'arrêt du client, qui
         // interromprait l'attaque.
         self.walking = false;
         true
+    }
+
+    /// Le joueur attaque le personnage `cid`.
+    pub(super) fn combat_is_attacking(&self, cid: i32) -> bool {
+        self.combat.attacking == Some(cid)
     }
 
     /// Le joueur se déplace lui-même : l'attaque et le ramassage en cours sont abandonnés (le
@@ -862,6 +949,31 @@ pub fn panel(
 mod tests {
     use super::*;
 
+    #[test]
+    fn modele_au_sol_sans_repli_base() {
+        let table = archrust_data::ini::IniTable::parse("0=BASE_DFF\n7=field_dff\n[123]\n0=999\n7=118\n[124]\n0=118\n7=0\n[125]\n0=118\n[126]\n0=118\n7=invalide\n[127]\n0=118\n7=-1\n");
+        assert_eq!(field_model_in(&table, 123).as_deref(), Some("f0000076.ecl"));
+        for tid in [124, 125, 126, 127, 999] {
+            assert_eq!(field_model_in(&table, tid), None, "TID {tid}");
+        }
+        let sans_colonne = archrust_data::ini::IniTable::parse("0=BASE_DFF\n[123]\n0=118\n");
+        assert_eq!(field_model_in(&sans_colonne, 123), None);
+    }
+
+    #[test]
+    fn modele_au_sol_donnees_game() {
+        let Some(dir) = std::env::var_os("ARCHRUST_GAME_DIR") else { return };
+        let assets = Assets::new(Some(dir.into()), &[]);
+        assert_eq!(field_model(&assets, 123).as_deref(), Some("f0000076.ecl"));
+        for file in ["f0000076.ecl", "f000002e.ecl", "f000010c.ecl"] {
+            let clump = assets.clump("character", file).expect("modèle F du client");
+            assert_eq!(clump.atomics.len(), 1, "{file}");
+            eprintln!("butin : {file}, {} atomic(s), {} géométrie(s)", clump.atomics.len(), clump.geometries.len());
+        }
+        let porte = assets.clump("character", "d0000076.ecl").expect("modèle porté témoin");
+        assert_eq!(porte.atomics.len(), 8);
+        eprintln!("témoin porté : d0000076.ecl, {} atomics ; TID 123 sélectionne F", porte.atomics.len());
+    }
 
 
     /// Avec les données du client (`ARCHRUST_GAME_DIR`) : un PNJ (Quig, 426) ne s'attaque pas, un

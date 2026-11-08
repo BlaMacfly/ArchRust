@@ -249,6 +249,8 @@ pub struct Assets {
     models: Mutex<HashMap<String, Arc<PatchedModel>>>,
     /// Jeux d'effets (`effect/ini/new/efffile_*.eff`), lus à la première demande.
     effect_sets: Mutex<Option<Arc<archrust_data::EffectSets>>>,
+    /// `sysstr.txt` lu une fois : ses textes sont demandés à chaque image (infobulles de la barre, des arbres).
+    sysstr: Mutex<Option<Arc<HashMap<u32, String>>>>,
     /// Tables de valeurs écrites par le serveur (`server-data/`), lues avant tout le reste.
     server_data: Option<crate::server_data::ServerData>,
 }
@@ -290,6 +292,7 @@ impl Assets {
             tables: Mutex::new(HashMap::new()),
             models: Mutex::new(HashMap::new()),
             effect_sets: Mutex::new(None),
+            sysstr: Mutex::new(None),
             server_data: None,
         }
     }
@@ -308,7 +311,15 @@ impl Assets {
             None => log::info!("pas de dossier {} : tables de valeurs des packs et du client", crate::server_data::DIR_NAME),
         }
         self.tables.lock().unwrap().clear();
+        *self.sysstr.lock().unwrap() = None;
         self
+    }
+
+    /// Textes de `sysstr.txt` par numéro, relus à la première demande (`load`) puis gardés jusqu'au
+    /// prochain rechargement des packs.
+    pub fn sysstr_map(&self, load: impl FnOnce() -> HashMap<u32, String>) -> Arc<HashMap<u32, String>> {
+        let mut slot = self.sysstr.lock().unwrap();
+        slot.get_or_insert_with(|| Arc::new(load())).clone()
     }
 
     /// Données du serveur en service (`None` sans dossier).
@@ -404,6 +415,7 @@ impl Assets {
         *self.patches.write().unwrap() = fresh;
         self.textures.lock().unwrap().clear();
         self.models.lock().unwrap().clear();
+        *self.sysstr.lock().unwrap() = None;
         touched
     }
 
@@ -1031,6 +1043,26 @@ pub fn tile_of_sector(sx: i32, sy: i32) -> u32 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    #[ignore = "nécessite ARCHRUST_GAME_DIR et les packs du client"]
+    fn icones_buffs_reelles_sans_substitut() {
+        let game = std::env::var_os("ARCHRUST_GAME_DIR").expect("ARCHRUST_GAME_DIR requis");
+        let assets = Assets::new(Some(game.into()), &[]);
+        for nom in ["q0000004", "q0000008", "q00000e5", "q0000148", "q00001c4"] {
+            let raw = assets.read_packed("texture/skill", &format!("{nom}.tx1")).expect("icône du pack skill");
+            let plain = capi_crypt(KEY_TEXTURE, &raw);
+            let dict = TextureDictionary::parse(&plain).unwrap();
+            let direct = dict.textures.first().expect("texture du dictionnaire");
+            assert!(assets.texture_found(nom), "{nom} introuvable");
+            let image = assets.texture(&nom.to_ascii_uppercase()).unwrap();
+            assert_ne!(image.from_patch.as_deref(), Some("substitut"), "{nom}");
+            assert_eq!((image.width, image.height), (direct.width, direct.height), "{nom}");
+            assert_eq!(image.data, direct.to_rgba8().unwrap(), "pixels de {nom}");
+            assert!(image.data.chunks_exact(4).any(|p| p[3] != 0), "{nom} transparent");
+            println!("{nom} : {}x{}, pixels du pack skill identiques, sans substitut", image.width, image.height);
+        }
+    }
 
     #[test]
     fn no_client_mode_gives_placeholders() {
