@@ -18,6 +18,12 @@
 //! AGPMITEM op 22 (4 CID)                      acheter une page de banque → AGPMCHARACTER op 1 (8 argent,
 //!                                              23 pages en plus) et 0x44 op 0, code 30 (ajoutée) ou 29 (maximum)
 //! 0x3E op 0 (1 EVENT_BASE, 2 CID)            → op 0 : fenêtre des quêtes du PNJ
+//! 0x3E op 0 (1 EVENT_BASE {1, objet, -, 27}, 2 CID, 3 rayon de l'objet + 50) → op 0 : fenêtre des quêtes d'un
+//!     objet du monde (fonction 27 de son obj*.ini ; Archonia FUN_14069f260, Webzen 0x6dde80) ; AGPMQUEST op 0 / 2
+//!     portent alors le même EVENT_BASE d'objet (FUN_14033ef80 : bit 30 de l'identifiant d'événement)
+//! AGPMQUEST op 11 (1 CID, 2 EVENT_BASE de l'objet, 4 TID, 5 rang 0 à 4 = `ObjectA` à `E`) : ramassage sur un objet
+//!     du monde au bout de la barre de 5 s (FUN_140654900 → FUN_1404f5480) ; pas de réponse propre : l'objet arrive
+//!     par AGPMITEM et l'objectif par l'op 10
 //! AGPMQUEST op 0 prendre, 2 terminer (7 récompense), 6 abandonner (1 CID, 2 EVENT_BASE, 4 TID)
 //!     → op 1, 3, 7 (4 TID, 6 résultat 1 réussi / 0 refus) ; op 4 et 10 : quête du journal
 //!     (3 mini QUEST_INFO : TID, monstres A et B, objectifs remplis, suivi à l'écran) ; op 5 : quêtes terminées
@@ -41,6 +47,8 @@ pub mod function {
 
 /// Type d'objet « personnage » d'une désignation d'événement.
 const BASE_TYPE_CHARACTER: i8 = 3;
+/// Type « objet du monde » d'une désignation d'événement.
+const BASE_TYPE_OBJECT: i8 = 1;
 
 /// Résultats d'achat (0x32 op 2) et de vente (op 3).
 pub mod trade_result {
@@ -105,6 +113,13 @@ pub fn event_base(npc: i32, function: i32) -> Value {
     Value::Packet(build_mini(s, &values).unwrap_or_default())
 }
 
+/// Mini EVENT_BASE de l'événement de quête (fonction 27) de l'objet du monde `object` : { 1, numéro, -, 27 }.
+pub fn object_event_base(object: u32) -> Value {
+    let s = mini::EVENT_BASE;
+    let values = sparse(s, &[(0, Value::I8(BASE_TYPE_OBJECT)), (1, Value::I32(object as i32)), (3, Value::I32(function::QUEST))]);
+    Value::Packet(build_mini(s, &values).unwrap_or_default())
+}
+
 fn grid_value(grid: [i16; 3]) -> Value {
     let values: Vec<Option<Value>> = grid.iter().map(|v| Some(Value::I16(*v))).collect();
     Value::Packet(build_mini(mini::ITEM_GRID, &values).unwrap_or_default())
@@ -142,20 +157,29 @@ pub enum NpcCommand {
     QuestAbandon(i32),
     /// Inscrire une quête au journal de suivi à l'écran (`true`) ou l'en retirer (op 14, AgcmQuest 0x1404f5690).
     QuestTrack { tid: i32, track: bool },
+    /// Ouvrir la fenêtre des quêtes d'un objet du monde ; `reach` = rayon de l'objet + 50 (champ 3).
+    ObjectQuestWindow { object: u32, reach: i32 },
+    /// Prendre une quête auprès d'un objet du monde.
+    ObjectQuestAccept { object: u32, tid: i32 },
+    /// Rendre une quête à un objet du monde (`reward` comme pour `QuestComplete`).
+    ObjectQuestComplete { object: u32, tid: i32, reward: i32 },
+    /// Ramasser sur l'objet du monde `object` l'objet de rang `rank` (0 = `ObjectA` … 4 = `ObjectE`) de la quête.
+    QuestGather { object: u32, tid: i32, rank: i32 },
 }
 
 /// Paquet d'une demande aux PNJ pour le personnage `me`.
 pub fn command_packet(cmd: &NpcCommand, me: i32) -> (&'static Schema, Vec<Option<Value>>) {
-    let quest = |op: i8, npc: Option<i32>, tid: i32, reward: Option<i32>| {
+    let quest_at = |op: i8, base: Option<Value>, tid: i32, reward: Option<i32>| {
         let mut v = vec![(0, Value::I8(op)), (1, Value::I32(me)), (4, Value::I32(tid))];
-        if let Some(n) = npc {
-            v.push((2, event_base(n, function::QUEST)));
+        if let Some(b) = base {
+            v.push((2, b));
         }
         if let Some(r) = reward {
             v.push((7, Value::I32(r)));
         }
         (main::QUEST, sparse(main::QUEST, &v))
     };
+    let quest = |op: i8, npc: Option<i32>, tid: i32, reward: Option<i32>| quest_at(op, npc.map(|n| event_base(n, function::QUEST)), tid, reward);
     match cmd {
         NpcCommand::Dialog(npc) => (
             main::EVENT_NPC_DIALOG,
@@ -210,6 +234,16 @@ pub fn command_packet(cmd: &NpcCommand, me: i32) -> (&'static Schema, Vec<Option
         NpcCommand::QuestAccept { npc, tid } => quest(0, *npc, *tid, None),
         NpcCommand::QuestComplete { npc, tid, reward } => quest(2, *npc, *tid, Some(*reward)),
         NpcCommand::QuestAbandon(tid) => quest(6, None, *tid, None),
+        NpcCommand::ObjectQuestWindow { object, reach } => (
+            main::EVENT_QUEST,
+            sparse(main::EVENT_QUEST, &[(0, Value::I8(0)), (1, object_event_base(*object)), (2, Value::I32(me)), (3, Value::I32(*reach))]),
+        ),
+        NpcCommand::ObjectQuestAccept { object, tid } => quest_at(0, Some(object_event_base(*object)), *tid, None),
+        NpcCommand::ObjectQuestComplete { object, tid, reward } => quest_at(2, Some(object_event_base(*object)), *tid, Some(*reward)),
+        NpcCommand::QuestGather { object, tid, rank } => (
+            main::QUEST,
+            sparse(main::QUEST, &[(0, Value::I8(op_quest::GATHER)), (1, Value::I32(me)), (2, object_event_base(*object)), (4, Value::I32(*tid)), (5, Value::I32(*rank))]),
+        ),
         NpcCommand::QuestTrack { tid, track } => {
             let q = mini::QUEST_INFO;
             let info = sparse(q, &[(0, Value::I32(*tid)), (1, Value::I32(0)), (2, Value::I32(0)), (3, Value::I32(0)), (4, Value::I32(i32::from(*track)))]);
@@ -237,6 +271,8 @@ pub mod op_quest {
     pub const REWARD_NO_SPACE: i8 = 8;
     /// Objet de départ sans place : nom de la quête et sysstr 440 (S → C).
     pub const START_NO_SPACE: i8 = 9;
+    /// Ramassage sur un objet du monde au bout de la barre de 5 s (C → S).
+    pub const GATHER: i8 = 11;
     /// Journal de suivi : inscription ou retrait (C → S).
     pub const TRACK: i8 = 14;
 }
@@ -261,6 +297,8 @@ pub enum NpcEvent {
     BankOpened { npc: i32 },
     /// Fenêtre des quêtes d'un PNJ (0x3E op 0).
     QuestWindow { npc: i32 },
+    /// Fenêtre des quêtes d'un objet du monde (0x3E op 0, EVENT_BASE de type 1).
+    ObjectQuestWindow { object: u32 },
     /// Réponse à une prise (op 1), une fin (op 3) ou un abandon (op 7).
     QuestResult { op: i8, tid: i32, success: bool },
     /// Quête du journal (op 4) ou progression (op 10).
@@ -279,6 +317,13 @@ fn npc_of(values: &[Option<Value>], field: usize) -> i32 {
         .and_then(|b| decode_mini(mini::EVENT_BASE, b).ok())
         .and_then(|(_, v)| int(&v, 1))
         .unwrap_or(0) as i32
+}
+
+/// Type de la source et identifiant d'un EVENT_BASE.
+fn base_of(values: &[Option<Value>], field: usize) -> Option<(i64, i64)> {
+    let bytes = values.get(field).and_then(Option::as_ref).and_then(Value::as_bytes)?;
+    let (_, v) = decode_mini(mini::EVENT_BASE, bytes).ok()?;
+    Some((int(&v, 0)?, int(&v, 1)?))
 }
 
 /// TID des quêtes terminées, d'après les trois blocs de bits.
@@ -325,7 +370,10 @@ pub fn translate(packet_type: u8, values: &[Option<Value>]) -> Option<NpcEvent> 
             }
         }
         T::EVENT_BANK if op == Some(1) => NpcEvent::BankOpened { npc: npc_of(values, 1) },
-        T::EVENT_QUEST if op == Some(0) => NpcEvent::QuestWindow { npc: npc_of(values, 1) },
+        T::EVENT_QUEST if op == Some(0) => match base_of(values, 1) {
+            Some((t, id)) if t == BASE_TYPE_OBJECT as i64 => NpcEvent::ObjectQuestWindow { object: id as u32 },
+            _ => NpcEvent::QuestWindow { npc: npc_of(values, 1) },
+        },
         T::QUEST => match op? {
             o @ (1 | 3 | 7) => NpcEvent::QuestResult { op: o as i8, tid: int(values, 4)? as i32, success: int(values, 6) == Some(1) },
             o @ (4 | 10) => {
@@ -370,6 +418,29 @@ mod tests {
                 NpcFunction { function: 20, data: None, teach: None },
             ]
         );
+    }
+
+    #[test]
+    fn quetes_d_un_objet_du_monde() {
+        // Fenêtre : EVENT_BASE { 1, objet, -, 27 }, champ 3 = rayon + 50 (Archonia FUN_14069f260).
+        let (s, v) = command_packet(&NpcCommand::ObjectQuestWindow { object: 178_520_354, reach: 250 }, 7);
+        assert_eq!((s.id, int(&v, 2), int(&v, 3)), (0x3e, Some(7), Some(250)));
+        assert_eq!(base_of(&v, 1), Some((1, 178_520_354)));
+        let (_, b) = decode_mini(mini::EVENT_BASE, v[1].as_ref().and_then(Value::as_bytes).unwrap()).unwrap();
+        assert_eq!((int(&b, 2), int(&b, 3)), (None, Some(27)), "pas d'identifiant d'événement, fonction 27");
+        // Prise et rendu : même EVENT_BASE au champ 2.
+        let (s, v) = command_packet(&NpcCommand::ObjectQuestAccept { object: 178_520_354, tid: 2831 }, 7);
+        assert_eq!((s.id, int(&v, 0), int(&v, 4), base_of(&v, 2)), (0x13, Some(0), Some(2831), Some((1, 178_520_354))));
+        // Ramassage (op 11) : 1 CID, 2 EVENT_BASE de l'objet, 4 TID, 5 rang.
+        let (s, v) = command_packet(&NpcCommand::QuestGather { object: 178_520_252, tid: 2830, rank: 0 }, 7);
+        assert_eq!((s.id, int(&v, 0), int(&v, 1), int(&v, 4), int(&v, 5), base_of(&v, 2)), (0x13, Some(11), Some(7), Some(2830), Some(0), Some((1, 178_520_252))));
+        let (_, v) = command_packet(&NpcCommand::ObjectQuestComplete { object: 178_520_354, tid: 2831, reward: -1 }, 7);
+        assert_eq!((int(&v, 0), int(&v, 7), base_of(&v, 2)), (Some(2), Some(-1), Some((1, 178_520_354))));
+        // Accord du serveur : EVENT_BASE renvoyé ; type 1 → fenêtre de l'objet, type 3 → fenêtre du PNJ.
+        let granted = sparse(main::EVENT_QUEST, &[(0, Value::I8(0)), (1, object_event_base(178_520_354)), (2, Value::I32(7))]);
+        assert_eq!(translate(0x3e, &granted), Some(NpcEvent::ObjectQuestWindow { object: 178_520_354 }));
+        let npc = sparse(main::EVENT_QUEST, &[(0, Value::I8(0)), (1, event_base(1234, function::QUEST)), (2, Value::I32(7))]);
+        assert_eq!(translate(0x3e, &npc), Some(NpcEvent::QuestWindow { npc: 1234 }));
     }
 
     #[test]

@@ -143,7 +143,7 @@ Couche de tables de valeurs écrite par le serveur (`archcore export-client-tabl
   dans tous les dossiers : une table exportée seulement dans `ini/` l'emporte sur la copie d'Archonia de
   `ini_fr/`. Si `ItemTemplateAll.ini` vient du serveur, seul un `ItemTemplateAll2.ini` du serveur lui
   est ajouté. Les tables sont mises en cache : un nouvel export demande de relancer le client.
-* **Tables de Webzen** : après `archcore import --webzen`, l'export écrit aussi `questtemplate.ini` (3 082 quêtes,
+* **Tables de Webzen** : après `archcore import --webzen`, l'export écrit aussi `questtemplate.ini` (3 235 quêtes,
   textes de la langue du dossier), `questgroup.ini`, `titledatatable.txt`, `titlestringtable.txt`,
   `SkillMastery_High.txt` et `SkillMastery_Heroic.txt` ; `LevelUpExp.txt` porte la courbe des niveaux 1 à 121, au-delà
   de 2³² dès le niveau 113 (lue en `u64`, comme l'expérience reçue : `FACTOR_POINT` 3 + 4 << 32).
@@ -2244,6 +2244,32 @@ récompenses au choix sans choix → uimessage `QuestSelectItem` (notice) ; sino
 rang choisi (-1 sans choix). ArchCore (`world/quests.rs`, `complete`) lit aujourd'hui le champ 7 à partir de 1
 (`choice - 1`, 0 et -1 → premier choix) : il devra le lire à partir de 0 et refuser un rang hors des choix
 quand la quête en a.
+
+## Quêtes d'un objet du monde (AGPMEVENTQUEST 0x3E, AGPMQUEST 0x13)
+
+Un objet des `obj*.ini` porte l'événement de quête par `Function=27` puis `QuestGroupID=<groupe>` (d'ordinaire le
+numéro de l'objet) ; ses quêtes sont celles de ce groupe dans `questgroup.ini` (groupe, nom, proposées `a:b:`,
+reprises `a:b:`, ramassage `TID-rang:`), comme pour un PNJ ; `GiveNpcName` / `ConfirmNpcName` de la quête écrivent
+alors le numéro de l'objet. Relevé dans Archonia et dans le client de Webzen (`app_quest_object.rs`) :
+
+| Paquet | Sens | Champs |
+|---|---|---|
+| EVENT_QUEST op 0 | C → S | 1 EVENT_BASE { 1 (objet), numéro, -, 27 }, 2 CID, 3 plus grand rayon des sphères englobantes de l'objet + 50 (FUN_14069f260 ; Webzen 0x6dde80) |
+| EVENT_QUEST op 0 | S → C | même EVENT_BASE : `QuestAccept_UI` avec les quêtes du groupe (FUN_140656590) ; le client vérifie la portée min(champ 3, 1600), 1600 sans valeur (FUN_1402a5460) |
+| QUEST op 0 / op 2 | C → S | champ 2 = le même EVENT_BASE d'objet (pas d'identifiant d'événement : bit 30 de celui des objets, FUN_14033ef80) |
+| QUEST op 11 | C → S | 1 CID, 2 EVENT_BASE, 4 TID, 5 rang (`ObjectA` à `E`) : ramassage au bout de la barre de 5 s (FUN_140654900) ; pas de réponse propre (objet par AGPMITEM, objectif par l'op 10) |
+
+ArchRust lit les objets de fonction 27 des tuiles proches, les vise au clic (sphère englobante du modèle, sinon
+150 unités) ou par `/queteobjet`, ouvre `QuestAccept_UI` à l'accord et prend ou rend la quête choisie avec
+l'EVENT_BASE de l'objet ; la fenêtre se ferme au-delà de 2 200 unités de l'objet (règle des PNJ ; la distance
+d'Archonia n'est pas relevée). Ramassage (FUN_140657410, Webzen FUN_006b2da0) : à l'accord, avant la fenêtre, la
+première entrée « TID-rang » de la 5ᵉ colonne de `questgroup.ini` dont la quête est au journal décide ; objet
+`ObjectItem<rang>_TID` détenu au nombre `ObjectItem<rang>_Count` dans l'inventaire, les poches ou le sac Cash →
+sysstr 444 ; sinon personnage arrêté, barre d'`UI_Cooldown` de 5 s (titre sysstr 331, sans annulation) puis op 11 ;
+sur une monture : sysstr 527 (ArchRust ne le vérifie que s'il y a une entrée en cours ; Archonia à chaque accord).
+L'animation du ramassage (compétence au nom coréen) n'est pas reprise. Repère de minicarte (FUN_14065c620 → FUN_1404f5e80) : type 1 si une quête est
+proposée, 2 si une quête du journal s'y rend, aucun sinon. Les effets 5 / 6 / 7 posés au-dessus de l'objet
+(AgcmEventEffect) ne sont pas dessinés, comme pour les PNJ.
 
 ## Caméra, décalques, minicarte, bulles et affichage (confort d'Archonia)
 

@@ -78,6 +78,8 @@ mod convert_glue;
 mod refinery_glue;
 #[path = "app_gacha.rs"]
 mod gacha_glue;
+#[path = "app_quest_object.rs"]
+mod quest_object_glue;
 
 #[path = "app_product.rs"]
 mod product_glue;
@@ -364,6 +366,8 @@ pub struct App {
     refinery: refinery_glue::RefineryGlue,
     /// Socles de gacha (« Fortune Gate ») : fenêtre `UI_Gacha`, bande, voir `app_gacha.rs`.
     gacha: gacha_glue::GachaGlue,
+    /// Objets du monde à quêtes (fonction 27 des obj*.ini), voir `app_quest_object.rs`.
+    quest_objects: quest_object_glue::QuestObjectGlue,
     /// Production : récolte, cuisine, alchimie, PNJ de production, voir `app_product.rs`.
     product: product_glue::ProductGlue,
     /// Amis et ignorés : listes, fenêtres, `IgnoreList.txt`, voir `app_buddy.rs`.
@@ -551,6 +555,7 @@ impl App {
             necklace: Default::default(),
             refinery: Default::default(),
             gacha: Default::default(),
+            quest_objects: Default::default(),
             product: Default::default(),
             buddy: Default::default(),
             mail: Default::default(),
@@ -2222,6 +2227,7 @@ impl App {
             _ if self.ride_slash(cmd) => {}
             // Sphère d'alchimie : /sphere, /grille, /raffiner, /repeter, /recette (voir `app_refinery.rs`).
             _ if self.refinery_slash(cmd, arg) => {}
+            _ if self.quest_object_slash(cmd) => {}
             // Gacha : /gacha, /gacha start, /gacha fermer (voir `app_gacha.rs`).
             _ if self.gacha_slash(cmd, arg) => {}
             // Production : /production, /recettes (voir `app_product.rs`).
@@ -2628,6 +2634,10 @@ impl App {
         if self.gacha_left_click() {
             return;
         }
+        // Clic sur un objet du décor qui donne ou reprend des quêtes (voir `app_quest_object.rs`).
+        if self.quest_object_left_click() {
+            return;
+        }
         // Point cliqué : terrain, ou objet praticable.
         let Some(hit) = self.cursor_ground_point() else { return };
         let Some(player) = self.player.as_ref() else { return };
@@ -2687,6 +2697,8 @@ impl App {
         // Portails des tuiles proches, liste fermée en s'éloignant (voir `app_portal.rs`).
         self.portal_frame();
         self.refinery_frame();
+        // Objets à quêtes des tuiles proches (voir `app_quest_object.rs`).
+        self.quest_objects_frame();
         // Socles de gacha, bande de `UI_Gacha` (voir `app_gacha.rs`).
         self.gacha_window_frame();
         // Compétences lancées depuis `UI_PDSkill`, PNJ de production (voir `app_product.rs`).
@@ -2972,6 +2984,8 @@ impl App {
                 refinery_glue::panel(ctx, &mut self.refinery, &mut item_requests, &self.items, &mut self.hud, &self.assets, self.net.as_ref(), &mut self.ui);
                 // Gacha (`UI_Gacha`) et ses messages.
                 gacha_glue::panel(ctx, &mut self.gacha, &mut self.hud, &self.assets, self.net.as_ref());
+                // Barre du ramassage sur un objet du monde (voir `app_quest_object.rs`).
+                quest_object_glue::panel(ctx, &mut self.quest_objects, &mut self.hud, &self.assets, self.net.as_ref());
                 // Réparation (`UI_Repair`) et silhouette d'usure (`UI_EquipStatus`).
                 repair_glue::panel(ctx, &mut self.repair, &self.items, &mut self.hud, &self.assets, self.net.as_ref(), &mut self.ui);
                 // Potions refusées à cheval ou métamorphosé.

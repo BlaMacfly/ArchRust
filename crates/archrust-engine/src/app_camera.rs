@@ -107,12 +107,15 @@ impl App {
     }
 
     /// Repères de la minicarte : PNJ vus à portée du raster (237 px à 0,0037695 px par unité, soit
-    /// ~31 400 unités de côté), avec leur type de quête (voir `app_npc.rs`).
+    /// ~31 400 unités de côté), avec leur type de quête (voir `app_npc.rs`), et objets à quêtes qui
+    /// proposent ou reprennent une quête (voir `app_quest_object.rs`).
     pub(super) fn minimap_icons(&mut self) -> Vec<crate::hud::MinimapIcon> {
         let Some(me) = self.player.as_ref().map(|p| p.position) else { return Vec::new() };
         const REACH: f32 = 237.0 / 2.0 / 0.003_769_531_1;
         let near: Vec<(i32, glam::Vec3)> = self.entities.iter().filter(|e| !e.is_player && (e.position.x - me.x).abs() < REACH && (e.position.z - me.z).abs() < REACH).map(|e| (e.cid, e.position)).collect();
-        near.into_iter().filter_map(|(cid, pos)| self.npc_minimap_kind(cid).map(|kind| crate::hud::MinimapIcon { kind, pos })).collect()
+        let mut icons: Vec<crate::hud::MinimapIcon> = near.into_iter().filter_map(|(cid, pos)| self.npc_minimap_kind(cid).map(|kind| crate::hud::MinimapIcon { kind, pos })).collect();
+        icons.extend(self.quest_object_minimap_icons(me, REACH));
+        icons
     }
 
     /// Région sans minicarte : bit `0x200` (`disable_minimap`, `+0x7d & 2`) du `Type` de RegionTemplate.ini.

@@ -85,6 +85,9 @@ struct QuestText {
     /// Objets donnés (`Gift_ItemA` à `D`) et objets au choix (`SelectItem1` à `8`, le joueur en prend un).
     gifts: Vec<QuestItem>,
     choices: Vec<QuestItem>,
+    /// Objets à ramasser sur un objet du monde, par rang : `ObjectItemA_TID` / `ObjectItemA_Count` … `E`
+    /// (FUN_140657410 : `+0x18e8 + rang × 0x18`, nombre `+0x18f0`) ; TID 0 : aucun.
+    gathers: [(i32, i32); 5],
 }
 
 /// Objet d'une quête : colonnes `…_Count`, `…_Tid` (« TID;a;b »), `…_Upgrade_Slot`, `…_Upgrade_Intensify`
@@ -114,6 +117,8 @@ struct NpcData {
     dialogs: HashMap<i32, Vec<String>>,
     /// Quêtes proposées et reçues par groupe (`questgroup.ini`).
     groups: HashMap<i32, (Vec<i32>, Vec<i32>)>,
+    /// Ramassage sur l'objet du monde du groupe : 5ᵉ colonne de `questgroup.ini` (« TID-rang: »).
+    gathers: HashMap<i32, Vec<(i32, usize)>>,
     quests: HashMap<i32, QuestText>,
     /// Prix des pages de banque en plus (`bankslotprice.txt`, indice = pages déjà achetées).
     bank_prices: Vec<i64>,
@@ -149,6 +154,9 @@ pub struct NpcGlue {
     bank_page: i16,
     /// PNJ dont la fenêtre des quêtes est ouverte.
     quest_npc: Option<i32>,
+    /// Objet du monde dont la fenêtre des quêtes est ouverte : numéro, groupe, position (voir
+    /// `app_quest_object.rs`).
+    quest_object: Option<(u32, i32, Vec3)>,
     pub show_journal: bool,
     selected_quest: Option<i32>,
     /// Récompense au choix cliquée : rang parmi les objets choisissables du texte, à partir de 0
@@ -380,6 +388,13 @@ fn load_data(assets: &Assets) -> NpcData {
     for row in tsv(&client_text(assets, "questgroup.ini")) {
         if let Some(id) = row.first().and_then(|s| s.trim().parse::<i32>().ok()) {
             data.groups.insert(id, (list(row.get(2)), list(row.get(3))));
+            let gather: Vec<(i32, usize)> = row
+                .get(4)
+                .map(|s| s.split(':').filter_map(|e| e.trim().split_once('-')).filter_map(|(t, r)| Some((t.trim().parse().ok()?, r.trim().parse().ok()?))).collect())
+                .unwrap_or_default();
+            if !gather.is_empty() {
+                data.gathers.insert(id, gather);
+            }
         }
     }
     // questtemplate.ini : colonnes nommées par l'en-tête.
@@ -419,6 +434,9 @@ fn load_data(assets: &Assets) -> NpcData {
             };
             q.gifts = ["A", "B", "C", "D"].iter().filter_map(|g| item(&format!("Gift_Item{g}"))).collect();
             q.choices = (1..=8).filter_map(|i| item(&format!("SelectItem{i}"))).collect();
+            for (k, g) in ["A", "B", "C", "D", "E"].iter().enumerate() {
+                q.gathers[k] = (num(&format!("ObjectItem{g}_TID")).unwrap_or(0) as i32, num(&format!("ObjectItem{g}_Count")).unwrap_or(0) as i32);
+            }
             data.quests.insert(tid as i32, q);
         }
     }
@@ -440,6 +458,7 @@ impl NpcGlue {
             || self.shop.is_some()
             || self.bank.is_some()
             || self.quest_npc.is_some()
+            || self.quest_object.is_some()
             || self.show_journal
             || self.buy.is_some()
             || self.sell.is_some()
@@ -449,6 +468,7 @@ impl NpcGlue {
         self.shop = None;
         self.bank = None;
         self.quest_npc = None;
+        self.quest_object = None;
         self.show_journal = false;
         self.buy = None;
         self.sell = None;
@@ -907,6 +927,7 @@ pub fn panel(
             NpcUi::BankBuyRequest => glue.buy_bank = true,
             NpcUi::CloseQuests => {
                 glue.quest_npc = None;
+                glue.quest_object = None;
                 glue.show_journal = false;
             }
             NpcUi::SelectQuest(tid) => {
@@ -921,7 +942,10 @@ pub fn panel(
                 log::info!("quête {tid} : journal plein");
                 glue.info = Some(super::portal_glue::ui_event_cached(&mut glue.events, assets, "QuestFull_Message")).filter(|t| !t.is_empty());
             }
-            NpcUi::QuestAccept(tid) => send(net, NpcCommand::QuestAccept { npc: glue.quest_npc, tid }),
+            NpcUi::QuestAccept(tid) => match glue.quest_object {
+                Some((object, _, _)) => send(net, NpcCommand::ObjectQuestAccept { object, tid }),
+                None => send(net, NpcCommand::QuestAccept { npc: glue.quest_npc, tid }),
+            },
             // FUN_140655330 / FUN_140654970 : place dans le sac pour les objets donnés (sinon
             // `QuestInventoryMainFull_Message`), récompense au choix exigée s'il y en a (sinon uimessage
             // `QuestSelectItem`, notice au centre de l'écran dans Archonia), puis op 2, champ 7 = rang choisi
@@ -936,7 +960,10 @@ pub fn panel(
                     hud.push_system(&text);
                 } else {
                     let reward = if q.choices.is_empty() { -1 } else { glue.reward_choice.map_or(-1, |k| k as i32) };
-                    send(net, NpcCommand::QuestComplete { npc: glue.quest_npc, tid, reward });
+                    match glue.quest_object {
+                        Some((object, _, _)) => send(net, NpcCommand::ObjectQuestComplete { object, tid, reward }),
+                        None => send(net, NpcCommand::QuestComplete { npc: glue.quest_npc, tid, reward }),
+                    }
                 }
             }
             NpcUi::QuestAbandon(tid) => glue.abandon = Some(tid),
@@ -1144,6 +1171,10 @@ impl App {
         if far(self, self.npc.quest_npc) {
             self.npc.quest_npc = None;
         }
+        // Objet à quêtes : même distance, mesurée depuis l'objet.
+        if self.npc.quest_object.is_some_and(|(_, _, at)| Vec3::new(at.x - me.x, 0.0, at.z - me.z).length() > CLOSE_RANGE) {
+            self.npc.quest_object = None;
+        }
     }
 
     /// Réponses des PNJ.
@@ -1192,10 +1223,24 @@ impl App {
             }
             NpcEvent::QuestWindow { npc } => {
                 self.npc.quest_npc = Some(npc);
+                self.npc.quest_object = None;
                 self.npc.show_journal = false;
                 self.npc.selected_quest = None;
                 self.npc.reward_choice = None;
             }
+            // Objet du monde (FUN_140656590) : ramassage d'abord (FUN_140657410, `app_quest_object.rs`), sinon
+            // `QuestAccept_UI` avec les quêtes du groupe de son événement.
+            NpcEvent::ObjectQuestWindow { object } => match self.quest_object(object) {
+                Some((group, _)) if self.quest_gather_start(object, group) => {}
+                Some((group, at)) => {
+                    self.npc.quest_object = Some((object, group, at));
+                    self.npc.quest_npc = None;
+                    self.npc.show_journal = false;
+                    self.npc.selected_quest = None;
+                    self.npc.reward_choice = None;
+                }
+                None => log::warn!("quêtes : accord pour l'objet {object}, absent des tuiles lues"),
+            },
             // Boîtes `QuestStart_Message` (sysstr 436, FUN_140656240) et `QuestComplete_Message` (sysstr 437,
             // FUN_140655ce0) avec le nom de la quête ; les refus et l'abandon n'affichent rien.
             NpcEvent::QuestResult { op, tid, success } => {
@@ -1310,8 +1355,12 @@ impl App {
         }
         let (level, money) = (self.hud.stats.level.unwrap_or(0), self.hud.stats.money.unwrap_or(0));
         v.tracked = self.npc.tracked_rows(&assets, &self.items, level, money);
-        let journal = self.npc.show_journal && self.npc.quest_npc.is_none();
-        if let Some(npc) = self.npc.quest_npc.filter(|_| !journal) {
+        let journal = self.npc.show_journal && self.npc.quest_npc.is_none() && self.npc.quest_object.is_none();
+        if let Some((_, group, _)) = self.npc.quest_object.filter(|_| !journal) {
+            // Objet du monde : les quêtes de son groupe, comme chez un PNJ ; titre fixe de la fenêtre.
+            let entries = self.group_quest_entries(group);
+            v.quests = Some((false, String::new(), entries, String::new()));
+        } else if let Some(npc) = self.npc.quest_npc.filter(|_| !journal) {
             let group = self.npc.function_data(npc, function::QUEST);
             let (give, confirm) = group.and_then(|g| self.npc.data(&assets).groups.get(&g).cloned()).unwrap_or_default();
             let mut tids: Vec<i32> = give.iter().copied().filter(|t| !self.npc.done.contains(&(*t as u32))).collect();
@@ -1337,6 +1386,37 @@ impl App {
         v
     }
 
+    /// Ramassage possible sur l'objet du monde du groupe `group` (FUN_140657410) : la première entrée « TID-rang » dont
+    /// la quête est au journal décide ; `Ok((TID, rang))` si son objet n'est détenu au nombre demandé dans aucun sac
+    /// (inventaire, poches, Cash), `Err(())` s'il l'est (sysstr 444) ; `None` sans entrée en cours.
+    pub(super) fn quest_gather_entry(&mut self, group: i32) -> Option<Result<(i32, usize), ()>> {
+        let assets = self.assets.clone();
+        let entries = self.npc.data(&assets).gathers.get(&group).cloned().unwrap_or_default();
+        let (tid, rank) = entries.into_iter().find(|(t, _)| self.npc.journal.contains_key(t))?;
+        let (item, count) = self.npc.data(&assets).quests.get(&tid).and_then(|q| q.gathers.get(rank).copied()).unwrap_or((0, 0));
+        if item <= 0 {
+            return None;
+        }
+        // Sacs relevés (FUN_14029cf20 sur cinq grilles) : inventaire 2, poches 13, Cash 51.
+        let held: i32 = self.items.values().filter(|i| i.template_id == Some(item) && matches!(i.status, Some(2 | 13 | 51))).map(|i| i.count.unwrap_or(1).max(1)).sum();
+        Some(if held >= count.max(1) { Err(()) } else { Ok((tid, rank)) })
+    }
+
+    /// Ligne de `sysstr.txt` (cache des fenêtres des PNJ).
+    pub(super) fn npc_sysstr(&mut self, id: u32) -> String {
+        let assets = self.assets.clone();
+        self.npc.sys(&assets, id)
+    }
+
+    /// Quêtes d'un groupe montrées dans `QuestAccept_UI` : proposées ni faites, puis à rendre ici.
+    fn group_quest_entries(&mut self, group: i32) -> Vec<QuestEntry> {
+        let assets = self.assets.clone();
+        let (give, confirm) = self.npc.data(&assets).groups.get(&group).cloned().unwrap_or_default();
+        let mut tids: Vec<i32> = give.iter().copied().filter(|t| !self.npc.done.contains(&(*t as u32))).collect();
+        tids.extend(confirm.iter().copied().filter(|t| self.npc.journal.contains_key(t) && !give.contains(t)));
+        self.quest_entries(&tids)
+    }
+
     fn quest_entries(&mut self, tids: &[i32]) -> Vec<QuestEntry> {
         let assets = self.assets.clone();
         tids.iter().map(|&tid| QuestEntry { tid, name: self.npc.quest_name(&assets, tid), state: self.npc.state(tid) }).collect()
@@ -1351,8 +1431,14 @@ impl App {
             return None;
         }
         let Some(group) = self.npc.function_data(cid, function::QUEST) else { return Some(0) };
+        Some(self.quest_group_minimap_kind(group).unwrap_or(0))
+    }
+
+    /// Type de repère d'un groupe de quêtes (PNJ ou objet du monde) : 2, 1 ou 0 comme ci-dessus ; `None`
+    /// si le groupe est inconnu de questgroup.ini.
+    pub(super) fn quest_group_minimap_kind(&mut self, group: i32) -> Option<u8> {
         let assets = self.assets.clone();
-        let Some((give, confirm)) = self.npc.data(&assets).groups.get(&group).cloned() else { return Some(0) };
+        let (give, confirm) = self.npc.data(&assets).groups.get(&group).cloned()?;
         if confirm.iter().any(|t| self.npc.journal.contains_key(t)) {
             return Some(2);
         }
@@ -1426,6 +1512,7 @@ impl App {
                 self.npc.show_journal = !self.npc.show_journal;
                 if self.npc.show_journal {
                     self.npc.quest_npc = None;
+                    self.npc.quest_object = None;
                 }
             }
             // Journal de suivi : inscrire ou retirer une quête prise (comme « Ajouter au journal »).
