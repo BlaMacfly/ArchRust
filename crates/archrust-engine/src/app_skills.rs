@@ -691,6 +691,13 @@ impl App {
         tids.iter().filter(|t| tables.by_tid.get(t).and_then(|d| d.levels.first()).is_some_and(|l| super::tax_glue::taxed(l.cost) != 0)).count()
     }
 
+    /// Blocage local des actions jusqu'à `until`, hors lancement de compétence (ramassage sur un objet de quête,
+    /// FUN_14017acd0 type 4 : voir `app_quest_object.rs`).
+    pub(super) fn skills_lock_until(&mut self, until: Instant) {
+        self.skills.cast_until = Some(until);
+        self.skills.cast_move = None;
+    }
+
     /// FUN_1404b1e40 : le dernier clic attend la fin du blocage local.
     pub(super) fn skills_defer_move(&mut self, destination: Vec3) -> bool {
         if !self.skills.cast_until.is_some_and(|until| Instant::now() < until) { return false; }

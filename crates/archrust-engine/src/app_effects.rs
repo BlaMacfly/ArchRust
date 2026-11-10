@@ -235,6 +235,9 @@ pub struct EffectsGlue {
     spawning: bool,
     /// Sons en boucle des jeux en cours (instance : naissance, jeu, porteur) → voix audio.
     voices: Vec<((Instant, u32, i32), u64)>,
+    /// Marques de quête posées (porteur : CID d'un PNJ, ou clé négative d'un objet du monde) → ligne
+    /// d'`ee_common_char.txt` (`Q_NEW`, `Q_COMPLETE`, `Q_INCOMPLETE`), voir [`App::effects_quest_mark`].
+    quest_marks: HashMap<i32, &'static str>,
 }
 
 /// Amélioration reçue, éventuellement avant que le modèle du porteur soit chargé.
@@ -825,6 +828,50 @@ impl App {
         self.effects_play_on(cid, &list, class);
     }
 
+    /// Marque de quête au-dessus d'un PNJ ou d'un objet du monde (AgcmUIQuest2 FUN_14065c620) : Archonia retire
+    /// d'abord les effets communs 5, 6, 7, 0x22 et 0x2b du porteur (FUN_14056ee70), puis joue l'effet commun
+    /// 5, 6 ou 7 (FUN_140572400 → FUN_1405720f0), rang = ligne d'`ee_common_char.txt` à partir de 0
+    /// (FUN_14082dd10) : 5 `Q_NEW` (jeu 3619 « Quest_Take »), 6 `Q_COMPLETE` (3620 « Quest_Response »),
+    /// 7 `Q_INCOMPLETE` (3632 « Quest_Completed »). Ligne : décalage nul, échelle 1, nœud −2 : au-dessus de la tête,
+    /// en suivant le porteur (FUN_140573480 : `(modèle+0xc4 + 50 + modèle+0xbc) × échelle`, voir
+    /// [`App::effects_resolve_node`]) ; les modèles `K00e2300.ECL` (« ! ») / `K00e2400.ECL` (« ? ») du jeu
+    /// tournent sur eux-mêmes (animation 5). `key` : CID du PNJ, ou clé négative d'un objet posé en `at` = (pied,
+    /// hauteur du haut de sa sphère englobante au-dessus du pied, lecture déduite des champs du modèle).
+    /// `None` retire la marque.
+    pub(super) fn effects_quest_mark(&mut self, key: i32, mark: Option<&'static str>, at: Option<(Vec3, f32)>) {
+        let assets = self.assets.clone();
+        let common = self.effects.common.get_or_insert_with(|| load_common(&assets));
+        let list = mark.and_then(|m| common.get(m)).cloned().unwrap_or_default();
+        let old = self.effects.quest_marks.get(&key).copied();
+        let gone: Vec<u32> = old.and_then(|o| common.get(o)).map(|l| l.iter().map(|p| p.eid).collect()).unwrap_or_default();
+        let mine = |i: &Instance| i.permanent && gone.contains(&i.eid) && matches!(i.anchor, Anchor::Character(c) if c == key);
+        if old.is_some() && old == mark && self.effects.active.iter().any(mine) {
+            return;
+        }
+        self.effects.active.retain(|i| !mine(i));
+        self.effects.quest_marks.remove(&key);
+        let Some(mark) = mark else { return };
+        let anchor = if key >= 0 { self.effects_anchor_of(key) } else { at.map(|(p, _)| (p, 0.0)) };
+        let Some(anchor) = anchor else { return };
+        for p in list {
+            let p = match at {
+                Some((_, top)) if key < 0 && p.node == -2 => Placed { offset: Vec3::new(p.offset.x, (top + 50.0) * p.scale, p.offset.z), ..p },
+                _ => self.effects_resolve_node(key, p),
+            };
+            if self.effects_spawn(p, Anchor::Character(key), anchor) {
+                if let Some(i) = self.effects.active.last_mut() {
+                    i.permanent = true;
+                }
+            }
+        }
+        self.effects.quest_marks.insert(key, mark);
+    }
+
+    /// Porteurs des marques de quête posées.
+    pub(super) fn effects_quest_mark_keys(&self) -> Vec<i32> {
+        self.effects.quest_marks.keys().copied().collect()
+    }
+
     fn effects_event(&mut self, cid: i32, flag: u32) {
         let Some(tid) = self.effects_tid_of(cid) else { return };
         let assets = self.assets.clone();
@@ -1362,6 +1409,10 @@ mod tests {
         let common = load_common(&assets);
         assert_eq!(common["LV_UP"].iter().map(|p| p.eid).collect::<Vec<_>>(), vec![3610, 3611]);
         assert_eq!(common["LEARN_SK"][0].eid, 3614);
+        // Marques de quête (effets communs 5, 6, 7 de FUN_14065c620 : rang de ligne à partir de 0).
+        for (name, eid) in [("Q_NEW", 3619), ("Q_COMPLETE", 3620), ("Q_INCOMPLETE", 3632)] {
+            assert_eq!(common[name].iter().map(|p| (p.eid, p.node, p.offset, p.scale)).collect::<Vec<_>>(), vec![(eid, -2, Vec3::ZERO, 1.0)], "{name}");
+        }
         // Effets secondaires (op 10) : une ligne par genre, celle du rang relevé dans FUN_140568d70.
         for (kind, eid) in [(1, 11017), (2, 11021), (3, 11584), (4, 11585), (6, 8532), (8, 3559), (9, 3570), (10, 2157)] {
             let row = &common[additional_effect_common(kind).unwrap()];

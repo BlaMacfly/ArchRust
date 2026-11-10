@@ -840,6 +840,15 @@ Réglages honorés :
 | GFX → `Option_Detail_Nature` | `OP_LensFlare` (`LensFlare`) | reflets du soleil (`LensFlare.ini`) | `video.lens_flare` |
 | GFX → `Option_Detail_Nature` | `OP_Fog` (`Fog`) | brouillard du ciel | `video.fog` |
 | GFX → `Option_Detail_Nature` | `OP_Sky` (`Sky`, libellé « Weather FX ») | effets météo | `video.sky` : particules de pluie et de neige (le ciel météo s'applique toujours) |
+| GFX → `Option_Detail_Nature` | `OP_NaturalObj` (`NaturalObj`, défaut 1) | herbe AgcmGrass (`FUN_140711350` → `FUN_140597390`) : 0 aucune, 1 type de distance 2 / 3 niveaux, 2–3 type 3 / 4 niveaux | `video.natural_obj` (voir « Distance de vue, eau et herbe », `grass.rs`) |
+| GFX | `OP_Shadow` (`Shadow`, 0 à 3) et `Option_Detail_Shadow` (`ShadowChar`, `ShadowObject`) | ombre ronde des personnages (AgcmShadow) ; ombres projetées des objets (AgcmShadow2) dès 2 | `video.shadow`, `video.shadow_detail` : `app_decals.rs` (ombre ronde), `app_shadow.rs` (ombres des objets) |
+| GFX → `Option_Detail_Effect` | `OP_EffectField`, `…Combat`, `…UI`, `…Skill` | niveaux par catégorie, à la place de ceux d'`OP_Effect` | `video.effect_detail` |
+| GFX | `OP_Water` (`Water`, 0 à 4) | `FUN_1407128a0` → `FUN_1405909a0` ramène tout mode sous 2 à 2 : même eau à tous les niveaux | `video.water` : enregistré, même eau dessinée (`water.rs`), comme Archonia |
+| GFX | `OP_AntiAliasing` (`Multisampling`) | enregistré, jamais appliqué (`FUN_14070ed10`, `FUN_140711e10` passent 1 à `RwD3D9EngineSetMultiSamplingLevels`) | `video.multisampling` : enregistré, sans effet, comme Archonia |
+| GFX | `OP_HighOptimization` (`VSync`, libellé « V-Sync », `FUN_140707970`) | présentation synchronisée | `video.vsync` : `Fifo`, sinon `AutoNoVsync` (`app_capture.rs`) |
+| GFX | `OP_BrightVal` (`BRIGHT=100:v`, `FUN_14070f5d0`) | rampe `IDirect3DDevice9::SetGammaRamp`, sans effet en fenêtré | `video.bright` : `SetDeviceGammaRamp` en plein écran seulement, rampe neutre rendue en quittant (`app_capture.rs`) |
+| Affichage | `OP_ViewBaloonChat` (`VH_BALOONCHAT`) | bulles de discussion (`TextBoard.ini` `[Textures1/2]`) | `display.balloon_chat` (`app_balloon.rs`) |
+| Affichage | `OP_ViewSelfBars` (`VS_BARS`, `FUN_1408291b0`) | barres PV / PM 120 × 7 sous le nom du joueur | `display.self_bars` (`app_boards.rs`) |
 
 Les noms masqués reviennent pour la cible (Archonia les rallume au survol, `FUN_14082b250`) ; ceux des PNJ
 (sorte 4) ne dépendent d'aucune option. Les listes de distances se règlent d'un clic (choix suivant, comme
@@ -860,23 +869,22 @@ d'Archonia renvoyés à l'auteur, voir « Refus des options » dans le protocole
   colonne `option_flag`), la recopier au champ 22 d'un op 0x11 vers le client (rappel 0x2d, `FUN_1404ac840`,
   qui la range en `character+0xbf8`), et refuser à la source : invitation de groupe, de guilde, demande
   d'échange visant un joueur qui a le bit. L'inviteur reçoit alors les phrases `Option_Party_Off_User`,
-  `Option_Trade_Off_User`, `Option_Guild_Off_User` (`%s` = nom) d'`uimessage.txt` ; le paquet qui les porte
-  n'a pas été relevé. Archonia ne vérifie lui-même que 0x80 (`FUN_140733660`) et 0x40 (`FUN_1408cbb00`).
+  `Option_Trade_Off_User`, `Option_Guild_Off_User` (`%s` = nom) d'`uimessage.txt`. Paquets (mêmes numéros dans le
+  client de Webzen) : gestion du groupe op 14, échange op 25, messages de guilde 42 (invitation), 43 (combat de
+  guildes, `Option_GBattle_Off_User`) et 94 (alliance ou hostilité, `sysstr` 712), AGPMBUDDY op 3 (ami). Archonia ne
+  vérifie lui-même que 0x80 (`FUN_140733660`) et 0x40 (`FUN_1408cbb00`).
 
 Réglages restés inactifs (ArchRust ne sait pas les honorer) :
-- GFX : `OP_SpeedTuning` (réglage automatique de la qualité par AgcmTuner, sans équivalent),
-  la fenêtre « Avancé » d'`OP_Effect` (`Option_Detail_Effect` : `OP_EffectField`, `…Combat`, `…UI`,
-  `…Skill`, réglés seulement par la liste),
-  la ligne « Objets » (`OP_NaturalObj`, herbe AgcmGrass `FUN_140597390`, objets naturels) de la fenêtre
-  `Option_Detail_Nature`, « Avancé » d'`OP_Shadow` (`OP_ShadowChar`, `…Self`, `…Object`), `OP_Water` (AgcmWater, eau non dessinée),
-  `OP_AntiAliasing` (sans effet, comme dans Archonia : voir « Multiéchantillonnage »), `OP_HighOptimization` (libellé « V-Sync » ; liste non
-  relevée, présentation fixée à `AutoVsync`), `OP_BrightVal` (gamma) ; listes remplies, modifiables et
-  enregistrées dans `[video]` mais sans rendu (voir « Retour de bug n° 2 — interface du client » plus bas) :
-  `OP_WideView`, `OP_AutoExposure`, `OP_MatEffect`, `OP_Impact`, `OP_Bloom`, `OP_BloomVal`, `OP_SpeedTuning` ;
-- Affichage : `OP_ViewHelpBaloonTip`, `OP_ViewHelpBaloonChat`, `OP_ViewHelpUclie` (pas de bulles d'aide ni
-  de discussion), `OP_ViewSelfBars` (barres PV/PM sous le nom, `FUN_1408291b0`, non dessinées),
-  `OP_VisiblePartyBuffIcon` (pas d'icônes d'améliorations dans la fenêtre du groupe) ; `OP_VisibleViewItem`,
-  `OP_UseNewSlot`, `OP_SlotIndicators`, `OP_AshtalScionIndicators`, `OP_PartyTargetMarks`,
+- GFX : `OP_SpeedTuning` (réglage automatique de la qualité par AgcmTuner, sans équivalent), `OP_ShadowSelf`
+  (« Avancé » d'`OP_Shadow` : module `+0x1738` d'Archonia, carte d'ombre du joueur à caméra propre,
+  `FUN_1406ee1d0` / `FUN_1406edf10`), `OP_WideView` (drapeau rangé en `caméra+0x770` par `FUN_1404a6ad0` ; la
+  projection recalculée par `FUN_1404a6920` ne le lit pas : son effet n'est pas relevé) ; listes remplies,
+  modifiables et enregistrées dans `[video]` sans rendu : `OP_AutoExposure`, `OP_MatEffect`, `OP_Impact`,
+  `OP_Bloom`, `OP_BloomVal` (voir « Bloom et post-traitements » ci-dessous) ;
+- Affichage : `OP_ViewHelpBaloonTip`, `OP_ViewHelpUclie` (pas de bulles d'aide),
+  `OP_VisiblePartyBuffIcon` (icônes d'améliorations des membres dans la fenêtre du groupe : il faudrait les
+  améliorations des autres membres, que ni ArchCore ni le protocole d'ArchRust ne portent aujourd'hui) ;
+  `OP_VisibleViewItem`, `OP_UseNewSlot`, `OP_SlotIndicators`, `OP_AshtalScionIndicators`, `OP_PartyTargetMarks`,
   `OP_VisibleMurderer`, `OP_VisibleWanted`, `OP_VisibleCriminal` sont déjà en texture « d » dans le
   fichier d'interface (radar, indicateurs, noms du butin absents d'ArchRust) ;
 - Fonction : `OP_RefuseGuildBattle`, `OP_RefuseGuildRelation`, `OP_RefuseBuddy` (ni combats de guilde, ni
@@ -884,6 +892,17 @@ Réglages restés inactifs (ArchRust ne sait pas les honorer) :
   dans `[refuse]`), `OP_PreventDelete` (pas de suppression par glisser), `OP_CastingToggleStop`,
   `OP_CastingMode`, `OP_ClickStopMacro` (pas de suites d'incantations ni de macros), `OP_NoAutoAttack`,
   `OP_SwitchItem`.
+
+**Bloom et post-traitements (AgcmPostFX, `+0x1798` d'AgcmUIOption).** Archonia les fait avec
+`effect/post.fx` (HLSL d'effets D3D9 en clair, techniques indexées : 0 `ControlExposure`, 1 `Average`, 2 `Copy`,
+3 `DownSample`, 4 `BlurH`, 5 `BlurV`, 6 `BlurHLC`, 7 `BlurVLC`, 8 `BloomComp`, 9 `LightAdapt`, 10 `Grayscale`,
+11 `Sepia`, 12 `EdgeDetect`, 13 `X2`, 14 `BoxBlur1`, 15 `BoxBloomComp`…). `FUN_14070f1a0` monte la chaîne selon le
+mode `+0x18f0` : 0 aucune (`Light_Adapt` seul selon `AutoExposure`), 1 `DownSample` (3) → `BlurH` (4) → `BlurV` (5)
+→ `BloomComp` (8), 2 `DownSample` (3) → `BoxBlur1` (14) → `BoxBloomComp` (15) ; les autres valeurs ne montent rien.
+`GlowIntensity` (`OP_BloomVal`) règle le paramètre du même nom de `post.fx` (0 à 2 dans le fichier). Le rendu
+d'ArchRust dessine la scène directement dans l'image de la fenêtre : il faudrait une cible intermédiaire (scène, passes
+en résolution réduite, composition avant l'interface) puis traduire en WGSL les techniques citées. Non fait :
+réglages enregistrés seulement.
 
 Données d'origine : dans `ini_fr`, les deux contrôles nommés `CONTROL_5393` d'`Option_Option` portent le
 même libellé « Desactiver la suppression par glisser » ; celui de gauche est la case du refus d'échange
@@ -2267,9 +2286,43 @@ première entrée « TID-rang » de la 5ᵉ colonne de `questgroup.ini` dont la 
 `ObjectItem<rang>_TID` détenu au nombre `ObjectItem<rang>_Count` dans l'inventaire, les poches ou le sac Cash →
 sysstr 444 ; sinon personnage arrêté, barre d'`UI_Cooldown` de 5 s (titre sysstr 331, sans annulation) puis op 11 ;
 sur une monture : sysstr 527 (ArchRust ne le vérifie que s'il y a une entrée en cours ; Archonia à chaque accord).
-L'animation du ramassage (compétence au nom coréen) n'est pas reprise. Repère de minicarte (FUN_14065c620 → FUN_1404f5e80) : type 1 si une quête est
-proposée, 2 si une quête du journal s'y rend, aucun sinon. Les effets 5 / 6 / 7 posés au-dessus de l'objet
-(AgcmEventEffect) ne sont pas dessinés, comme pour les PNJ.
+**Animation du ramassage** (FUN_14065cc70, au départ de la barre ; Webzen FUN_006b0560) : personnage tourné vers
+l'objet (FUN_14016bf60 / FUN_14016a070), animation de lancement (type −11, FUN_1404be8a0) de la compétence nommée
+`연금술` (Alchemy, TID 285 ; chaîne EUC-KR `bf ac b1 dd bc fa` à 0x8d10c0 chez Webzen), rang de la compétence dans
+les `UsableSkillTName` du modèle (FUN_14069c2c0), clip de l'ensemble d'animation courant, sinon de l'ensemble 0
+(`+0x60 + ensemble × 8`) ; actions bloquées pendant la durée du clip (FUN_14017acd0, type 4). Dans Archonia la chaîne
+(0x140d5a0d8) a été abîmée en UTF-8 (`EF BF BD` × 3, `DD BC`, `EF BF BD`) : la recherche de la compétence par nom
+(FUN_1402f4a60) échoue et la fonction sort avant même de tourner le personnage. ArchRust suit l'intention du client
+de Webzen (`app_quest_object.rs`, `quest_gather_animation`).
+
+Repère de minicarte (FUN_14065c620 → FUN_1404f5e80) : type 1 si une quête est proposée, 2 si une quête du journal
+s'y rend ou s'y ramasse, aucun sinon.
+
+**Marques de quête** au-dessus des PNJ et des objets (FUN_14065c620, à l'apparition de la source et à chaque
+changement) : effets communs d'`ee_common_char.txt`, rang = ligne à partir de 0 (FUN_14082dd10, soit `ID` − 1),
+d'abord tous retirés (rangs 5, 6, 7, 0x22, 0x2b : FUN_14056ee70), puis un seul posé (FUN_140572400 → FUN_1405720f0),
+d'après les états de FUN_140659ad0 (proposées : 1 hors du journal, 2 au journal ; reprises au journal : 3 en cours,
+4 objectifs remplis ; liste triée par état décroissant) :
+
+| Cas | Effet commun | Ligne | Jeu (`effect/ini/new`) | Modèle |
+|---|---|---|---|---|
+| une quête reprise ici a ses objectifs remplis (état 4) | 6 | `Q_COMPLETE` | 3620 « Quest_Response » | `K00e2400.ECL` |
+| sinon une quête reprise ici est en cours (état 3) | 7 | `Q_INCOMPLETE` | 3632 « Quest_Completed » | `K00e2400.ECL` |
+| sinon une quête proposée ni faite ni prise (état 1) | 5 | `Q_NEW` | 3619 « Quest_Take » | `K00e2300.ECL` |
+| sinon une quête du journal se ramasse ici (5ᵉ colonne) | 7 | `Q_INCOMPLETE` | 3632 | `K00e2400.ECL` |
+
+Chaque jeu : planche `S0004701` face à la caméra (y = 28, boucle d'une seconde), modèle tourné sur lui-même
+(animation 5), particules `S0001a00`. Ligne : décalage nul, échelle 1, `NODE_ID` −2 : au-dessus de la tête en suivant
+le porteur (FUN_140573480 : `(modèle+0xc4 + 50 + modèle+0xbc) × échelle`) ; ArchRust prend `HEIGHT` + 50 pour un
+PNJ (règle déjà suivie pour le nœud −2) et, pour un objet, le haut de la sphère englobante du modèle posé + 50
+(lecture des champs `+0xbc` / `+0xc4` du modèle d'objet déduite). Pour un objet, Archonia met aussi l'octet de rendu
+`+0x72` de chacun de ses atomes à 3 (FUN_1404c75a0) : sens non relevé, non repris. Les conditions de prise
+(FUN_14027a750 : niveau, race, classe) ne sont pas vérifiées par ArchRust, comme pour la minicarte. Les marques sont
+recalculées toutes les 250 ms (`quest_marks_frame`) pour les PNJ vus et les objets à portée de tracé, et disparaissent
+quand tous les niveaux d'`OP_Effect` sont à 0.
+
+![Marque Q_NEW au-dessus d'un instructeur](captures/quetes-marque-pnj.png)
+![Marque Q_INCOMPLETE sur un objet de ramassage, barre et animation du ramassage](captures/quetes-ramassage-objet.png)
 
 ## Caméra, décalques, minicarte, bulles et affichage (confort d'Archonia)
 
@@ -2726,6 +2779,7 @@ module. Détail et adresses : `SPEC-RESTE.md` du relevé.
 | `IC_RESULT_ALREADY_FULL`, `_EGO_ITEM`, `_DIFFER_RANK` | pierre d'esprit ratée, codes 3, 4, 6 (`0x1407c1330`), boîte d'information | `app_convert.rs::stone_messages` |
 | `Convert_SS_Result_*` | 0 réussite, 1 échec, 3 plein, 4 et 5 objet inadapté ; 2 et 6 sans ligne (`0x140883cf0`) | idem |
 | `Guild_DestroyFailTooEarly` | code de guilde 46 (`FUN_1406a44e0`) | `app_guild.rs` |
+| `Guild_Archlord_*`, `sysstr` 712, `Guild_Store_Member_Fail`, `Guild_Destory_Keep_Fail`, `CannotLeveGuildInSiegewarArea` | codes de guilde 90 à 93 (bataille de l'Archlord), 94 (relations refusées par l'option 0x40), 95 et 96 (entrepôt), 97 (départ ou exclusion en zone de siège en guerre ; code du client de Webzen, table 0x6b9900, absent d'Archonia qui s'arrête à 96), en blanc dans la discussion de guilde | `app_guild.rs::system_text` |
 
 Jamais levés dans Archonia (rien à faire) : `PartyBonusDamage/Defense/MaxPoint`, `NPCTMSG_ConfirmBuy`,
 `BattleRequestEnd`, `INV_MSG_Drop_Ghelld`, `Convert_Physical_Result_*`, `BuddyFullFriendList/FullBanList/BanUser/
@@ -2735,3 +2789,17 @@ InvalidUser_MsgBox`, `SiegeWarCannotApplSiegeWar`, `IC_RESULT_SUCCESS/RUIN/DESTR
 Autres points : `/fps` affiche « FPS: %03d » en (950, 10) pixels (`0x1400fc870`, les lignes de débogage d'Archonia
 sont écartées) ; pendant l'arrêt de la bande du gacha, le personnage porte `DONT_MOVE` (`0x400`, `0x1408815ed`) : les
 clics de déplacement sont ignorés.
+
+## Client de Webzen : écarts de protocole
+
+Comparaison (9 novembre 2026) du client officiel de Webzen (`AlefClient.exe` 2017, x86, code de l'épisode 8) avec
+Archonia, module par module : schémas déclarés par les constructeurs, ops des tables de saut des récepteurs.
+ArchRust garde le protocole d'Archonia ; ce qui suit ne demande aucun changement de `archrust-protocol`.
+- Schémas : ceux d'ArchRust se retrouvent tous dans Archonia ou chez Webzen. Archonia élargit l'argent et les durées
+  en 64 bits (AgpmCharacter 25, 26, 29 ; AgpmItem 18, 22 et Cash ; `SKILL_BUFF` ; échange, PNJ marchand, guilde,
+  siège, invocations, taxes, ventes) ; l'argent du personnage (8 à 10) est déjà en `INT64` chez Webzen.
+- Ajouts d'Archonia (gardés) : AgpmItem champs 25-26 et ops 0x21-0x33, AgpmSkill op 0x11, AgpmParty champ 11
+  (que le serveur n'envoie pas) et op 7, 5ᵉ couche de la barre rapide, raffinage à 20 objets et ops 5 à 7, ventes
+  en or + CC, AgpmTitle op 11.
+- Maison des ventes : Webzen a une op de plus (4), ses ops 5 à 8 sont les 4 à 7 d'Archonia.
+- Messages de guilde : même table 0-96, plus 97 chez Webzen ; ArchRust affiche maintenant 90 à 97.

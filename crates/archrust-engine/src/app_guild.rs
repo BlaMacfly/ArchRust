@@ -125,6 +125,8 @@ struct GuildData {
     sizes: Vec<(i64, i64)>,
     /// Éléments d'emblème de `guildmark.txt` (FUN_1402050f0).
     marks: Vec<MarkRow>,
+    /// `sysstr` 712, texte du code 94 (relations de guilde refusées par option).
+    relation_refused: String,
 }
 
 /// Élément d'emblème : couche (1 fond, 2 motif, 3 symbole, 4 couleur), numéro, nom, prix en or et en
@@ -233,7 +235,8 @@ fn load_data(assets: &Assets) -> GuildData {
     }
     let events = super::portal_glue::ui_events(assets);
     let marks = parse_marks(&super::npc_glue::client_text_in(assets, "ini", "guildmark.txt"));
-    GuildData { messages, events, create_price, sizes, marks }
+    let relation_refused = super::npc_glue::sysstr(assets, 712).unwrap_or_default();
+    GuildData { messages, events, create_price, sizes, marks, relation_refused }
 }
 
 /// Une fenêtre de guilde ouverte.
@@ -614,6 +617,15 @@ fn system_text(d: &GuildData, code: i32, text: &str, number: i64, number2: i64) 
         0x59 => "Guild_Hostile_Leave_Success",
         48 => return Some((printf(&d.msg("Guild_Join_Request_Self"), &[&text]), guild_color)),
         50 => return Some((printf(&d.msg("Guild_Leave_Request_Self"), &[&text]), guild_color)),
+        // Fin de table (FUN_1406a44e0, cas 90 à 96 ; 97 du client de Webzen, 0x6b9900) : texte blanc.
+        90 => "Guild_Archlord_Defense_Success",
+        91 => "Guild_Archlord_Defense_Failure",
+        92 => "Guild_Archlord_Attack_Success",
+        93 => "Guild_Archlord_Attack_Failure",
+        94 => return Some((d.relation_refused.clone(), white)).filter(|(t, _)| !t.is_empty()),
+        95 => "Guild_Store_Member_Fail",
+        96 => "Guild_Destory_Keep_Fail",
+        97 => "CannotLeveGuildInSiegewarArea",
         _ => return None,
     };
     Some((d.msg(key), white))
@@ -2292,5 +2304,20 @@ mod tests {
         assert_eq!(fill_braces("An invite has been sent from the guild {{Guild_Join_GuildID.Guild_Join_GuildID}}.  Do you wish to accept?", "Rust"), "An invite has been sent from the guild Rust.  Do you wish to accept?");
         assert_eq!(shown_name("Bob@serveur"), "Bob...");
         assert_eq!(colored("x", 0xFFFF_A500), "|cffffa500x|r");
+    }
+
+    #[test]
+    fn fin_de_la_table_des_codes() {
+        let messages = [("Guild_Store_Member_Fail", "Dix membres"), ("Guild_Destory_Keep_Fail", "Entrepôt plein"), ("CannotLeveGuildInSiegewarArea", "Siège")]
+            .into_iter()
+            .map(|(k, v)| (k.to_string(), v.to_string()))
+            .collect();
+        let d = GuildData { messages, events: HashMap::new(), create_price: 0, sizes: Vec::new(), marks: Vec::new(), relation_refused: "Relations bloquées".into() };
+        let text = |c| system_text(&d, c, "", 0, 0).map(|(t, _)| t);
+        assert_eq!(text(guild::code::REFUSE_RELATION).as_deref(), Some("Relations bloquées"));
+        assert_eq!(text(guild::code::STORE_MEMBER_FAIL).as_deref(), Some("Dix membres"));
+        assert_eq!(text(guild::code::DESTROY_KEEP_FAIL).as_deref(), Some("Entrepôt plein"));
+        assert_eq!(text(guild::code::SIEGE_AREA).as_deref(), Some("Siège"));
+        assert_eq!(text(98), None);
     }
 }

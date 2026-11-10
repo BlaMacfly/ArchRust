@@ -1445,7 +1445,39 @@ impl App {
         if give.iter().any(|t| !self.npc.done.contains(&(*t as u32)) && !self.npc.journal.contains_key(t)) {
             return Some(1);
         }
+        // Ramassage d'une quête du journal sur cette source (5ᵉ colonne) : repère 2 aussi (FUN_14065c620).
+        let gathers = self.npc.data(&assets).gathers.get(&group).cloned().unwrap_or_default();
+        if gathers.iter().any(|(t, _)| self.npc.journal.contains_key(t)) {
+            return Some(2);
+        }
         Some(0)
+    }
+
+    /// Marque de quête d'un groupe (PNJ ou objet du monde), comme FUN_14065c620 sur les états de FUN_140659ad0 :
+    /// quête du journal reprise ici aux objectifs remplis (état 4) → `Q_COMPLETE` ; en cours (état 3) →
+    /// `Q_INCOMPLETE` ; sinon quête proposée ni faite ni prise (état 1) → `Q_NEW` ; sinon ramassage d'une quête du
+    /// journal (5ᵉ colonne du groupe) → `Q_INCOMPLETE` ; sinon aucune. Les conditions de prise (FUN_14027a750 :
+    /// niveau, race, classe) ne sont pas vérifiées par ArchRust, comme pour la minicarte.
+    pub(super) fn quest_group_mark(&mut self, group: i32) -> Option<&'static str> {
+        let assets = self.assets.clone();
+        let (give, confirm) = self.npc.data(&assets).groups.get(&group).cloned()?;
+        let back: Vec<bool> = confirm.iter().filter_map(|t| self.npc.journal.get(t)).map(|p| p.done).collect();
+        if back.iter().any(|done| *done) {
+            return Some("Q_COMPLETE");
+        }
+        if !back.is_empty() {
+            return Some("Q_INCOMPLETE");
+        }
+        if give.iter().any(|t| !self.npc.done.contains(&(*t as u32)) && !self.npc.journal.contains_key(t)) {
+            return Some("Q_NEW");
+        }
+        let gathers = self.npc.data(&assets).gathers.get(&group).cloned().unwrap_or_default();
+        gathers.iter().any(|(t, _)| self.npc.journal.contains_key(t)).then_some("Q_INCOMPLETE")
+    }
+
+    /// PNJ à quêtes vus (CID, groupe).
+    pub(super) fn quest_npcs_in_view(&self) -> Vec<(i32, i32)> {
+        self.entities.iter().filter(|e| !e.is_player).filter_map(|e| Some((e.cid, self.npc.function_data(e.cid, function::QUEST)?))).collect()
     }
 
     /// `/parler [nom]`, `/boutique`, `/banque`, `/registraire` (gestionnaire de guilde), `/quetespnj`, `/quetes`, `/prendrequete TID`,

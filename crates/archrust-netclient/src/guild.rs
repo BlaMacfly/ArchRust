@@ -157,6 +157,18 @@ pub mod code {
     pub const BUY_GUILDMARK_DUPLICATE: i32 = 59;
     pub const JOIN_REQUEST_SELF: i32 = 48;
     pub const LEAVE_REQUEST_SELF: i32 = 50;
+    /// Bataille de l'Archlord : défense ou attaque réussie ou manquée (`Guild_Archlord_*`).
+    pub const ARCHLORD_DEFENSE_SUCCESS: i32 = 90;
+    pub const ARCHLORD_DEFENSE_FAILURE: i32 = 91;
+    pub const ARCHLORD_ATTACK_SUCCESS: i32 = 92;
+    pub const ARCHLORD_ATTACK_FAILURE: i32 = 93;
+    /// Le chef de la guilde visée refuse les relations (option 0x40) : `sysstr` 712.
+    pub const REFUSE_RELATION: i32 = 94;
+    /// Entrepôt de guilde : effectif trop faible pour déposer, dissolution avec un entrepôt non vide.
+    pub const STORE_MEMBER_FAIL: i32 = 95;
+    pub const DESTROY_KEEP_FAIL: i32 = 96;
+    /// Départ ou exclusion dans une zone de siège en guerre (client de Webzen ; Archonia s'arrête à 96).
+    pub const SIEGE_AREA: i32 = 97;
 }
 
 /// Opérations d'AGPMEVENTGUILD.
