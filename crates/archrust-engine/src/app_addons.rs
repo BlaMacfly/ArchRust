@@ -7,6 +7,69 @@ use crate::addon_ui::{AddonUi, AddonUiOutput};
 use archrust_addons::{CameraInfo, ItemInfo, ItemTemplateInfo, MonsterTemplateInfo, UnitInfo};
 use winit::keyboard::ModifiersState;
 
+/// Alias façon World of Warcraft de quelques fenêtres natives d'Archonia : chaque fenêtre est une
+/// frame du nom de sa section dans `UI_1024X768.ini` (`MiniMap`, `UI_CharInfo`…), ces noms en plus.
+const NATIVE_ALIASES: &[(&str, &[&str])] = &[
+    ("MiniMap", &["Minimap", "MinimapCluster"]),
+    ("UI_CharInfo", &["PlayerFrame", "MainMenuBar"]),
+    ("UI_TargetInfo", &["TargetFrame"]),
+    ("UI_Party", &["PartyFrame"]),
+    ("UI_Inventory", &["ContainerFrame1"]),
+    ("Character_Status", &["CharacterFrame"]),
+    ("UI_Skill", &["SpellBookFrame"]),
+    ("QuestMain_UI", &["QuestLogFrame"]),
+    ("UI_WORLD_MAP", &["WorldMapFrame"]),
+    ("Chat_Input_Normal", &["ChatFrame1EditBox"]),
+];
+
+impl App {
+    /// Fenêtres natives et AddOns, une fois par image : les réglages voulus par les AddOns (ancres,
+    /// `Show`/`Hide`, `SetAlpha`) passent au HUD, puis la place d'origine de chaque fenêtre passe aux
+    /// AddOns pour les frames qu'ils n'ont pas déplacées.
+    pub(super) fn sync_native_frames(&mut self, ctx: &egui::Context) {
+        if !self.addons.is_loaded() {
+            crate::hud::set_native_overrides(HashMap::new());
+            return;
+        }
+        let screen = ctx.screen_rect();
+        // Repère des AddOns : origine en bas à gauche de l'écran.
+        let to_addon = |r: egui::Rect| archrust_addons::Rect {
+            left: r.min.x - screen.min.x,
+            bottom: screen.max.y - r.max.y,
+            width: r.width(),
+            height: r.height(),
+        };
+        let defaults: Vec<(String, archrust_addons::Rect)> = crate::hud::native_default_rects(ctx, &mut self.hud, &self.assets)
+            .into_iter()
+            .map(|(n, r)| (n, to_addon(r)))
+            .collect();
+        let by_name: HashMap<&str, archrust_addons::Rect> = defaults.iter().map(|(n, r)| (n.as_str(), *r)).collect();
+        let mut overrides = HashMap::new();
+        for s in self.addons.native_states() {
+            let Some(d) = by_name.get(s.name.as_str()) else { continue };
+            let offset = s.rect.map_or(egui::Vec2::ZERO, |r| egui::vec2(r.left - d.left, d.bottom - r.bottom));
+            if s.shown && s.alpha >= 0.999 && offset.length() < 0.5 {
+                continue;
+            }
+            overrides.insert(s.name, crate::hud::NativeOverride { offset, shown: s.shown, alpha: s.alpha });
+        }
+        crate::hud::set_native_overrides(overrides);
+        self.addons.set_native_defaults(&defaults);
+    }
+
+    /// Place d'origine des fenêtres natives donnée aux AddOns avant leur chargement, pour que leurs
+    /// tailles soient connues dès le corps des fichiers Lua.
+    fn native_defaults_before_load(&mut self) {
+        let Some(ctx) = self.gpu.as_ref().map(|g| g.egui_state.egui_ctx().clone()) else { return };
+        let screen = ctx.screen_rect();
+        let defaults: Vec<(String, archrust_addons::Rect)> = crate::hud::native_default_rects(&ctx, &mut self.hud, &self.assets)
+            .into_iter()
+            .map(|(n, r)| (n, archrust_addons::Rect { left: r.min.x - screen.min.x, bottom: screen.max.y - r.max.y, width: r.width(), height: r.height() }))
+            .collect();
+        self.addons.set_native_defaults(&defaults);
+    }
+}
+
 /// CVars du moteur que les AddOns peuvent lire et modifier (`GetCVar` / `SetCVar`).
 pub const CVARS: &[(&str, &str, &str)] = &[
     (
@@ -443,6 +506,16 @@ impl App {
             self.addon_glue.inventory_sig = None;
             self.sync_addons_frame();
             self.sync_addons_world();
+            // Fenêtres natives d'Archonia, pilotables par les AddOns dès leur chargement.
+            let names = crate::hud::native_window_names(&mut self.hud, &self.assets);
+            let frames: Vec<(&str, &[&str])> = names
+                .iter()
+                .map(|n| (n.as_str(), NATIVE_ALIASES.iter().find(|(w, _)| w == n).map_or(&[][..], |(_, a)| *a)))
+                .collect();
+            if let Err(e) = self.addons.register_native_frames(&frames) {
+                log::warn!("AddOns : fenêtres natives : {e}");
+            }
+            self.native_defaults_before_load();
             if let Err(e) = self.addons.load_dir(&self.config.addons_dir) {
                 log::error!("AddOns : {e}");
             }

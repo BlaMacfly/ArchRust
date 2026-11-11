@@ -282,6 +282,48 @@ Un AddOn peut en déclarer : `ArchRust.Templates.MonModele = function(frame) …
 masque la discussion, `ArchRustInfoFrame:Hide()` le panneau d'informations,
 `ArchRustInventoryButton:Hide()` le bouton d'inventaire.
 
+**Fenêtres d'Archonia.** L'interface native (minicarte, barre de compétences, cible, inventaire…)
+est dessinée par le client en Rust, d'après `UI_1024X768.ini`. Chacune de ses fenêtres est aussi une
+frame, du nom de sa section dans ce fichier (`MiniMap`, `UI_CharInfo`, `UI_TargetInfo`,
+`UI_Inventory`…), créée avant le chargement des AddOns. Quelques alias façon WoW pointent sur les
+mêmes frames :
+
+| Alias | Fenêtre | Contenu |
+|---|---|---|
+| `Minimap`, `MinimapCluster` | `MiniMap` | minicarte et ses boutons |
+| `PlayerFrame`, `MainMenuBar` | `UI_CharInfo` | jauges du joueur et barre de compétences |
+| `TargetFrame` | `UI_TargetInfo` | cible |
+| `PartyFrame` | `UI_Party` | groupe |
+| `ContainerFrame1` | `UI_Inventory` | inventaire |
+| `CharacterFrame` | `Character_Status` | fiche du personnage |
+| `SpellBookFrame` | `UI_Skill` | livre des compétences |
+| `QuestLogFrame` | `QuestMain_UI` | journal des quêtes |
+| `WorldMapFrame` | `UI_WORLD_MAP` | carte du monde |
+| `ChatFrame1EditBox` | `Chat_Input_Normal` | barre de saisie de la discussion |
+
+Ce qu'un AddOn en fait :
+
+- **déplacer** : `ClearAllPoints` + `SetPoint`, ou un glisser (`SetMovable`, `EnableMouse`,
+  `RegisterForDrag`, `StartMoving`) ; tant que l'AddOn n'a pas touché aux ancres, la frame suit la
+  place d'origine de la fenêtre (taille et position mises à jour à chaque image) ;
+- **masquer** : `Hide` ; `Show` rend la main au client (une fenêtre fermée par le jeu, comme
+  l'inventaire, ne s'ouvre pas pour autant) ;
+- **estomper** : `SetAlpha` (minicarte, jauges et barre de compétences, cible) ;
+- **s'y accrocher** : une frame d'AddOn créée avec la fenêtre pour parent ou ancrée sur elle la suit ;
+  en strate `HIGH` ou plus, elle se dessine par-dessus.
+
+```lua
+Minimap:ClearAllPoints()
+Minimap:SetPoint("TOPLEFT", UIParent, "TOPLEFT", 20, -60)   -- minicarte en haut à gauche
+MainMenuBar:SetAlpha(0.4)                                    -- barre de compétences estompée
+TargetFrame:Hide()                                           -- cadre de cible du client masqué
+```
+
+Limites : `SetScale` et `SetSize` ne redimensionnent pas une fenêtre native ; `SetAlpha` n'agit que
+sur le HUD principal (minicarte, `UI_CharInfo`, cible), les autres fenêtres se déplacent et se
+masquent. `GetRect` et `GetLeft`… ne répondent qu'après la première mise en page (dès l'image
+suivante) ; `GetWidth`/`GetHeight` sont justes dès le chargement.
+
 ## API du jeu
 
 Jetons d'unité : `player`, `target`, `nameplate1`…`nameplateN` (unités en vue), `party1`…`party4`

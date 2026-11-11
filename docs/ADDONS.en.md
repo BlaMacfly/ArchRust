@@ -278,6 +278,47 @@ AddOns can declare more: `ArchRust.Templates.MyTemplate = function(frame) … en
 chat, `ArchRustInfoFrame:Hide()` the info panel, `ArchRustInventoryButton:Hide()` the inventory
 button.
 
+**Archonia windows.** The native interface (minimap, skill bar, target, inventory…) is drawn by the
+client in Rust, from `UI_1024X768.ini`. Each of its windows is also a frame, named after its section
+in that file (`MiniMap`, `UI_CharInfo`, `UI_TargetInfo`, `UI_Inventory`…), created before the AddOns
+load. A few WoW-style aliases point to the same frames:
+
+| Alias | Window | Content |
+|---|---|---|
+| `Minimap`, `MinimapCluster` | `MiniMap` | minimap and its buttons |
+| `PlayerFrame`, `MainMenuBar` | `UI_CharInfo` | player gauges and skill bar |
+| `TargetFrame` | `UI_TargetInfo` | target |
+| `PartyFrame` | `UI_Party` | party |
+| `ContainerFrame1` | `UI_Inventory` | inventory |
+| `CharacterFrame` | `Character_Status` | character sheet |
+| `SpellBookFrame` | `UI_Skill` | skill book |
+| `QuestLogFrame` | `QuestMain_UI` | quest log |
+| `WorldMapFrame` | `UI_WORLD_MAP` | world map |
+| `ChatFrame1EditBox` | `Chat_Input_Normal` | chat input bar |
+
+What an AddOn can do with them:
+
+- **move**: `ClearAllPoints` + `SetPoint`, or a drag (`SetMovable`, `EnableMouse`,
+  `RegisterForDrag`, `StartMoving`); as long as the AddOn has not touched the anchors, the frame
+  follows the window's original place (size and position updated every frame);
+- **hide**: `Hide`; `Show` hands control back to the client (a window the game has closed, such as
+  the inventory, does not open because of it);
+- **fade**: `SetAlpha` (minimap, gauges and skill bar, target);
+- **attach to it**: an AddOn frame parented to the window or anchored on it follows it; in strata
+  `HIGH` or above, it is drawn on top.
+
+```lua
+Minimap:ClearAllPoints()
+Minimap:SetPoint("TOPLEFT", UIParent, "TOPLEFT", 20, -60)   -- minimap in the top-left corner
+MainMenuBar:SetAlpha(0.4)                                    -- faded skill bar
+TargetFrame:Hide()                                           -- client target frame hidden
+```
+
+Limits: `SetScale` and `SetSize` do not resize a native window; `SetAlpha` only affects the main HUD
+(minimap, `UI_CharInfo`, target), other windows can be moved and hidden. `GetRect`, `GetLeft`… only
+answer after the first layout (from the next frame on); `GetWidth`/`GetHeight` are right from load
+time.
+
 ## Game API
 
 Unit tokens: `player`, `target`, `nameplate1`…`nameplateN` (units in view), `party1`…`party4`

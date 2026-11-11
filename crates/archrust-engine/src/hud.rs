@@ -846,6 +846,42 @@ fn icon_names_from_table(t: &IniTable, buffs_only: bool) -> HashMap<i32, String>
         .collect()
 }
 
+/// Fenêtre native réglée par les AddOns (frame du même nom, voir `app_addons.rs`).
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct NativeOverride {
+    /// Décalage par rapport à la place d'origine, en points d'écran.
+    pub offset: Vec2,
+    pub shown: bool,
+    pub alpha: f32,
+}
+
+/// Réglages des fenêtres natives par nom, lus par [`Layout::window_origin`] (toutes les fenêtres) et
+/// par [`draw`] (alpha du HUD principal).
+static NATIVE_OVERRIDES: std::sync::RwLock<Option<HashMap<String, NativeOverride>>> = std::sync::RwLock::new(None);
+
+/// Remplace les réglages des fenêtres natives (une fois par image).
+pub fn set_native_overrides(overrides: HashMap<String, NativeOverride>) {
+    *NATIVE_OVERRIDES.write().unwrap() = (!overrides.is_empty()).then_some(overrides);
+}
+
+fn native_override(name: &str) -> Option<NativeOverride> {
+    NATIVE_OVERRIDES.read().unwrap().as_ref()?.get(name).copied()
+}
+
+/// Noms des fenêtres d'Archonia que le HUD sait dessiner.
+pub fn native_window_names(hud: &mut HudState, assets: &Assets) -> Vec<String> {
+    hud.windows(assets).iter().map(|w| w.name.clone()).collect()
+}
+
+/// Place d'origine de chaque fenêtre à l'écran (points egui), sans les réglages des AddOns.
+pub fn native_default_rects(ctx: &egui::Context, hud: &mut HudState, assets: &Assets) -> Vec<(String, Rect)> {
+    let layout = Layout::new(ctx.screen_rect());
+    hud.windows(assets)
+        .iter()
+        .map(|w| (w.name.clone(), Rect::from_min_size(layout.base_origin(w), Vec2::new(w.size[0], w.size[1]) * layout.scale)))
+        .collect()
+}
+
 /// Passage des coordonnées virtuelles 1920 × 1080 à l'écran : échelle uniforme, fenêtre ancrée au
 /// bord (ou au centre) le plus proche, comme les positions d'Archonia collées aux bords.
 #[derive(Clone, Copy)]
@@ -862,7 +898,19 @@ impl Layout {
         Layout { screen, scale }
     }
 
+    /// Coin haut gauche d'une fenêtre à l'écran, décalée ou masquée (hors de l'écran) par les AddOns
+    /// ([`set_native_overrides`]).
     fn window_origin(&self, w: &UiWindow) -> Pos2 {
+        let base = self.base_origin(w);
+        match native_override(&w.name) {
+            Some(o) if !o.shown => Pos2::new(-100_000.0, -100_000.0),
+            Some(o) => base + o.offset,
+            None => base,
+        }
+    }
+
+    /// Place d'origine d'une fenêtre, sans les réglages des AddOns.
+    fn base_origin(&self, w: &UiWindow) -> Pos2 {
         let axis = |pos: f32, size: f32, virt: f32, real_min: f32, real: f32| {
             let center = pos + size / 2.0;
             if center < virt / 3.0 {
@@ -1167,12 +1215,22 @@ pub fn draw(ctx: &egui::Context, hud: &mut HudState, assets: &Assets, scene: &Hu
     ));
     let windows: Vec<UiWindow> = hud.windows(assets).to_vec();
     for w in &windows {
+        // Fenêtre masquée ou estompée par un AddOn.
+        let native = native_override(&w.name);
+        if native.is_some_and(|o| !o.shown) {
+            continue;
+        }
+        let mut painter = painter.clone();
+        if let Some(o) = native {
+            painter.multiply_opacity(o.alpha);
+        }
+        let painter = &painter;
         match w.name.as_str() {
-            "UI_CharInfo" => draw_charinfo(ctx, hud, assets, &painter, &layout, w),
-            "MiniMap" if !hud.minimap.closed => draw_minimap(ctx, hud, assets, &painter, &layout, w, scene),
+            "UI_CharInfo" => draw_charinfo(ctx, hud, assets, painter, &layout, w),
+            "MiniMap" if !hud.minimap.closed => draw_minimap(ctx, hud, assets, painter, &layout, w, scene),
             "UI_TargetInfo" => {
                 if let Some(t) = &scene.target {
-                    draw_target(ctx, hud, assets, &painter, &layout, w, t);
+                    draw_target(ctx, hud, assets, painter, &layout, w, t);
                 }
             }
             _ => {}

@@ -618,6 +618,18 @@ pub struct AddonManager {
     pub shared: Shared,
 }
 
+/// Fenêtre native vue par les AddOns ([`AddonManager::native_states`]).
+#[derive(Debug, Clone, PartialEq)]
+pub struct NativeFrameState {
+    pub name: String,
+    /// Visible (`Show`/`Hide` de la frame et de ses parents).
+    pub shown: bool,
+    /// Alpha effectif (`SetAlpha` de la frame et de ses parents).
+    pub alpha: f32,
+    /// Rectangle de la dernière mise en page, en coordonnées d'AddOn.
+    pub rect: Option<crate::ui::Rect>,
+}
+
 /// Entrée souris d'une image, dans le repère de l'interface (origine en bas à gauche).
 #[derive(Debug, Clone, Default)]
 pub struct PointerInput {
@@ -1647,6 +1659,63 @@ impl AddonManager {
         }
     }
 
+    /// Déclare les fenêtres natives du client (minicarte, barres, inventaire…) comme frames du moteur
+    /// pilotables par les AddOns : `(nom de la frame, alias globaux)`, par exemple
+    /// `("MiniMap", &["Minimap"])`. À appeler avant le chargement des AddOns ; une frame déjà
+    /// déclarée est gardée.
+    pub fn register_native_frames(&self, frames: &[(&str, &[&str])]) -> Result<(), AddonError> {
+        let ui_parent = self.shared.borrow().ui.by_name("UIParent");
+        let g = self.lua.globals();
+        for (name, aliases) in frames {
+            let existing = self.shared.borrow().ui.by_name(name);
+            let t = match existing {
+                Some(_) => g.get::<Table>(*name)?,
+                None => crate::frame::create_frame(&self.lua, &self.shared, crate::ui::FrameKind::Frame, Some((*name).to_string()), ui_parent, None)?,
+            };
+            if let Some(h) = crate::frame::handle(&Value::Table(t.clone())) {
+                h.with(|f| {
+                    f.builtin = true;
+                    f.native = true;
+                });
+            }
+            for alias in *aliases {
+                if matches!(g.get::<Value>(*alias)?, Value::Nil) {
+                    g.set(*alias, t.clone())?;
+                }
+            }
+        }
+        Ok(())
+    }
+
+    /// Position actuelle de chaque fenêtre native dans le client (coordonnées d'AddOn, origine en bas
+    /// à gauche) : les frames que l'AddOn n'a pas déplacées la suivent.
+    pub fn set_native_defaults(&self, rects: &[(String, crate::ui::Rect)]) {
+        let mut s = self.shared.borrow_mut();
+        for (name, rect) in rects {
+            if let Some(id) = s.ui.by_name(name).filter(|&id| s.ui.frames[id].native) {
+                s.ui.set_native_default(id, *rect);
+            }
+        }
+    }
+
+    /// État voulu par les AddOns pour chaque fenêtre native : visibilité, alpha et rectangle de la
+    /// dernière mise en page (absent tant qu'elle n'a pas été calculée).
+    pub fn native_states(&self) -> Vec<NativeFrameState> {
+        let s = self.shared.borrow();
+        s.ui.frames
+            .iter()
+            .filter(|f| f.native)
+            .filter_map(|f| {
+                Some(NativeFrameState {
+                    name: f.name.clone()?,
+                    shown: s.ui.is_visible(f.id),
+                    alpha: s.ui.effective_alpha(f.id),
+                    rect: s.ui.rects.get(f.id).copied().flatten(),
+                })
+            })
+            .collect()
+    }
+
     /// Erreurs Lua récentes.
     pub fn errors(&self) -> Vec<String> {
         self.shared.borrow().errors.clone()
@@ -1802,6 +1871,38 @@ ns.frame = f
         mgr2.save_all().unwrap();
         let saved = std::fs::read_to_string(tmp.path().join("saved/Hello.lua")).unwrap();
         assert!(saved.contains("logins = 2"), "{saved}");
+    }
+
+    #[test]
+    fn native_frames_follow_the_client_until_an_addon_moves_them() {
+        use crate::ui::Rect;
+        let tmp = tempfile::tempdir().unwrap();
+        let mgr = AddonManager::new(tmp.path()).unwrap();
+        mgr.register_native_frames(&[("MiniMap", &["Minimap"]), ("UI_CharInfo", &["MainMenuBar"])]).unwrap();
+        let measure = |f: &crate::ui::FrameNode| f.estimated_text_size();
+        let state = |name: &str| mgr.native_states().into_iter().find(|s| s.name == name).unwrap();
+        let minimap = Rect { left: 1700.0, bottom: 860.0, width: 200.0, height: 200.0 };
+        mgr.set_native_defaults(&[("MiniMap".into(), minimap), ("UI_CharInfo".into(), Rect { left: 600.0, bottom: 0.0, width: 700.0, height: 90.0 })]);
+        mgr.layout(1920.0, 1080.0, &measure);
+        let s = state("MiniMap");
+        assert_eq!((s.shown, s.alpha, s.rect), (true, 1.0, Some(minimap)), "suit la position du client");
+        // Un AddOn agit sur les fenêtres par leur nom d'Archonia ou leur alias façon WoW.
+        mgr.run_script(
+            r#"
+            assert(Minimap == MiniMap and Minimap:GetWidth() == 200)
+            Minimap:ClearAllPoints()
+            Minimap:SetPoint("TOPLEFT", UIParent, "TOPLEFT", 10, -10)
+            MainMenuBar:SetAlpha(0.5)
+        "#,
+        )
+        .unwrap();
+        // Le client continue d'envoyer sa position : elle ne remplace plus celle de l'AddOn.
+        mgr.set_native_defaults(&[("MiniMap".into(), minimap)]);
+        mgr.layout(1920.0, 1080.0, &measure);
+        assert_eq!(state("MiniMap").rect, Some(Rect { left: 10.0, bottom: 870.0, width: 200.0, height: 200.0 }));
+        assert_eq!(state("UI_CharInfo").alpha, 0.5);
+        mgr.run_script("Minimap:Hide()").unwrap();
+        assert!(!state("MiniMap").shown);
     }
 
     #[test]

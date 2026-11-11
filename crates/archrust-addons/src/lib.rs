@@ -29,11 +29,11 @@ pub mod ui;
 
 pub use manager::{
     AddonError, AddonManager, CameraInfo, EditEvent, HostCommand, HostState, ItemInfo, MonsterTemplateInfo,
-    ItemTemplateInfo, LoadedAddon, PartyMember, PointerInput, UnitInfo,
+    ItemTemplateInfo, LoadedAddon, NativeFrameState, PartyMember, PointerInput, UnitInfo,
 };
 pub use comm::ExtInfo;
 pub use manifest::Manifest;
-pub use ui::{Anchor, FrameKind, FrameNode, TextureSource, UiTree};
+pub use ui::{Anchor, FrameKind, FrameNode, Rect, TextureSource, UiTree};
 
 /// Version d'interface annoncée aux AddOns (`## Interface`).
 pub const INTERFACE_VERSION: u32 = 10000;

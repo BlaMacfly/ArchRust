@@ -2799,6 +2799,10 @@ impl App {
             let target = self.addons.target_cid().filter(|c| *c != me && self.entities.iter().any(|e| e.cid == *c && e.is_player));
             self.trade_frame(target)
         };
+        // Fenêtres natives déplacées, masquées ou estompées par les AddOns (voir `app_addons.rs`).
+        if let Some(ctx) = self.gpu.as_ref().map(|g| g.egui_state.egui_ctx().clone()) {
+            self.sync_native_frames(&ctx);
+        }
 
         let Some(gpu) = &mut self.gpu else {
             return Ok(());

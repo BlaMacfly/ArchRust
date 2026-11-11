@@ -190,6 +190,11 @@ pub struct FrameNode {
     /// Frame du moteur (fenêtre de discussion, panneau d'informations…) : non dessinée par le
     /// moteur d'AddOns, mais `Show`/`Hide`/`SetAlpha` pilotent le panneau natif.
     pub builtin: bool,
+    /// Fenêtre native du client (minicarte, barre de compétences, inventaire…) : frame du moteur
+    /// placée à la position de la fenêtre ; ses ancres, sa visibilité et son alpha la déplacent, la
+    /// masquent ou l'estompent. Contrairement aux autres frames du moteur, elle reçoit la souris si
+    /// l'AddOn l'active (pour la glisser), même au-dessus de l'interface native.
+    pub native: bool,
     /// Texture unie (`SetColorTexture`, ou texture WoW sans équivalent) : remplie de `color`.
     pub solid: bool,
     /// FontString créée par `GetFontString` sur un bouton : elle reçoit le texte du bouton.
@@ -268,6 +273,7 @@ impl FrameNode {
             numeric: false,
             password: false,
             builtin: false,
+            native: false,
             solid: false,
             font_string: None,
             measured: None,
@@ -435,11 +441,38 @@ pub struct UiTree {
     pub rects: Vec<Option<Rect>>,
     pub screen: (f32, f32),
     pub moving: Option<Moving>,
+    /// Ancre posée par le moteur sur chaque fenêtre native ([`UiTree::set_native_default`]) : tant
+    /// que la frame la garde, le moteur la suit ; un `SetPoint` ou un glisser de l'AddOn la remplace.
+    native_anchor: HashMap<usize, Anchor>,
 }
 
 impl UiTree {
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// Place et dimensionne une fenêtre native à sa position du moment dans le client (`rect`, en
+    /// coordonnées d'AddOn), sauf si l'AddOn l'a déplacée : il garde alors la main sur ses ancres.
+    pub fn set_native_default(&mut self, id: usize, rect: Rect) {
+        let anchor = Anchor {
+            point: "BOTTOMLEFT".into(),
+            relative_to: None,
+            relative_point: "BOTTOMLEFT".into(),
+            x: rect.left,
+            y: rect.bottom,
+        };
+        let engine_owned = {
+            let f = &self.frames[id];
+            f.anchors.is_empty() || self.native_anchor.get(&id).is_some_and(|a| f.anchors.len() == 1 && f.anchors[0] == *a)
+        };
+        let f = &mut self.frames[id];
+        f.width = rect.width;
+        f.height = rect.height;
+        if engine_owned {
+            f.anchors = vec![anchor.clone()];
+            self.native_anchor.insert(id, anchor);
+        }
+        self.dirty = true;
     }
 
     pub fn create(
@@ -720,8 +753,8 @@ impl UiTree {
         order.into_iter().rev().find(|&id| {
             let f = &self.frames[id];
             !f.kind.is_region()
-                && strata_rank(self.effective_strata(id)) >= min_strata
-                && !f.builtin
+                && (f.native || strata_rank(self.effective_strata(id)) >= min_strata)
+                && (!f.builtin || f.native)
                 && f.mouse_enabled
                 && f.name.as_deref() != Some("UIParent")
                 && self.is_visible(id)
