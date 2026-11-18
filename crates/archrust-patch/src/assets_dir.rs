@@ -62,6 +62,7 @@ pub fn synthesize<'a>(id: &str, name: &str, category: Category, files: impl Into
             description: "Pack sans manifeste : chaque fichier remplace l'asset qui porte son nom".into(),
             min_archrust: String::new(),
             homepage: String::new(),
+            default_enabled: true,
         },
         textures: Vec::new(),
         models: Vec::new(),
@@ -105,7 +106,8 @@ fn files_in(dir: &Path, depth: usize) -> Vec<String> {
 
 fn loaded(manifest: Manifest, source: PatchSource) -> LoadedPatch {
     let priority = manifest.patch.priority;
-    let mut lp = LoadedPatch { manifest, source, enabled: true, problems: Vec::new(), official: false, priority };
+    let enabled = manifest.patch.default_enabled;
+    let mut lp = LoadedPatch { manifest, source, enabled, problems: Vec::new(), official: false, priority };
     lp.check();
     lp
 }

@@ -654,6 +654,13 @@ absents du client (Archonia ne peut pas les afficher non plus) : 21 modèles `d%
 `d00015d6.ecl`, 463 objets, et les ailes `d0001000.ecl`), la texture `bake`, 67 icônes `l%07x`
 (sonde : `examples/item_texture_audit.rs`).
 
+Cube à damier orange et bleu à la place d'un personnage : ce n'est pas un modèle de repli du client
+mais le pack d'exemple `patches/exemple-gltf` (`[[models]]` sur `character/a0000060.ecl`, le `DFF` des
+TID 96 — chevalier humain, tous les personnages de joueur de cette classe — 403 et 404). Il était actif
+dès que le client trouvait le dossier `patches/` du dépôt (lancement depuis `ArchRust/`, journal
+« packs : … exemple-gltf (10) »). Les trois exemples portent désormais `default_enabled = false` dans
+leur `patch.toml` et ne s'appliquent que si le joueur les active (Options ou `packs.toml`).
+
 ## HUD en jeu (interface Archonia)
 
 Implémenté dans `crates/archrust-engine/src/hud.rs` d'après les fichiers du client et Archonia.exe.
@@ -2803,3 +2810,33 @@ ArchRust garde le protocole d'Archonia ; ce qui suit ne demande aucun changement
   en or + CC, AgpmTitle op 11.
 - Maison des ventes : Webzen a une op de plus (4), ses ops 5 à 8 sont les 4 à 7 d'Archonia.
 - Messages de guilde : même table 0-96, plus 97 chez Webzen ; ArchRust affiche maintenant 90 à 97.
+
+## Détails du protocole et fermeture des fenêtres (relevé du 16 novembre 2026)
+
+Relevé dans Archonia et dans le client de Webzen ; ArchRust garde le protocole d'Archonia.
+- **AgpmItem op 31 → op 32** (renseignements sur un objet) : le client demande par op 31 `{2 IID, 3 TID,
+  4 CID, 12 genre}` l'infobulle d'un objet qu'il ne détient pas — genre 8 pour un lien d'objet cliqué dans la
+  discussion (IID seul ; Archonia FUN_140511500, Webzen 0x70c7f6), genre 4 pour un bouton d'objet d'une fenêtre
+  (TID seul, FUN_14088c530). Le serveur répond op 32 : champs de l'op 0 sans place, statut ni propriétaire, genre
+  au champ 12 ; le client en garde l'infobulle (rappel 106 d'AgpmItem, FUN_1401c5fa0). ArchCore répond ; ArchRust
+  n'a pas encore de liens d'objet dans la discussion et n'envoie donc pas l'op 31.
+- **AgpmItem op 7** (retour refusé) : sans effet visible dans les deux clients (abonné vide). **Op 8** : renoncer
+  au retour d'un aller-retour (AgcmItem FUN_1406480c0, seulement si le retour est possible) ; ArchCore oublie le
+  point et répond op 10. Le client refuse lui-même un parchemin au mort, transformé, en combat ou en zone de PvP
+  (`Item_TryUseTelScrollOnCombat`, FUN_14053d0b0).
+- **AgpmItem champ 25** (Archonia) : texte `a,b;c,d;…;[x,y,…]` lu par FUN_1401a81c0 (couples entier, entier
+  64 bits ; liste d'entiers entre crochets) et rangé dans l'état de conversion de l'objet ; **champ 26** : identifiant
+  64 bits de l'objet (`+0x58`).
+- **Fermeture en s'éloignant** (position du joueur à l'ouverture, distance au sol tronquée) : dialogue d'un PNJ
+  (FUN_1406cafa0), banque (FUN_1406f7150), portails, raffinage, coiffeur, forge, maîtres de compétences, gacha,
+  production, guilde : **150** ; réparation (FUN_140651e50) : **100** ; deux fenêtres non rattachées avec certitude (près du calendrier et de la
+  transmogrification) : 400.
+  `QuestAccept_UI` ne se ferme pas : AgcmUIQuest2 retient la position (`+0x185c`) sans jamais la relire. Aucun
+  contrôle trouvé pour la boutique. ArchRust applique 150 au dialogue et à la banque (`app_npc.rs`), ne ferme plus
+  la fenêtre des quêtes, et garde sa distance au PNJ pour la boutique.
+- **Octet de rendu `+0x72` = 3** (objet du monde à quêtes, FUN_1405720f0 → FUN_1404c75a0) : teinte de l'éclairage
+  ambiant du modèle (FUN_1404cf710) ; la valeur 3 suit un arc-en-ciel animé (FUN_1404c6430) : ambiante de la scène +
+  0,3 × un mélange de 7 couleurs (rouge, orange, jaune, vert, bleu, indigo, violet), une couleur toutes les 2,5 s
+  (0,0004 par ms). Non repris par ArchRust.
+- **Option GFX `WideView`** : sans effet dans Archonia (drapeau AgcmCharacter `+0x770`, FUN_1404a6ad0, lu seulement par
+  la commande `/WIDE` qui l'affiche) ; ArchRust la laisse inactive.

@@ -943,6 +943,8 @@ pub fn sample_patch_manifest() -> &'static str {
     r#"# Patch d'exemple généré par `cargo run -p archrust-engine --example cube_glb -- patches/exemple-gltf`.
 # Remplace le corps du personnage humain par défaut (TID 96 → character/a0000060.ecl) par un cube
 # texturé en GLB. Sert à vérifier le chargeur glTF : `archrust play --no-client --screenshot docs/captures/gltf.png`.
+# Désactivé par défaut (sinon tous les chevaliers humains deviennent des cubes) : l'activer dans la
+# fenêtre Options (Packs) ou dans saved-variables/packs.toml ([[pack]] id = "exemple-gltf", enabled = true).
 
 [patch]
 id = "exemple-gltf"
@@ -951,6 +953,7 @@ version = "0.1.0"
 author = "ArchRust"
 priority = 10
 description = "Cube GLB généré, à la place du modèle du joueur"
+default_enabled = false
 
 [[models]]
 match = "character/a0000060.ecl"
@@ -965,6 +968,13 @@ mod tests {
 
     fn no_neighbour(name: &str) -> Result<Vec<u8>> {
         Err(anyhow!("aucun voisin ({name})"))
+    }
+
+    #[test]
+    fn sample_patch_off_by_default() {
+        let m = archrust_patch::Manifest::parse(sample_patch_manifest()).unwrap();
+        assert!(!m.patch.default_enabled, "le cube ne doit remplacer le chevalier humain que sur demande");
+        assert_eq!(m.models[0].pattern, "character/a0000060.ecl");
     }
 
     #[test]

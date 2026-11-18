@@ -11,7 +11,8 @@
 //! priority = 200        # facultatif : remplace la priorité du manifeste
 //! ```
 //!
-//! Un pack absent du fichier garde son état par défaut (activé, priorité du manifeste). Supprimer le
+//! Un pack absent du fichier garde son état par défaut (`default_enabled` du manifeste, activé s'il est
+//! absent ; priorité du manifeste). Supprimer le
 //! fichier rétablit la configuration par défaut.
 
 use serde::{Deserialize, Serialize};

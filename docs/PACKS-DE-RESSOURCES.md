@@ -71,6 +71,7 @@ category = "graphics"           # "graphics", "sounds" ou "mixed" ; absent : dé
 priority = 50                   # plus grand = appliqué par-dessus les autres packs de la communauté
 min_archrust = "0.1"            # version minimale du client ; un client plus ancien le signale
 homepage = "https://…"          # facultatif
+default_enabled = false         # facultatif : pack inactif tant que le joueur ne l'active pas (défaut : true)
 
 [[textures]]                    # remplace une texture par son nom dans le client
 match = "a0057aab"              # nom exact, ou motif avec * (ex. "a0057*") ; casse indifférente
@@ -189,5 +190,15 @@ Les réglages de la fenêtre Options s'appliquent, eux, au redémarrage.
 | [`patches/exemple-texture/`](../patches/exemple-texture/patch.toml) | graphismes | remplace une texture : la carte de couleurs du secteur `R325,389` par un damier vert et or |
 | [`patches/exemple-son/`](../patches/exemple-son/patch.toml) | sons | remplace un son : `sound/ui/block.wav` par un bip (`/sound sound/ui/block.wav` pour l'entendre) |
 | [`patches/exemple-gltf/`](../patches/exemple-gltf/patch.toml) | graphismes | remplace le modèle du personnage humain par défaut par un cube glTF |
+
+Les exemples sont **désactivés par défaut** (`default_enabled = false`) : ils changent visiblement le jeu
+(le cube remplace le corps de tous les chevaliers humains, TID 96, ainsi que des PNJ 403 et 404). Pour les
+essayer, cochez-les dans **Options** → **Packs de ressources**, ou ajoutez dans `saved-variables/packs.toml` :
+
+```toml
+[[pack]]
+id = "exemple-gltf"
+enabled = true
+```
 
 Les fichiers des exemples sont des créations originales (domaine public).

@@ -40,6 +40,19 @@ pub struct PatchInfo {
     pub min_archrust: String,
     #[serde(default)]
     pub homepage: String,
+    /// État du pack tant que le joueur n'a rien choisi (`packs.toml`, fenêtre Options). Faux pour les
+    /// exemples de `patches/` : ils ne doivent pas changer le jeu (le cube de `exemple-gltf` remplaçait
+    /// le corps des chevaliers humains, TID 96) quand le client est lancé depuis le dépôt.
+    #[serde(default = "yes", skip_serializing_if = "is_true")]
+    pub default_enabled: bool,
+}
+
+fn yes() -> bool {
+    true
+}
+
+fn is_true(b: &bool) -> bool {
+    *b
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -224,6 +237,11 @@ file = "npc.ini"
         let back = Manifest::parse(&m.to_toml()).unwrap();
         assert_eq!(back, m);
         assert_eq!(m.category(), Category::Graphics, "ini/npc.ini n'est pas un son");
+        assert!(m.patch.default_enabled, "activé par défaut si le manifeste ne dit rien");
+        assert!(!m.to_toml().contains("default_enabled"));
+        let off = Manifest::parse("[patch]\nid = \"e\"\nname = \"E\"\ndefault_enabled = false\n").unwrap();
+        assert!(!off.patch.default_enabled);
+        assert_eq!(Manifest::parse(&off.to_toml()).unwrap(), off);
     }
 
     #[test]

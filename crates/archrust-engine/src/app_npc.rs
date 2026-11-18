@@ -53,8 +53,18 @@ use std::time::{Duration, Instant};
 const TALK_RANGE: f32 = 600.0;
 /// Point d'arrivée de l'approche : 80 % de la portée.
 const APPROACH_RANGE: f32 = TALK_RANGE * 0.8;
-/// Au-delà, les fenêtres du PNJ se ferment.
+/// Au-delà, la boutique se ferme (distance au PNJ ; aucun contrôle de distance relevé dans la boutique
+/// d'Archonia).
 const CLOSE_RANGE: f32 = 2200.0;
+/// Dialogue et banque : fermés quand le joueur s'est éloigné de 150 unités au sol (x, z) de l'endroit
+/// où ils se sont ouverts (Archonia, dialogue FUN_1406cafa0, banque FUN_1406f7150 : distance tronquée
+/// en entier, `>= 150`). `QuestAccept_UI` ne se ferme pas en s'éloignant : AgcmUIQuest2 retient la
+/// position à l'ouverture (`+0x185c`, FUN_140656590) mais ne la relit jamais.
+const CLOSE_MOVE: f32 = 150.0;
+/// Le joueur, en `me`, s'est éloigné de `CLOSE_MOVE` du point d'ouverture `at` (distance au sol tronquée).
+fn moved_away(at: Vec3, me: Vec3) -> bool {
+    Vec3::new(me.x - at.x, 0.0, me.z - at.z).length().trunc() >= CLOSE_MOVE
+}
 /// Banque : 4 pages de 7 lignes × 4 colonnes.
 const BANK_ROWS: i16 = 7;
 const BANK_COLS: i16 = 4;
@@ -147,6 +157,9 @@ pub struct NpcGlue {
     /// PNJ vers lequel le joueur marche pour lui parler.
     approach: Option<(i32, Instant)>,
     dialog: Option<i32>,
+    /// Position du joueur à l'ouverture du dialogue et de la banque (`CLOSE_MOVE`).
+    dialog_at: Option<Vec3>,
+    bank_at: Option<Vec3>,
     /// Réplique affichée (change à chaque ouverture).
     line: usize,
     shop: Option<Shop>,
@@ -1159,21 +1172,15 @@ impl App {
             }
         }
         let far = |s: &Self, cid: Option<i32>| cid.is_some_and(|c| dist(s, c).is_none_or(|d| d > CLOSE_RANGE));
-        if far(self, self.npc.dialog) {
+        let moved = |at: Option<Vec3>| at.is_some_and(|a| moved_away(a, me));
+        if self.npc.dialog.is_some() && moved(self.npc.dialog_at) {
             self.npc.dialog = None;
         }
         if far(self, self.npc.shop.as_ref().map(|s| s.npc)) {
             self.npc.shop = None;
         }
-        if far(self, self.npc.bank) {
+        if self.npc.bank.is_some() && moved(self.npc.bank_at) {
             self.npc.bank = None;
-        }
-        if far(self, self.npc.quest_npc) {
-            self.npc.quest_npc = None;
-        }
-        // Objet à quêtes : même distance, mesurée depuis l'objet.
-        if self.npc.quest_object.is_some_and(|(_, _, at)| Vec3::new(at.x - me.x, 0.0, at.z - me.z).length() > CLOSE_RANGE) {
-            self.npc.quest_object = None;
         }
     }
 
@@ -1183,6 +1190,7 @@ impl App {
         match ev {
             NpcEvent::DialogGranted { npc } => {
                 self.npc.dialog = Some(npc);
+                self.npc.dialog_at = self.player.as_ref().map(|p| p.position);
                 self.npc.line += 1;
             }
             NpcEvent::ShopItem { npc, iid, tid, price, count, grid } => {
@@ -1219,6 +1227,7 @@ impl App {
             NpcEvent::Sold { result } => log::info!("boutique : vente, résultat {result}"),
             NpcEvent::BankOpened { npc } => {
                 self.npc.bank = Some(npc);
+                self.npc.bank_at = self.player.as_ref().map(|p| p.position);
                 self.ui.show_inventory = true;
             }
             NpcEvent::QuestWindow { npc } => {
@@ -1574,6 +1583,14 @@ impl App {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn fermeture_en_s_eloignant() {
+        let at = Vec3::new(1000.0, 50.0, -2000.0);
+        assert!(!moved_away(at, Vec3::new(1149.9, 900.0, -2000.0)), "149,9 tronqué à 149, hauteur ignorée");
+        assert!(moved_away(at, Vec3::new(1150.0, 50.0, -2000.0)));
+        assert!(moved_away(at, Vec3::new(1000.0 + 106.1, 50.0, -2000.0 - 106.1)), "150 en diagonale");
+    }
 
     #[test]
     fn lignes_du_suivi() {

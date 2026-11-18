@@ -11,6 +11,7 @@ category = "sounds"
 priority = 50
 description = "Remplace un son : celui du blocage dans l'interface"
 min_archrust = "0.1"
+default_enabled = false   # exemple : à activer dans la fenêtre Options (Packs) ou dans packs.toml
 
 [[sounds]]
 path = "ui/block.wav"

@@ -185,10 +185,11 @@ impl PatchStack {
         let manifest = Manifest::parse(&manifest_text)
             .map_err(|e| PatchError::Manifest(path.to_path_buf(), e))?;
         let priority = manifest.patch.priority;
+        let enabled = manifest.patch.default_enabled;
         let mut lp = LoadedPatch {
             manifest,
             source,
-            enabled: true,
+            enabled,
             problems: Vec::new(),
             official: false,
             priority,
@@ -250,7 +251,7 @@ impl PatchStack {
     pub fn apply_settings(&mut self, settings: &PackSettings) {
         for p in &mut self.patches {
             let choice = settings.get(&p.manifest.patch.id);
-            p.enabled = choice.map(|c| c.enabled).unwrap_or(true);
+            p.enabled = choice.map(|c| c.enabled).unwrap_or(p.manifest.patch.default_enabled);
             p.priority = choice.and_then(|c| c.priority).unwrap_or(p.manifest.patch.priority);
         }
         self.sort();
@@ -263,7 +264,7 @@ impl PatchStack {
             packs: self
                 .patches
                 .iter()
-                .filter(|p| !p.enabled || p.priority != p.manifest.patch.priority)
+                .filter(|p| p.enabled != p.manifest.patch.default_enabled || p.priority != p.manifest.patch.priority)
                 .map(|p| PackChoice {
                     id: p.manifest.patch.id.clone(),
                     enabled: p.enabled,
@@ -514,6 +515,36 @@ mod tests {
         assert_eq!(fresh.in_category(Category::Graphics).len(), 3);
         assert!(fresh.in_category(Category::Sounds).is_empty());
         let _ = off;
+    }
+
+    /// Pack d'exemple (`default_enabled = false`) : inactif tant que le joueur ne l'active pas, et le
+    /// choix de l'activer est enregistré (écart à l'état par défaut).
+    #[test]
+    fn example_pack_off_by_default() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().join("patches");
+        let dir = root.join("exemple-gltf");
+        std::fs::create_dir_all(dir.join("models")).unwrap();
+        std::fs::write(
+            dir.join("patch.toml"),
+            "[patch]\nid = \"exemple-gltf\"\nname = \"Cube\"\ndefault_enabled = false\n\n[[models]]\nmatch = \"character/a0000060.ecl\"\nfile = \"models/cube.glb\"\n",
+        )
+        .unwrap();
+        std::fs::write(dir.join("models/cube.glb"), b"glTF").unwrap();
+        write_patch(&root, "commu", 1, "a0057aab");
+        let mut stack = PatchStack::load_dir(&root);
+        assert!(stack.resolve(ResourceKind::Model, "character/a0000060.ecl").is_none(), "exemple inactif au chargement");
+        assert!(stack.resolve(ResourceKind::Texture, "a0057aab").is_some(), "pack ordinaire actif");
+        assert!(stack.settings().packs.is_empty(), "rien à enregistrer : état par défaut");
+        stack.apply_settings(&PackSettings::default());
+        assert!(stack.resolve(ResourceKind::Model, "character/a0000060.ecl").is_none(), "réinitialisation");
+        stack.set_enabled("exemple-gltf", true);
+        let saved = stack.settings();
+        assert_eq!(saved.packs.len(), 1, "{saved:?}");
+        assert!(saved.packs[0].enabled);
+        let mut fresh = PatchStack::load_dir(&root);
+        fresh.apply_settings(&saved);
+        assert_eq!(fresh.resolve(ResourceKind::Model, "character/a0000060.ecl").unwrap().patch_id, "exemple-gltf");
     }
 
     #[test]

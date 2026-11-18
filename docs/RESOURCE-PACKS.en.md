@@ -71,6 +71,7 @@ category = "graphics"           # "graphics", "sounds" or "mixed"; missing: infe
 priority = 50                   # higher = applied over the other community packs
 min_archrust = "0.1"            # minimum client version; an older client reports it
 homepage = "https://…"          # optional
+default_enabled = false         # optional: pack stays off until the player enables it (default: true)
 
 [[textures]]                    # replaces a texture by its client name
 match = "a0057aab"              # exact name, or a pattern with * (e.g. "a0057*"); case-insensitive
@@ -189,5 +190,15 @@ the Options window apply on restart.
 | [`patches/exemple-texture/`](../patches/exemple-texture/patch.toml) | graphics | replaces one texture: the `R325,389` sector colour map with a green and gold checkerboard |
 | [`patches/exemple-son/`](../patches/exemple-son/patch.toml) | sounds | replaces one sound: `sound/ui/block.wav` with a beep (`/sound sound/ui/block.wav` to hear it) |
 | [`patches/exemple-gltf/`](../patches/exemple-gltf/patch.toml) | graphics | replaces the default human character model with a glTF cube |
+
+The examples are **disabled by default** (`default_enabled = false`): they visibly change the game (the
+cube replaces the body of every human Knight, TID 96, and of NPCs 403 and 404). To try them, tick them in
+**Options** → **Packs de ressources**, or add to `saved-variables/packs.toml`:
+
+```toml
+[[pack]]
+id = "exemple-gltf"
+enabled = true
+```
 
 The example files are original creations (public domain).

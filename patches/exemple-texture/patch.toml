@@ -11,6 +11,7 @@ category = "graphics"
 priority = 50
 description = "Remplace une texture : la carte de couleurs du secteur d'Anchorville"
 min_archrust = "0.1"
+default_enabled = false   # exemple : à activer dans la fenêtre Options (Packs) ou dans packs.toml
 
 [[textures]]
 match = "R325,389"
