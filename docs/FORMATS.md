@@ -1535,7 +1535,7 @@ AgcmUICashMall (`FUN_1407197b0`) ; ops 1 à 7 identiques au client de Webzen. Co
   nombre, prix, « Buy » ; badges du genre `CONTROL_StatusBase` en (96, 88) ; pages et page maxi) et `UI_CashMallBuy`
   (prix, Cash utilisé en rouge s'il manque, reste, « Purchase » / « Cancel »). Ouverture par `MenuBtnRoniMall` du menu
   Chantra. Écartés : « Buy Credits » (paiement réel), recherche, offre du jour.
-- Commandes d'essai : `/boutique`, `/boutique onglet <n>`, `/boutique acheter <produit>`.
+- Commandes d'essai : `/boutiquecash` (ou `/cashmall`), `/boutiquecash onglet <n>`, `/boutiquecash acheter <produit>` ; `/boutique` reste la boutique des PNJ.
 
 ## Production (récolte, cuisine, alchimie)
 

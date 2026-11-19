@@ -162,10 +162,10 @@ impl App {
         }
     }
 
-    /// Commandes (essais sans souris, `--exec`) : `/boutique` (ouvre ou ferme), `/boutique onglet <n>`,
-    /// `/boutique acheter <produit>`.
+    /// Commandes (essais sans souris, `--exec`) : `/boutiquecash` ou `/cashmall` (ouvre ou ferme),
+    /// `/boutiquecash onglet <n>`, `/boutiquecash acheter <produit>`. `/boutique` reste celle des PNJ (`app_npc.rs`).
     pub(super) fn cash_mall_slash(&mut self, cmd: &str, arg: &str) -> bool {
-        if cmd != "/boutique" {
+        if !matches!(cmd, "/boutiquecash" | "/cashmall") {
             return false;
         }
         let mut words = arg.split_whitespace();
