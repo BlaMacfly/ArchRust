@@ -28,6 +28,8 @@ pub enum ItemUi {
     DropOnEquip(ItemDrag),
     /// Maj + clic : séparer une pile.
     Split(i32),
+    /// Ctrl + clic : lien de l'objet dans la saisie de discussion ouverte (FUN_14053dc90).
+    Link(i32),
     /// Objet du sac lâché sur la corbeille : demander confirmation.
     Destroy(i32),
     /// Bouton « Sell » de l'inventaire : boîte de ventes (voir `app_auction.rs`).
@@ -100,7 +102,7 @@ pub(super) fn bag_grid(
     let rows = ((c.size[1] + gy) / (ch + gy)).floor().max(1.0) as i16;
     let layer = hud.inventory_layer;
     let dragging = dragged_now(ctx);
-    let shift = ui.input(|i| i.modifiers.shift);
+    let (shift, ctrl) = ui.input(|i| (i.modifiers.shift, i.modifiers.ctrl));
     for row in 0..rows {
         for col in 0..cols {
             let cell = layout.rect(origin, [c.pos[0] + col as f32 * (cw + gx), c.pos[1] + row as f32 * (ch + gy)], [cw, ch]);
@@ -125,6 +127,8 @@ pub(super) fn bag_grid(
                 }
                 if resp.secondary_clicked() {
                     out.push(ItemUi::Activate { iid: item.id, worn: false });
+                } else if resp.clicked() && ctrl {
+                    out.push(ItemUi::Link(item.id));
                 } else if resp.clicked() && shift && count > 1 {
                     out.push(ItemUi::Split(item.id));
                 }

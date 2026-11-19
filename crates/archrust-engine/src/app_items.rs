@@ -6,7 +6,8 @@
 //! * glisser dans le sac : déplacer (sur une pile du même objet : les réunir) ; glisser vers un
 //!   emplacement de la fenêtre du personnage : porter ; glisser un objet porté vers le sac : le
 //!   ranger à cette place ; lâcher un objet du sac hors des fenêtres : le détruire (après accord) ;
-//! * Maj + clic sur une pile : la séparer (quantité choisie, case libre trouvée par le client).
+//! * Maj + clic sur une pile : la séparer (quantité choisie, case libre trouvée par le client) ;
+//! * Ctrl + clic, saisie de discussion ouverte : lien de l'objet dans la saisie (voir `chat_links`).
 //!
 //! Touches et commandes : `C` fenêtre du personnage (`/perso`) ; `/utiliser nom` (`/use`),
 //! `/porter nom` (`/equip`), `/ranger nom` (`/unequip`), `/detruire nom` (`/destroy`),
@@ -159,6 +160,8 @@ fn request(glue: &mut ItemsGlue, assets: &Assets, items: &HashMap<i32, ItemRecor
         ItemUi::SalesBox => None,
         // Traité par l'inventaire Cash (`app_petbag.rs`).
         ItemUi::CashInventory => None,
+        // Traité par `panel` (saisie de discussion).
+        ItemUi::Link(_) => None,
     }
 }
 
@@ -179,9 +182,16 @@ pub fn panel(
     hud: &mut HudState,
     assets: &Assets,
     net: Option<&NetLink>,
-    _ui: &mut UiState,
+    ui: &mut UiState,
 ) {
     for r in requests {
+        // Lien d'objet : nom du modèle (`AgpdItemTemplate+0x58`), comme FUN_14053dc90.
+        if let ItemUi::Link(iid) = r {
+            if let Some(name) = items.get(&iid).and_then(|i| i.template_id).and_then(|t| item_name_for_tid(assets, t)) {
+                ui.insert_item_link(iid, &name);
+            }
+            continue;
+        }
         match request(glue, assets, items, r) {
             Some(Ok(cmd)) => send(net, cmd),
             // Refus du client : Archonia n'affiche rien.

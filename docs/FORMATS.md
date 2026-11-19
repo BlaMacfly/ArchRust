@@ -2840,7 +2840,14 @@ Relevé dans Archonia et dans le client de Webzen ; ArchRust garde le protocole 
   discussion (IID seul ; Archonia FUN_140511500, Webzen 0x70c7f6), genre 4 pour un bouton d'objet d'une fenêtre
   (TID seul, FUN_14088c530). Le serveur répond op 32 : champs de l'op 0 sans place, statut ni propriétaire, genre
   au champ 12 ; le client en garde l'infobulle (rappel 106 d'AgpmItem, FUN_1401c5fa0). ArchCore répond ; ArchRust
-  n'a pas encore de liens d'objet dans la discussion et n'envoie donc pas l'op 31.
+  l'envoie pour les liens d'objet de la discussion (voir ci-dessous).
+- **Liens d'objet de la discussion** (relevé du 19 novembre 2026) : Ctrl + clic sur un objet du sac, saisie ouverte,
+  ajoute `<ITEM::IID::nom du modèle>` à la saisie (FUN_14053dc90 → FUN_140787f20 ; Ctrl = `DAT_140f8b0a0`/`a4`
+  d'après FUN_14054da00). À la lecture (FUN_14079c040 → FUN_14079ad60), un morceau `<…>` ou `[…]` qui contient
+  `ITEM` devient un bouton `<nom>` au fond `0x400d4ef9` ; IID entre le 1ᵉʳ et le 2ᵉ `::`. Clic (FUN_140511500) :
+  objet déjà reçu → infobulle, sinon op 31 genre 8. Autres balises du même lecteur : `MAPPOS::x::y::z::nom`
+  (genre 2) et `[nom]` (genre 3, discussion de guilde), non reprises. Archonia lie aussi ses messages de butin
+  (« Gained <C%u><ITEM::…><C16777215> », FUN_1407a5fe0). Essai : `cargo run -p archrust-netclient --example item_link`.
 - **AgpmItem op 7** (retour refusé) : sans effet visible dans les deux clients (abonné vide). **Op 8** : renoncer
   au retour d'un aller-retour (AgcmItem FUN_1406480c0, seulement si le retour est possible) ; ArchCore oublie le
   point et répond op 10. Le client refuse lui-même un parchemin au mort, transformé, en combat ou en zone de PvP

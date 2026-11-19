@@ -18,9 +18,11 @@
 //! AGPMITEM op 6                                                  revenir au point mémorisé
 //! AGPMITEM op 15 (4 CID, 5 montant)                              jeter de l'or (`Inventory_DropMoneyYes`,
 //!                                                                0x1407bc3a0 → 0x1401b9c10) ; pas de réponse
+//! AGPMITEM op 31 (2 IID, 3 TID, 4 CID, 12 genre)                 renseignements sur un objet d'autrui
+//!   ← op 32 (2 IID, 3 TID, 5 quantité, 12 genre renvoyé, 20 options) ; rien si l'objet a disparu
 //! ```
 
-use archrust_protocol::packet::{build_mini, sparse, Value};
+use archrust_protocol::packet::{build_mini, decode_mini, sparse, Value};
 use archrust_protocol::schema::{main, mini, Schema};
 
 /// Opérations AgpmItem de l'inventaire.
@@ -39,6 +41,18 @@ pub mod op {
     pub const RETURN_DISABLED: u8 = 10;
     pub const SPLIT: u8 = 17;
     pub const DESTROY: u8 = 21;
+    /// Renseignements sur un objet que le client ne détient pas (client → serveur, Archonia FUN_140649610).
+    pub const REQUEST_INFO: u8 = 31;
+    /// Renseignements sur un objet (serveur → client, rappel 106 d'AgpmItem, FUN_1401c5fa0).
+    pub const INFO: u8 = 32;
+}
+
+/// Genres d'une demande de renseignements (champ 12, renvoyé tel quel par le serveur).
+pub mod info_kind {
+    /// Lien d'objet de la discussion : IID seul (Archonia FUN_1407a5f60).
+    pub const CHAT_LINK: i32 = 8;
+    /// Bouton d'objet d'une fenêtre : TID seul (FUN_14088c530).
+    pub const TEMPLATE: i32 = 4;
 }
 
 /// Statuts AgpmItem d'un objet du joueur.
@@ -69,6 +83,42 @@ pub enum ItemCommand {
     Return,
     /// Jeter `amount` pièces d'or au sol (montant > 0, borné à l'or porté par le moteur).
     DropMoney(i32),
+    /// Renseignements sur un objet qu'on ne détient pas : `iid` (lien de la discussion) ou `tid` seul.
+    RequestInfo { iid: i32, tid: i32, kind: i32 },
+}
+
+/// Renseignements sur un objet (AGPMITEM op 32) : objet d'un autre joueur, ou modèle seul (`iid` 0).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ItemInfo {
+    pub iid: i32,
+    pub tid: i32,
+    pub count: Option<i32>,
+    /// Options tirées (champ 20).
+    pub options: Vec<u16>,
+    /// Genre de la demande (champ 12, voir [`info_kind`]).
+    pub kind: i32,
+}
+
+/// AGPMITEM op 32, s'il en est un.
+pub fn info_of(values: &[Option<Value>]) -> Option<ItemInfo> {
+    let int = |i: usize| values.get(i).and_then(Option::as_ref).and_then(Value::as_i64);
+    if int(0) != Some(op::INFO as i64) {
+        return None;
+    }
+    let options = values
+        .get(20)
+        .and_then(Option::as_ref)
+        .and_then(Value::as_bytes)
+        .and_then(|b| decode_mini(mini::ITEM_OPTION, b).ok())
+        .map(|(_, v)| v.iter().filter_map(|t| t.as_ref().and_then(Value::as_i64)).filter(|t| *t > 0).map(|t| t as u16).collect())
+        .unwrap_or_default();
+    Some(ItemInfo {
+        iid: int(2).unwrap_or(0) as i32,
+        tid: int(3).filter(|t| *t > 0)? as i32,
+        count: int(5).map(|c| c as i32),
+        options,
+        kind: int(12).unwrap_or(0) as i32,
+    })
 }
 
 fn grid_value(grid: Grid) -> Value {
@@ -115,6 +165,10 @@ pub fn command_packet(cmd: &ItemCommand, me: i32) -> (&'static Schema, Vec<Optio
         ItemCommand::Destroy(iid) => sparse(s, &[(0, Value::U8(op::DESTROY)), (2, Value::I32(*iid)), (4, Value::I32(me))]),
         ItemCommand::Return => sparse(s, &[(0, Value::U8(op::USE_RETURN)), (4, Value::I32(me))]),
         ItemCommand::DropMoney(amount) => sparse(s, &[(0, Value::U8(op::DROP_MONEY)), (4, Value::I32(me)), (5, Value::I32(*amount))]),
+        ItemCommand::RequestInfo { iid, tid, kind } => sparse(
+            s,
+            &[(0, Value::U8(op::REQUEST_INFO)), (2, Value::I32(*iid)), (3, Value::I32(*tid)), (4, Value::I32(me)), (12, Value::I32(*kind))],
+        ),
     };
     (s, values)
 }
@@ -149,5 +203,20 @@ mod tests {
         assert_eq!((int(&v, 0), int(&v, 4), int(&v, 5), int(&v, 2)), (Some(15), Some(7), Some(1500), None));
         assert_eq!(int(&command_packet(&ItemCommand::Destroy(42), 7).1, 0), Some(21));
         assert_eq!(int(&command_packet(&ItemCommand::Return, 7).1, 0), Some(6));
+        let (_, v) = command_packet(&ItemCommand::RequestInfo { iid: 77, tid: 0, kind: info_kind::CHAT_LINK }, 7);
+        assert_eq!((int(&v, 0), int(&v, 2), int(&v, 3), int(&v, 4), int(&v, 12)), (Some(31), Some(77), Some(0), Some(7), Some(8)));
+    }
+
+    #[test]
+    fn renseignements_sur_un_objet() {
+        let m = mini::ITEM_OPTION;
+        let opts = Value::Packet(build_mini(m, &sparse(m, &[(0, Value::U16(12)), (1, Value::U16(3002))])).unwrap());
+        let s = main::ITEM;
+        let v = sparse(s, &[(0, Value::U8(op::INFO)), (2, Value::I32(77)), (3, Value::I32(1234)), (5, Value::I32(3)), (12, Value::I32(8)), (20, opts)]);
+        assert_eq!(info_of(&v), Some(ItemInfo { iid: 77, tid: 1234, count: Some(3), options: vec![12, 3002], kind: 8 }));
+        // Modèle seul (genre 4) : ni IID ni options.
+        let v = sparse(s, &[(0, Value::U8(op::INFO)), (3, Value::I32(555)), (12, Value::I32(4))]);
+        assert_eq!(info_of(&v), Some(ItemInfo { iid: 0, tid: 555, count: None, options: vec![], kind: 4 }));
+        assert_eq!(info_of(&sparse(s, &[(0, Value::U8(0)), (2, Value::I32(1)), (3, Value::I32(2))])), None);
     }
 }

@@ -51,6 +51,9 @@ pub struct UiState {
     pub chat_scroll: usize,
     /// Donner le focus à la saisie de discussion à la prochaine image (touche Entrée).
     pub chat_focus: bool,
+    /// Saisie de discussion ouverte : prise par le clavier, pas encore validée ni abandonnée (Entrée,
+    /// Échap). Condition du lien d'objet par Ctrl + clic (`AgcmUIChatting2+0x1b10`, FUN_14053dc90).
+    pub chat_active: bool,
     /// Destinataire de la barre de chuchotement (`Chat_Input_Private`) ; `None` : barre normale.
     pub whisper_target: Option<String>,
     /// Dernier joueur qui nous a chuchoté (`/r`).
@@ -139,6 +142,7 @@ impl Default for UiState {
             alert: None,
             chat_scroll: 0,
             chat_focus: false,
+            chat_active: false,
             escape_open: false,
             whisper_target: None,
             last_whisper: None,
@@ -375,6 +379,18 @@ impl UiState {
         }
     }
 
+    /// Ctrl + clic sur un objet (FUN_14053dc90 → FUN_140787f20) : `<ITEM::IID::nom>` ajouté à la saisie ouverte,
+    /// qui reprend le clavier. Faux (rien d'ajouté) saisie fermée ou texte trop long.
+    pub fn insert_item_link(&mut self, iid: i32, name: &str) -> bool {
+        let link = crate::chat_links::item_link(iid, name);
+        if !self.chat_active || self.chat_input.len() + link.len() > archrust_netclient::chat::MAX_MESSAGE {
+            return false;
+        }
+        self.chat_input.push_str(&link);
+        self.chat_focus = true;
+        true
+    }
+
     /// Lignes visibles dans l'onglet choisi.
     fn chat_view(&self) -> Vec<&String> {
         let mask = self.chat_tabs.get(self.chat_tab).map_or(u16::MAX, |t| t.1);
@@ -396,6 +412,8 @@ pub struct UiActions {
     pub cancel_creation: bool,
     pub delete_character: Option<String>,
     pub chat: Option<String>,
+    /// Lien d'objet cliqué dans la discussion : IID et coin bas gauche du lien (FUN_140511500, genre 1).
+    pub item_link: Option<(i32, egui::Pos2)>,
     pub console: Option<String>,
     pub clicked_frames: Vec<usize>,
 }
@@ -413,7 +431,24 @@ pub fn colored_job_with(
     max_width: f32,
     line: &str,
 ) -> egui::text::LayoutJob {
+    colored_job_links(font, base, max_width, line).0
+}
+
+/// Fond d'un lien d'objet (`0x400d4ef9` du bouton du lien, FUN_14079c040).
+fn item_link_back() -> Color32 {
+    Color32::from_rgba_unmultiplied(0x0d, 0x4e, 0xf9, 0x40)
+}
+
+/// Mise en forme d'une ligne et de ses liens d'objet (`<ITEM::IID::nom>` affiché `<nom>`, voir `chat_links`) :
+/// rang de la section du lien dans le `LayoutJob`, IID.
+pub fn colored_job_links(
+    font: egui::FontId,
+    base: Color32,
+    max_width: f32,
+    line: &str,
+) -> (egui::text::LayoutJob, Vec<(u32, i32)>) {
     let mut job = egui::text::LayoutJob::default();
+    let mut links = Vec::new();
     for (seg, c) in color_segments(line) {
         let color = c.map_or(base, |c| {
             Color32::from_rgb(
@@ -422,18 +457,36 @@ pub fn colored_job_with(
                 (c[2] * 255.0) as u8,
             )
         });
-        job.append(
-            &seg,
-            0.0,
-            egui::TextFormat {
+        for piece in crate::chat_links::split(&seg) {
+            let mut format = egui::TextFormat {
                 font_id: font.clone(),
                 color,
                 ..Default::default()
-            },
-        );
+            };
+            if let Some(iid) = piece.iid {
+                format.background = item_link_back();
+                links.push((job.sections.len() as u32, iid));
+            }
+            job.append(&piece.text, 0.0, format);
+        }
     }
     job.wrap.max_width = max_width;
-    job
+    (job, links)
+}
+
+/// Rectangles (un par rangée) de la section `section` d'une galerie, relatifs à la galerie.
+fn section_rects(galley: &egui::Galley, section: u32) -> Vec<egui::Rect> {
+    let mut out = Vec::new();
+    for row in &galley.rows {
+        let r = row
+            .glyphs
+            .iter()
+            .filter(|g| g.section_index == section)
+            .map(|g| g.logical_rect())
+            .reduce(|a, b| a.union(b));
+        out.extend(r);
+    }
+    out
 }
 
 /// Retire les codes de couleur WoW (`|cffRRGGBB…|r`) et `|n`.
@@ -924,24 +977,43 @@ fn archonia_chat(
     }
     let end = lines.len() - st.chat_scroll.min(lines.len());
     let mut y = bottom - 2.0;
-    for l in lines[..end].iter().rev() {
-        let job = colored_job_with(
+    for (n, l) in lines[..end].iter().enumerate().rev() {
+        let (job, links) = colored_job_links(
             font.clone(),
             Color32::from_rgb(235, 235, 235),
             lines_rect.width() - 6.0,
             l,
         );
-        let galley = ctx.fonts(|f| f.layout_job(job));
+        let galley = ctx.fonts(|f| f.layout_job(job.clone()));
         y -= galley.size().y + 1.0;
         if y < lines_rect.top() {
             break;
         }
         let pos = egui::Pos2::new(lines_rect.left() + 3.0, y);
+        // Ombre : même texte, sans le fond des liens.
+        let mut shadow_job = job;
+        shadow_job.sections.iter_mut().for_each(|s| s.format.background = Color32::TRANSPARENT);
+        let shadow = ctx.fonts(|f| f.layout_job(shadow_job));
         painter.galley_with_override_text_color(
             pos + egui::Vec2::splat(1.0),
-            galley.clone(),
+            shadow,
             Color32::from_black_alpha(210),
         );
+        // Liens d'objet : boutons sur le texte (clic : FUN_140511500, genre 1).
+        for (k, (section, iid)) in links.iter().enumerate() {
+            for (r, rect) in section_rects(&galley, *section).into_iter().enumerate() {
+                let rect = rect.translate(pos.to_vec2());
+                egui::Area::new(egui::Id::new(("archonia-chat-link", n, k, r)))
+                    .fixed_pos(rect.min)
+                    .order(egui::Order::Middle)
+                    .show(ctx, |ui| {
+                        let resp = ui.allocate_rect(rect, egui::Sense::click()).on_hover_cursor(egui::CursorIcon::PointingHand);
+                        if resp.clicked() {
+                            actions.item_link = Some((*iid, rect.left_bottom()));
+                        }
+                    });
+            }
+        }
         painter.galley(pos, galley, Color32::WHITE);
     }
     if st.chat_scroll > 0 {
@@ -991,6 +1063,12 @@ fn archonia_chat(
             );
             if std::mem::take(&mut st.chat_focus) {
                 resp.request_focus();
+            }
+            if resp.has_focus() {
+                st.chat_active = true;
+            }
+            if resp.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter) || i.key_pressed(egui::Key::Escape)) {
+                st.chat_active = false;
             }
             if resp.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter)) {
                 let text = std::mem::take(&mut st.chat_input);

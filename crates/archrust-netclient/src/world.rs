@@ -261,6 +261,8 @@ pub enum WorldEvent {
         for_view: bool,
     },
     ItemChanged(ItemRecord),
+    /// Renseignements sur un objet qu'on ne détient pas (AGPMITEM op 32).
+    ItemInfo(crate::items::ItemInfo),
     /// Inventaire/équipement complet transmis dans OPT_VIEW op 2 à l'entrée en jeu.
     ItemsSnapshot(Vec<ItemRecord>),
     LoadingPosition(Vec3),
@@ -1019,6 +1021,10 @@ pub fn translate(p: &Incoming) -> WorldEvent {
             tid: p.get(3).and_then(Value::as_i64).map(|v| v as i32),
             user: p.get(4).or(p.get(12)).and_then(Value::as_i64).map(|v| v as i32),
             cooldown_ms: p.get(18).and_then(Value::as_i64).map(|v| v as i32),
+        },
+        packet_type::ITEM if p.op() == Some(crate::items::op::INFO as i64) => match p.packet.as_ref().and_then(|packet| crate::items::info_of(&packet.values)) {
+            Some(info) => WorldEvent::ItemInfo(info),
+            None => WorldEvent::Unhandled { packet_type: p.packet_type, op: p.op() },
         },
         packet_type::ITEM if matches!(p.op(), Some(9 | 10)) => WorldEvent::ReturnPoint {
             enabled: p.op() == Some(crate::items::op::RETURN_ENABLED as i64),

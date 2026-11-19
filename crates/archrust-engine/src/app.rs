@@ -80,6 +80,8 @@ mod refinery_glue;
 mod gacha_glue;
 #[path = "app_cashmall.rs"]
 mod cashmall_glue;
+#[path = "app_iteminfo.rs"]
+mod iteminfo_glue;
 #[path = "app_quest_object.rs"]
 mod quest_object_glue;
 
@@ -370,6 +372,8 @@ pub struct App {
     gacha: gacha_glue::GachaGlue,
     /// Boutique Cash : `UI_CashMall`, `UI_CashMallBuy`, voir `app_cashmall.rs`.
     cash_mall: cashmall_glue::CashMallGlue,
+    /// Liens d'objet de la discussion : objets d'autrui (AGPMITEM op 31 → 32), voir `app_iteminfo.rs`.
+    item_info: iteminfo_glue::ItemInfoGlue,
     /// Objets du monde à quêtes (fonction 27 des obj*.ini), voir `app_quest_object.rs`.
     quest_objects: quest_object_glue::QuestObjectGlue,
     /// Production : récolte, cuisine, alchimie, PNJ de production, voir `app_product.rs`.
@@ -560,6 +564,7 @@ impl App {
             refinery: Default::default(),
             gacha: Default::default(),
             cash_mall: Default::default(),
+            item_info: Default::default(),
             quest_objects: Default::default(),
             product: Default::default(),
             buddy: Default::default(),
@@ -1803,6 +1808,8 @@ impl App {
             }
             // Objet utilisé, point de retour d'un parchemin (voir `app_items.rs`).
             ev @ (WorldEvent::ItemUsed { .. } | WorldEvent::ReturnPoint { .. }) => self.on_item_event(ev),
+            // Renseignements sur un objet d'autrui, lien de la discussion (voir `app_iteminfo.rs`).
+            WorldEvent::ItemInfo(info) => self.on_item_info(info),
             // Dialogue, boutique, banque, quêtes (voir `app_npc.rs`).
             WorldEvent::Npc(ev) => self.on_npc_event(ev),
             // Compétences : liste, niveau, lancement, instructeur (voir `app_skills.rs`).
@@ -1967,6 +1974,7 @@ impl App {
                 self.trade_reset();
                 self.auction_reset();
                 self.itemset_reset();
+                self.item_info.reset();
                 log::info!("déconnecté : {why}");
                 self.ui.status = format!("déconnecté : {why}");
                 self.phase = Phase::Login;
@@ -2061,6 +2069,9 @@ impl App {
                 // Passe par `SendChatMessage` des AddOns (surchargeable, accrochable).
                 self.send_typed_chat(text);
             }
+        }
+        if let Some((iid, at)) = actions.item_link {
+            self.on_item_link(iid, at);
         }
         if let Some(src) = actions.console {
             if let Err(e) = self.addons.run_script(&src) {
@@ -3000,6 +3011,8 @@ impl App {
                 // Boutique Cash (`UI_CashMall`, `UI_CashMallBuy`) et ses messages.
                 let dead = self.hud.stats.hp == Some(0);
                 cashmall_glue::panel(ctx, &mut self.cash_mall, &mut self.hud, &self.assets, self.net.as_ref(), dead);
+                // Infobulle d'un lien d'objet de la discussion (voir `app_iteminfo.rs`).
+                iteminfo_glue::panel(ctx, &mut self.item_info, &mut self.hud);
                 // Barre du ramassage sur un objet du monde (voir `app_quest_object.rs`).
                 quest_object_glue::panel(ctx, &mut self.quest_objects, &mut self.hud, &self.assets, self.net.as_ref());
                 // Réparation (`UI_Repair`) et silhouette d'usure (`UI_EquipStatus`).

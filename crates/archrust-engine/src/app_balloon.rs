@@ -109,7 +109,8 @@ impl App {
         if !self.options.display.balloon_chat || !(channel == 0 || channel == 1) || cid == 0 || message.trim().is_empty() {
             return;
         }
-        let lines = split_lines(message);
+        // Liens d'objet affichés `<nom>` (voir `chat_links`), comme dans la discussion.
+        let lines = split_lines(&crate::chat_links::display(message));
         if lines.is_empty() {
             return;
         }

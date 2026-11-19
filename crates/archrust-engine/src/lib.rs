@@ -27,6 +27,7 @@ pub mod audio;
 pub mod boards;
 pub mod camera;
 pub mod catalog;
+pub mod chat_links;
 pub mod decor;
 pub mod gltf_model;
 pub mod grass;

@@ -535,6 +535,15 @@ pub(super) struct SocketFill {
 }
 
 impl ConvertGlue {
+    /// Options d'un objet reçues hors de l'op 0 (op 32 d'un objet d'autrui).
+    pub(super) fn set_options(&mut self, iid: i32, options: Vec<u16>) {
+        if options.is_empty() {
+            self.options.remove(&iid);
+        } else {
+            self.options.insert(iid, options);
+        }
+    }
+
     fn data(&mut self, assets: &Assets) -> &ConvertData {
         self.data.get_or_insert_with(|| load_data(assets))
     }
@@ -1028,6 +1037,14 @@ impl App {
                 }
             }
         }
+    }
+
+    /// Infobulle d'un objet qui n'est pas dans l'inventaire (objet d'autrui reçu par l'op 32).
+    pub(super) fn item_tooltip_lines(&mut self, item: &ItemRecord) -> Vec<(String, Color32)> {
+        let assets = self.assets.clone();
+        let who = Wearer::of(&assets, self.player.as_ref().map(|p| p.tid).unwrap_or(0), self.hud.stats.level.unwrap_or(1) as i64);
+        let labels = [378, 262, 379, 380].map(|id| super::npc_glue::sysstr(&assets, id).unwrap_or_default());
+        self.convert.tooltip(&assets, item, who, &labels)
     }
 
     /// À chaque image : infobulles des objets (à leur changement), fenêtre fermée en s'éloignant du
