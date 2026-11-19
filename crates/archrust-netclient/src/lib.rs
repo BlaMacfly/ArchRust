@@ -13,6 +13,7 @@ pub mod auction;
 pub mod battleground;
 pub mod boss;
 pub mod buddy;
+pub mod cash_mall;
 pub mod chat;
 pub mod combat;
 pub mod connection;

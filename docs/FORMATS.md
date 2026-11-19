@@ -1516,6 +1516,27 @@ contrôle AcUIGacha (`FUN_140880a60`, `FUN_140880df0`). Code : `archrust_netclie
 - **Écart** : Archonia pose le drapeau 0x400 du personnage pendant l'arrêt (sens non relevé) ; ArchRust ne bloque que
   les nouvelles demandes. Commandes d'essai : `/gacha`, `/gacha start`, `/gacha fermer`.
 
+## Boutique Cash (type 0x2E)
+
+AgpmCashMall (réception `FUN_140285e90`, envois `FUN_14049dfe0`, `14049e1b0`, `14049e2b0`, `14049e330`) et
+AgcmUICashMall (`FUN_1407197b0`) ; ops 1 à 7 identiques au client de Webzen. Code : `archrust_netclient::cash_mall`,
+`app_cashmall.rs`, `hud_cashmall.rs`.
+
+- **Ops** : ouverture = op 7 (version connue, champ 2) puis op 1 (onglet, champ 4) ; le serveur répond op 2 (champ 6,
+  texte ASCII « `nom;id,id,…,:` » par onglet) et op 3 (champ 7, « `id,TID,nombre,prix,genre,description:` » par produit,
+  lu `%d,%d,%d,%I64d,%d,`, description de la dernière virgule aux deux-points ; la table des produits est remplacée à
+  chaque op 3). Achat : op 4 (2 version, 5 produit, 8 : 0) → op 5 champ 1 : 1 réussite, 2 Cash, 3 inventaire, 4 liste
+  périmée (onglet redemandé), 5, 6, 9, 10 (salles de jeu, limite) : textes des événements `CashMallBuyResult*` de
+  l'`[EventMap]`, `{{…}}` remplacé par le produit. Op 6 : revoir le solde (au plus une fois par seconde). Op 8 (offre du
+  jour d'Archonia) : non gérée.
+- **Solde** : Cash du personnage, champ 10 d'AGPMCHARACTER (« KeepCash : %lld », `FUN_140719f70`).
+- **Fenêtres** : `UI_CashMall` (onglets `CONTROL_24674`…, 12 produits par page dans la grille `CONTROL_14249`
+  `List=3:0:4:0`, cases de 240 × 163 = taille / nombre, icône, nom du modèle coupé à 21 caractères + « ... » au-delà de 24,
+  nombre, prix, « Buy » ; badges du genre `CONTROL_StatusBase` en (96, 88) ; pages et page maxi) et `UI_CashMallBuy`
+  (prix, Cash utilisé en rouge s'il manque, reste, « Purchase » / « Cancel »). Ouverture par `MenuBtnRoniMall` du menu
+  Chantra. Écartés : « Buy Credits » (paiement réel), recherche, offre du jour.
+- Commandes d'essai : `/boutique`, `/boutique onglet <n>`, `/boutique acheter <produit>`.
+
 ## Production (récolte, cuisine, alchimie)
 
 Tables TSV d'`ini/` (CP949, en-tête sur la première ligne), lues comme Archonia :

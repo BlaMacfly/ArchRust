@@ -78,6 +78,8 @@ mod convert_glue;
 mod refinery_glue;
 #[path = "app_gacha.rs"]
 mod gacha_glue;
+#[path = "app_cashmall.rs"]
+mod cashmall_glue;
 #[path = "app_quest_object.rs"]
 mod quest_object_glue;
 
@@ -366,6 +368,8 @@ pub struct App {
     refinery: refinery_glue::RefineryGlue,
     /// Socles de gacha (« Fortune Gate ») : fenêtre `UI_Gacha`, bande, voir `app_gacha.rs`.
     gacha: gacha_glue::GachaGlue,
+    /// Boutique Cash : `UI_CashMall`, `UI_CashMallBuy`, voir `app_cashmall.rs`.
+    cash_mall: cashmall_glue::CashMallGlue,
     /// Objets du monde à quêtes (fonction 27 des obj*.ini), voir `app_quest_object.rs`.
     quest_objects: quest_object_glue::QuestObjectGlue,
     /// Production : récolte, cuisine, alchimie, PNJ de production, voir `app_product.rs`.
@@ -555,6 +559,7 @@ impl App {
             necklace: Default::default(),
             refinery: Default::default(),
             gacha: Default::default(),
+            cash_mall: Default::default(),
             quest_objects: Default::default(),
             product: Default::default(),
             buddy: Default::default(),
@@ -1824,6 +1829,7 @@ impl App {
             WorldEvent::Convert(ev) => self.on_convert_event(ev),
             WorldEvent::Refinery(ev) => self.on_refinery_event(ev),
             WorldEvent::Gacha(ev) => self.on_gacha_event(ev),
+            WorldEvent::CashMall(ev) => self.on_cash_mall_event(ev),
             WorldEvent::Product(ev) => self.on_product_event(ev),
             // Amis et ignorés (0x2B), courrier (0x2D) : voir `app_buddy.rs`, `app_mail.rs`.
             WorldEvent::Buddy(ev) => self.on_buddy_event(ev),
@@ -2230,6 +2236,8 @@ impl App {
             _ if self.quest_object_slash(cmd) => {}
             // Gacha : /gacha, /gacha start, /gacha fermer (voir `app_gacha.rs`).
             _ if self.gacha_slash(cmd, arg) => {}
+            // Boutique Cash : /boutique, /boutique onglet <n>, /boutique acheter <produit> (voir `app_cashmall.rs`).
+            _ if self.cash_mall_slash(cmd, arg) => {}
             // Production : /production, /recettes (voir `app_product.rs`).
             _ if self.product_slash(cmd) => {}
             // Amis, ignorés, courrier : /amis, /ignores, /courrier (voir `app_buddy.rs`, `app_mail.rs`).
@@ -2506,6 +2514,7 @@ impl App {
                 crate::hud::MenuUi::Help => self.help.toggle(),
                 crate::hud::MenuUi::Exit => self.hotkey_toggle_exit(),
                 crate::hud::MenuUi::CashInventory => self.petbag.toggle_cash(),
+                crate::hud::MenuUi::CashMall => self.cash_mall.toggle(self.net.as_ref()),
                 crate::hud::MenuUi::MiniMap => self.minimap_toggle(),
             }
         }
@@ -2988,6 +2997,9 @@ impl App {
                 refinery_glue::panel(ctx, &mut self.refinery, &mut item_requests, &self.items, &mut self.hud, &self.assets, self.net.as_ref(), &mut self.ui);
                 // Gacha (`UI_Gacha`) et ses messages.
                 gacha_glue::panel(ctx, &mut self.gacha, &mut self.hud, &self.assets, self.net.as_ref());
+                // Boutique Cash (`UI_CashMall`, `UI_CashMallBuy`) et ses messages.
+                let dead = self.hud.stats.hp == Some(0);
+                cashmall_glue::panel(ctx, &mut self.cash_mall, &mut self.hud, &self.assets, self.net.as_ref(), dead);
                 // Barre du ramassage sur un objet du monde (voir `app_quest_object.rs`).
                 quest_object_glue::panel(ctx, &mut self.quest_objects, &mut self.hud, &self.assets, self.net.as_ref());
                 // Réparation (`UI_Repair`) et silhouette d'usure (`UI_EquipStatus`).

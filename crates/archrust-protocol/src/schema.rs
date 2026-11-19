@@ -101,6 +101,8 @@ pub mod packet_type {
     pub const EVENT_REFINERY: u8 = 0x3f;
     /// AgpmEventGacha : socles de tirage des villes (« Fortune Gate », fonction d'objet 38).
     pub const EVENT_GACHA: u8 = 0x57;
+    /// AgpmCashMall : boutique Cash (`UI_CashMall`).
+    pub const CASH_MALL: u8 = 0x2e;
     pub const EVENT_GUILD: u8 = 0x39;
     pub const GUILD_WAREHOUSE: u8 = 0x54;
     pub const EVENT_NPC_DIALOG: u8 = 0x37;
@@ -573,6 +575,20 @@ pub mod main {
         f!(MemoryBlock),    // 8 op 1 : TID de la bande (u32 à la suite)
     ]);
 
+    // AgpmCashMall (0x2E) — drapeaux 2 (réception 0x140285e90 d'Archonia) : ops 1 produits d'un onglet, 2 onglets,
+    // 3 produits, 4 achat, 5 résultat, 6 solde, 7 ouverture, 8 offre du jour (voir `archrust_netclient::cash_mall`).
+    schema!(pub CASH_MALL = "AGPMCASHMALL", T::CASH_MALL, 2, [
+        f!(Int8),           // 0 opération
+        f!(Int8),           // 1 op 5 : résultat
+        f!(UInt8),          // 2 version des listes
+        f!(Int32),          // 3 CID
+        f!(Int32),          // 4 onglet
+        f!(Int32),          // 5 produit
+        f!(MemoryBlock),    // 6 op 2 : onglets
+        f!(MemoryBlock),    // 7 op 3 : produits
+        f!(Int32),          // 8 op 4 : 0 ou 2
+    ]);
+
     // AgpmEventQuest (0x3E) — drapeaux 1 : op, événement, CID, entier.
     schema!(pub EVENT_QUEST = "AGPMEVENTQUEST", T::EVENT_QUEST, 1, [f!(Int8), f!(Packet), f!(Int32), f!(Int32)]);
 
@@ -787,6 +803,7 @@ pub mod main {
             T::REFINERY => REFINERY,
             T::EVENT_REFINERY => EVENT_REFINERY,
             T::EVENT_GACHA => EVENT_GACHA,
+            T::CASH_MALL => CASH_MALL,
             T::GUILD => GUILD,
             T::EVENT_GUILD => EVENT_GUILD,
             T::GUILD_WAREHOUSE => GUILD_WAREHOUSE,

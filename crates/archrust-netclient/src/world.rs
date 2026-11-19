@@ -364,6 +364,8 @@ pub enum WorldEvent {
     Refinery(crate::refinery::RefineryEvent),
     /// Socles de gacha : fenêtre, objet tiré, refus (voir `gacha`).
     Gacha(crate::gacha::GachaEvent),
+    /// Boutique Cash : onglets, produits, résultat d'un achat (voir `cash_mall`).
+    CashMall(crate::cash_mall::CashMallEvent),
     /// Compétences : liste, niveau, lancement, instructeur (voir `skills`).
     Skill(crate::skills::SkillEvent),
     /// Portails : accord, départ, chargement fini (voir `teleport`).
@@ -483,6 +485,8 @@ pub enum Command {
     Refinery(crate::refinery::RefineryCommand),
     /// Socles de gacha : demande, tirage (voir `gacha`).
     Gacha(crate::gacha::GachaCommand),
+    /// Boutique Cash : ouverture, onglet, achat, solde (voir `cash_mall`).
+    CashMall(crate::cash_mall::CashMallCommand),
     /// Lancement et apprentissage des compétences (voir `skills`).
     Skill(crate::skills::SkillCommand),
     /// Demande au portail, destination choisie (voir `teleport`).
@@ -860,6 +864,10 @@ pub fn translate(p: &Incoming) -> WorldEvent {
     // Socles de gacha (voir `gacha`).
     if let Some(ev) = p.packet.as_ref().and_then(|packet| crate::gacha::translate(p.packet_type, &packet.values)) {
         return WorldEvent::Gacha(ev);
+    }
+    // Boutique Cash (voir `cash_mall`).
+    if let Some(ev) = p.packet.as_ref().and_then(|packet| crate::cash_mall::translate(p.packet_type, &packet.values)) {
+        return WorldEvent::CashMall(ev);
     }
     // Réparation (voir `repair`), montures (voir `ride`).
     if let Some(ev) = p.packet.as_ref().and_then(|packet| crate::repair::translate(p.packet_type, &packet.values)) {
@@ -1802,6 +1810,16 @@ impl WorldClient {
                         Some(Command::Gacha(c)) => {
                             let (schema, values) = crate::gacha::command_packet(&c, self.cid);
                             self.conn.send(schema, &values).await
+                        }
+                        Some(Command::CashMall(c)) => {
+                            let mut sent = Ok(());
+                            for (schema, values) in crate::cash_mall::command_packets(&c, self.cid) {
+                                sent = self.conn.send(schema, &values).await;
+                                if sent.is_err() {
+                                    break;
+                                }
+                            }
+                            sent
                         }
                         Some(Command::Skill(c)) => {
                             let (schema, values) = crate::skills::command_packet(&c, self.cid);

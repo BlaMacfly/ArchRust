@@ -5,8 +5,8 @@
 //! « Inventaire » et « Groupe ».
 //!
 //! Écart : seules les entrées dont la fenêtre existe dans ArchRust sont affichées (quêtes,
-//! inventaire, personnage, compétences de combat et de production, amis, ignorés, courrier, guilde, groupe, options, aide, menu `UI_EXIT`, inventaire
-//! Cash du menu Chantra) ; un bouton sans entrée gérée (monde) reste inactif.
+//! inventaire, personnage, compétences de combat et de production, amis, ignorés, courrier, guilde, groupe, options, aide, menu `UI_EXIT`, boutique et
+//! inventaire Cash du menu Chantra) ; un bouton sans entrée gérée (monde) reste inactif.
 
 use super::npc_ui::{button, window};
 use super::*;
@@ -40,6 +40,8 @@ pub enum MenuUi {
     Exit,
     /// Inventaire Cash (`UI_CashInven`, `MenuBtnRoniInventory` « Chantra Bag », `CInven_UIOpen`).
     CashInventory,
+    /// Boutique Cash (`UI_CashMall`, `MenuBtnRoniMall`, `CashMallOpenUI`).
+    CashMall,
     /// Minicarte ouverte ou fermée (`MenuBtnMiniMap`, `MiniMap_ToggleUI`).
     MiniMap,
 }
@@ -59,8 +61,8 @@ const MENUS: [(&str, &str, &[(&str, MenuUi)]); 5] = [
     // Monde : la minicarte (`MenuBtnMiniMap`, `MiniMap_ToggleUI`) ; le radar d'Archonia et la carte du monde (deux
     // contrôles `MenuBtnWorld` du même nom) ne sont pas repris ici.
     ("MainBtnWorld", "UI_MainMenuWorld", &[("MenuBtnMiniMap", MenuUi::MiniMap)]),
-    // Boutique Chantra (`CashMallOpenUI`) écartée : seule l'entrée de l'inventaire Cash.
-    ("MainBtnChantra", "UI_MainMenuChantra", &[("MenuBtnRoniInventory", MenuUi::CashInventory)]),
+    // Boutique Chantra (`MenuBtnRoniMall`, `CashMallOpenUI`, voir `app_cashmall.rs`) et inventaire Cash.
+    ("MainBtnChantra", "UI_MainMenuChantra", &[("MenuBtnRoniMall", MenuUi::CashMall), ("MenuBtnRoniInventory", MenuUi::CashInventory)]),
     ("MainBtnOption", "UI_MainMenuOptions", &[("MenuBtnEnvironment", MenuUi::Options), ("MenuBtnHelp", MenuUi::Help), ("MenuBtnExit", MenuUi::Exit)]),
 ];
 

@@ -77,6 +77,10 @@ pub use refinery_ui::{draw_cooldown, draw_recipes, draw_refinery, RecipeUi, Reci
 mod gacha_ui;
 pub use gacha_ui::{draw_gacha, GachaUi, GachaView, CELL as GACHA_CELL};
 
+#[path = "hud_cashmall.rs"]
+mod cashmall_ui;
+pub use cashmall_ui::{draw_cash_mall, CashBuyView, CashCell, CashMallUi, CashMallView, PER_PAGE as CASHMALL_PER_PAGE};
+
 #[path = "hud_repair.rs"]
 mod repair_ui;
 pub use repair_ui::{draw_equip_status, draw_repair, RepairUi, RepairView};
@@ -654,6 +658,7 @@ impl HudState {
                 .chain(convert_ui::CONVERT_WINDOWS.iter())
                 .chain(refinery_ui::REFINERY_WINDOWS.iter())
                 .chain(gacha_ui::GACHA_WINDOWS.iter())
+                .chain(cashmall_ui::CASHMALL_WINDOWS.iter())
                 .chain(repair_ui::REPAIR_WINDOWS.iter())
                 .chain(product_ui::PRODUCT_WINDOWS.iter())
                 .chain(buddy_ui::BUDDY_WINDOWS.iter())
