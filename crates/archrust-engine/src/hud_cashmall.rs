@@ -94,6 +94,13 @@ pub fn cell_origin(list: &UiControl, k: usize) -> [f32; 2] {
     [list.pos[0] + (k % COLUMNS) as f32 * w, list.pos[1] + (k / COLUMNS) as f32 * h]
 }
 
+/// Décalage de la case `k` dans la grille `list`, sans le coin de la grille : à ajouter aux contrôles enfants, dont la
+/// position chargée contient déjà celle de la grille.
+pub fn cell_offset(list: &UiControl, k: usize) -> [f32; 2] {
+    let o = cell_origin(list, k);
+    [o[0] - list.pos[0], o[1] - list.pos[1]]
+}
+
 /// Fenêtre de la boutique et, au-dessus, la confirmation d'achat.
 pub fn draw_cash_mall(ctx: &egui::Context, hud: &mut HudState, assets: &Assets, view: CashMallView, out: &mut Vec<CashMallUi>) {
     let Some(w) = window(hud, assets, "UI_CashMall") else { return };
@@ -125,7 +132,9 @@ pub fn draw_cash_mall(ctx: &egui::Context, hud: &mut HudState, assets: &Assets, 
                     let values = [w.control("CONTROL_COUNT_VALUE"), w.control("CONTROL_9440")];
                     let badges = w.control("CONTROL_27927");
                     for (k, cell) in view.cells.iter().take(PER_PAGE).enumerate() {
-                        let base = cell_origin(c, k);
+                        // Les contrôles de la case ont déjà la position absolue de la grille (`CtrlParent`) : seul le
+                        // décalage de la case s'y ajoute.
+                        let base = cell_offset(c, k);
                         if let Some(bc) = cellc {
                             if let Some((_, tex)) = bc.textures.first() {
                                 control_image(ctx, hud, assets, painter, at(bc, base), bc.size, tex, 1.0);
@@ -149,7 +158,7 @@ pub fn draw_cash_mall(ctx: &egui::Context, hud: &mut HudState, assets: &Assets, 
                         if let (Some(bl), Some(sb)) = (badges, w.control("CONTROL_StatusBase")) {
                             let tex = [0u32, 2, 1, 3, 4, 5, 6].get(cell.kind.max(0) as usize).copied().unwrap_or(0);
                             if let Some((_, t)) = sb.textures.iter().find(|(i, _)| tex != 0 && *i == tex) {
-                                let bb = cell_origin(bl, k);
+                                let bb = cell_offset(bl, k);
                                 control_image(ctx, hud, assets, painter, at(sb, bb), sb.size, t, 1.0);
                             }
                         }
@@ -237,5 +246,10 @@ mod tests {
         assert_eq!(cell_origin(&list, 0), [40.0, 92.0]);
         assert_eq!(cell_origin(&list, 5), [280.0, 255.0]);
         assert_eq!(cell_origin(&list, 11), [760.0, 418.0]);
+        // Dernière case : coin absolu de la grille + décalage, elle finit au bord de la grille (1000, 581).
+        let price = UiControl { pos: [40.0 + 133.0, 92.0 + 67.0], size: [40.0, 18.0], ..Default::default() };
+        let off = cell_offset(&list, 11);
+        assert_eq!(off, [720.0, 326.0]);
+        assert!(price.pos[1] + off[1] + price.size[1] <= list.pos[1] + list.size[1], "prix de la dernière rangée dans la grille");
     }
 }
